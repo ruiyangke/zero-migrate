@@ -1,156 +1,66 @@
-// `@zeroship/migrate` — the fluent-only op-builder DSL implementation
-// (design `2026-06-25-op-dsl-fluent-redesign.md`).
+// The `@zeroship/migrate` op-builder DSL — the engine V8 recorder, the LOCK-STEP
+// twin of `sdks/migrate/src/ops.ts` (design `2026-06-25-op-dsl-fluent-redesign.md`).
+// The Rust runtime `include_str!`s this into V8 to turn a creator's
+// `import { table, t } from "@zeroship/migrate"` migration into the canonical
+// `.ir.json` the lean engine deserializes.
 //
-// This is the TS authoring surface a creator imports:
-//   import { table, t } from "@zeroship/migrate";
+// FLUENT-ONLY: `table()` is the SOLE public entry. The flat op-functions and the
+// `e.*` node helper are GONE (pre-launch, no back-compat). Their op-construction
+// logic survives as the internal `recordX` helpers the handle delegates to, so the
+// emitted wire ops are byte-identical to the pre-redesign flat surface — EXCEPT
+// the C1 FK-actions delta. The `.ir.json` shape is frozen and dialect-neutral; the
+// golden corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip + the
+// variant-exhaustiveness gate are the contract.
 //
-//   export default {
-//     up() {
-//       table("users")
-//         .column("first_name").add({ type: t.text() })
-//         .backfill({ set: { first_name: c => c.fn.splitPart(c("name"), " ", 1) } });
-//     },
-//   };
+// CONTRACT: each terminal RECORDS one canonical op object onto the module-local
+// recording buffer, synchronously. A migration authors inside `up()`/`down()`; the
+// adapter drains the buffer per phase and emits the `.ir.json` envelope. Authoring
+// OUTSIDE an active recorder throws a structured `OP_OUTSIDE_RECORDER`. A selector
+// that is never terminated throws `SELECTOR_NOT_TERMINATED` at DRAIN (§5).
 //
-// It is the typed peer of the engine-embedded recorder
-// (`crates/zeroship-migrate/src/frontend/migrate_ops.js`, which the Rust runtime
-// `include_str!`s into V8 at build/record time). Both emit the IDENTICAL
-// dialect-neutral op objects the closed Rust `Op` enum / `op-ir.schema.json`
-// deserialize — the `.ir.json` wire shape is frozen (byte-identical to the
-// pre-redesign flat surface except the C1 FK-actions delta), and the golden
-// corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
-// contract.
+// CHECKSUM: the JS side NEVER computes the checksum; the Rust engine is the single
+// `Checksum::of_ir` authority. JS emits ops; Rust folds.
 //
-// `table()` is the SOLE public entry. The flat op-functions are GONE from the
-// public API; their op-construction logic survives as the internal `recordX`
-// helpers the handle delegates to (so the IR is unchanged). Every terminal
-// RECORDS one canonical op object onto the ambient per-migration recorder
-// synchronously, returning the handle. Recording OUTSIDE an active recorder
-// throws a structured `OP_OUTSIDE_RECORDER`.
+// WIRE SHAPE: the op-region fields are camelCase (`ifExists`, `cursorColumn`,
+// `batchSize`, `referencesTable`, `onDelete`), matching `op-ir.schema.json`. An
+// absent optional is OMITTED (never `field: undefined`/`null`) so the JCS image
+// matches the Rust `skip_serializing_if` omitted-key image.
 
-import type {
-  BackfillArgs,
-  CheckRef,
-  ColType,
-  ColumnDef as ColumnDefType,
-  ColumnRef,
-  ConstraintRef,
-  CommentTargetArg,
-  CreateRawViewArgs,
-  AlterSequenceArgs,
-  CreateDomainArgs,
-  CreateEnumArgs,
-  CreateSequenceArgs,
-  CreateTablePolicyArgs,
-  CreateTriggerArgs,
-  CreateTableArgs,
-  CreateViewArgs,
-  DelArgs,
-  DomainHandle,
-  DeterminismFinding,
-  DropTablePolicyArgs,
-  DropDomainArgs,
-  DropEnumArgs,
-  DropSequenceArgs,
-  DropViewArgs,
-  ExclusionAddArgs,
-  ExclusionConstraintArgs,
-  ExclusionElementArg,
-  ExclusionRef,
-  Expr,
-  ExprBuilder,
-  ExprChain as ExprChainType,
-  ExprFn,
-  EnumHandle,
-  FnNamespace,
-  ForeignKeyRef,
-  ForeignKeyReference,
-  GeneratedOptions,
-  IdOptions,
-  IdentityOptions,
-  IndexRef,
-  IndexElementArg,
-  InsertArgs,
-  Join,
-  JoinKind,
-  MaskOptions,
-  OrderItem,
-  RefAction,
-  Row,
-  ScalarValue,
-  SelectAst,
-  SelectItem,
-  SequenceHandle,
-  TableHandle,
-  TableOptions,
-  TableStrictness,
-  TableRef,
-  TriggerBodyBuilder,
-  TriggerStmt,
-  TypeLexicon,
-  UniqueRef,
-  UpdateArgs,
-  VectorOptions,
-  ViewHandle,
-  ViewOptions,
-  ViewQueryBuilder,
-} from "./types.js";
+// ---------------------------------------------------------------------------
+// The ambient per-migration recorder (§3.1 / §5). The adapter installs a fresh
+// recorder before each phase. Authoring OUTSIDE an active recorder is a structured
+// error. A handed-out selector that is never terminated is a structured error at
+// DRAIN.
+// ---------------------------------------------------------------------------
 
-import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
+let __active = null;
+const __deferredUpOps = [];
 
-import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
-
-import type { Classification, MaskKind, VectorMetric } from "./generated/ir.js";
-
-type Node = Record<string, unknown>;
-
-// ── The ambient recorder (§3.1 / §5) ──
-
-/** A handed-out, not-yet-terminated selector the recorder tracks (§5). */
-interface PendingSelector {
-  selector: string;
-  name: string;
-  terminated: boolean;
-}
-
-interface Recorder {
-  ops: Node[];
-  /** Every selector the handle handed out this phase, keyed by a monotonic id. */
-  pending: Map<number, PendingSelector>;
-  nextSelectorId: number;
-}
-
-type RecorderPhase = "up" | "down";
-
-let active: Recorder | null = null;
-const deferredUpOps: Node[] = [];
-
-function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
-  const err = new Error(message) as Error & Record<string, unknown>;
+/** Structured error helper — mirrors the machine-readable envelope. */
+function structuredError(code, message, extra) {
+  const err = new Error(message);
   err.code = code;
   if (extra) Object.assign(err, extra);
   return err;
 }
 
-/** Begin a fresh recording buffer (the build evaluator calls this before a phase). */
-export function __begin(phase: RecorderPhase = "up"): void {
-  active = {
-    ops: phase === "up" ? deferredUpOps.map((op) => structuredClone(op)) : [],
+/** Begin a fresh recording buffer (called by the adapter before a phase). */
+export function __begin(phase = "up") {
+  __active = {
+    ops: phase === "up" ? __deferredUpOps.map((op) => structuredClone(op)) : [],
     pending: new Map(),
     nextSelectorId: 0,
   };
 }
 
-/**
- * Drain + return the recorded op list, clearing the active recorder. At DRAIN
- * (not eagerly — so a var-held selector terminated on a later line is fine, §5),
- * any selector that was handed out but never terminated is a hard structured
- * `SELECTOR_NOT_TERMINATED` error.
- */
-export function __drain(): Node[] {
-  if (active === null) return [];
-  const rec = active;
-  active = null;
+/** Drain + return the recorded op list, clearing the active recorder. At DRAIN
+ *  (not eagerly — so a var-held selector terminated on a later line is fine),
+ *  any selector handed out but never terminated is a hard SELECTOR_NOT_TERMINATED
+ *  error. Returns `[]` if no recorder is active. */
+export function __drain() {
+  if (__active === null) return [];
+  const rec = __active;
+  __active = null;
   for (const sel of rec.pending.values()) {
     if (!sel.terminated) {
       throw structuredError(
@@ -169,39 +79,38 @@ export function __drain(): Node[] {
   return rec.ops;
 }
 
-function recorder(): Recorder {
-  if (active === null) {
+function recorder() {
+  if (__active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
       "op authoring called outside an active migration recorder; " +
-        "the table() handle may only be used synchronously inside up()/down()",
-      { suggested_fix: "move the table()/selector calls inside the migration's up()/down() body" },
+        "the table() handle may only be used synchronously inside up()/down() " +
+        "(not at module top level or after the phase returns)",
+      {
+        suggested_fix:
+          "move the table()/selector calls inside the migration's up()/down() body",
+      },
     );
   }
-  return active;
+  return __active;
 }
 
-function push(op: Node): Node {
+function push(op) {
   recorder().ops.push(op);
   return op;
 }
 
-function pushOrDeferUp(op: Node): Node {
-  if (active === null) {
-    deferredUpOps.push(op);
+function pushOrDeferUp(op) {
+  if (__active === null) {
+    __deferredUpOps.push(op);
     return op;
   }
-  active.ops.push(op);
+  __active.ops.push(op);
   return op;
 }
 
-/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
-export function __pgPush(op: Node): Node {
-  return push(op);
-}
-
 /** Register a handed-out selector; returns its id (used at terminate). */
-function registerSelector(selector: string, name: string): number {
+function registerSelector(selector, name) {
   const rec = recorder();
   const id = rec.nextSelectorId++;
   rec.pending.set(id, { selector, name, terminated: false });
@@ -209,10 +118,9 @@ function registerSelector(selector: string, name: string): number {
 }
 
 /** Mark a selector terminated; double-terminate is a structured error (§5). */
-function terminateSelector(id: number): void {
+function terminateSelector(id) {
   const rec = recorder();
   const sel = rec.pending.get(id);
-  // `sel` is always present for a live id; defensive only.
   if (sel === undefined) return;
   if (sel.terminated) {
     throw structuredError(
@@ -225,28 +133,30 @@ function terminateSelector(id: number): void {
   sel.terminated = true;
 }
 
-function compact<T extends Record<string, unknown>>(obj: T): T {
+/** Drop keys whose value is `undefined` so an absent optional is OMITTED on the
+ *  wire (never `"k":null`) — the cross-impl determinism contract. */
+function compact(obj) {
   for (const k of Object.keys(obj)) {
     if (obj[k] === undefined) delete obj[k];
   }
   return obj;
 }
 
-function requireString(v: unknown, what: string): asserts v is string {
+function requireString(v, what) {
   if (typeof v !== "string") {
     throw structuredError("OP_INVALID", `${what} must be a string; got ${typeof v}`);
   }
 }
 
-function requireStrictness(v: unknown, what: string): TableStrictness | undefined {
+function requireStrictness(v, what) {
   if (v === undefined) return undefined;
   if (v !== "strict" && v !== "lenient" && v !== "off") {
-    throw structuredError("OP_INVALID", `${what} must be \"strict\", \"lenient\", or \"off\"`);
+    throw structuredError("OP_INVALID", `${what} must be "strict", "lenient", or "off"`);
   }
   return v;
 }
 
-function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
+function requireOptionalBoolean(v, what) {
   if (v === undefined) return undefined;
   if (typeof v !== "boolean") {
     throw structuredError("OP_INVALID", `${what} must be a boolean`);
@@ -254,14 +164,11 @@ function requireOptionalBoolean(v: unknown, what: string): boolean | undefined {
   return v;
 }
 
-function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
+function runtimeOptionsFromCreateArgs(args) {
   const softDelete = requireOptionalBoolean(args.softDelete, "create({ softDelete })");
   const versioning = requireOptionalBoolean(args.versioning, "create({ versioning })");
   const strictness = requireStrictness(args.strictness, "create({ strictness })");
-  const hasOptions =
-    softDelete !== undefined ||
-    versioning !== undefined ||
-    strictness !== undefined;
+  const hasOptions = softDelete !== undefined || versioning !== undefined || strictness !== undefined;
   if (!hasOptions) return undefined;
   return compact({
     softDelete: softDelete ?? false,
@@ -270,19 +177,11 @@ function runtimeOptionsFromCreateArgs(args: CreateTableArgs): Node | undefined {
   });
 }
 
-function runtimeOptionsPatchFromArgs(args: {
-  softDelete?: boolean;
-  versioning?: boolean;
-  strictness?: TableStrictness;
-}): Node {
+function runtimeOptionsPatchFromArgs(args) {
   const softDelete = requireOptionalBoolean(args.softDelete, "setOptions({ softDelete })");
   const versioning = requireOptionalBoolean(args.versioning, "setOptions({ versioning })");
   const strictness = requireStrictness(args.strictness, "setOptions({ strictness })");
-  const patch = compact({
-    softDelete,
-    versioning,
-    strictness,
-  });
+  const patch = compact({ softDelete, versioning, strictness });
   if (Object.keys(patch).length === 0) {
     throw structuredError(
       "OP_INVALID",
@@ -292,7 +191,7 @@ function runtimeOptionsPatchFromArgs(args: {
   return patch;
 }
 
-function requireSafeI64(v: unknown, what: string): number | undefined {
+function requireSafeI64(v, what) {
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isSafeInteger(v)) {
     throw structuredError("OP_INVALID", `${what} must be a JS safe integer; got ${v}`);
@@ -300,12 +199,12 @@ function requireSafeI64(v: unknown, what: string): number | undefined {
   return v;
 }
 
-function requireNullableSafeI64(v: unknown, what: string): number | null | undefined {
+function requireNullableSafeI64(v, what) {
   if (v === null) return null;
   return requireSafeI64(v, what);
 }
 
-function requireSequenceIncrement(v: unknown, what: string): number | undefined {
+function requireSequenceIncrement(v, what) {
   const n = requireSafeI64(v, what);
   if (n === 0) {
     throw structuredError("OP_INVALID", `${what} must be non-zero`);
@@ -313,7 +212,7 @@ function requireSequenceIncrement(v: unknown, what: string): number | undefined 
   return n;
 }
 
-function requireSequenceCache(v: unknown, what: string): number | undefined {
+function requireSequenceCache(v, what) {
   if (v === undefined) return undefined;
   if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) {
     throw structuredError("OP_INVALID", `${what} must be a positive JS safe integer; got ${v}`);
@@ -321,28 +220,25 @@ function requireSequenceCache(v: unknown, what: string): number | undefined {
   return v;
 }
 
-function requireSequenceBounds(min: number | null | undefined, max: number | null | undefined, what: string): void {
+function requireSequenceBounds(min, max, what) {
   if (typeof min === "number" && typeof max === "number" && min > max) {
     throw structuredError("OP_INVALID", `${what}: minValue must be <= maxValue`);
   }
 }
 
-// ── (B) The IMMUTABLE chainable `t.*` lexicon (§4) ──
-
 /** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
- *  spelling of the engine's `VectorMetric` enum. Mirrored here (lock-step with
- *  `migrate_ops.js`) so `t.vector(n, { metric })` rejects an out-of-set metric
- *  with a friendly client-side OP_INVALID; the engine's closed enum stays
- *  authoritative. */
-export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
+ *  spelling of the Rust `VectorMetric` enum (`cosine | l2 | innerProduct`). Mirrored
+ *  here so `t.vector(n, { metric })` rejects an out-of-set metric with a friendly
+ *  client-side OP_INVALID (LOW-1); the engine's closed enum stays authoritative. */
+const VECTOR_METRICS = ["cosine", "l2", "innerProduct"];
 
-/** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the
- *  engine's `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
- *  (`date-year`/`date-decade`); the rest are single camelCase words. Mirrored here
- *  (lock-step with `migrate_ops.js`) so `.mask({ kind, classification })` rejects an
- *  out-of-set token with a friendly client-side OP_INVALID; the engine's closed
- *  enums stay authoritative. */
-export const MASK_KINDS: readonly MaskKind[] = [
+/** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the Rust
+ *  `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
+ *  (`date-year`/`date-decade`) to match the SDK wire form `t.string().mask()` emits;
+ *  the rest are single camelCase words. Mirrored here so `.mask({ kind, classification })`
+ *  rejects an out-of-set token with a friendly client-side OP_INVALID; the engine's
+ *  closed enums stay authoritative. */
+const MASK_KINDS = [
   "full",
   "last4",
   "first4",
@@ -352,75 +248,45 @@ export const MASK_KINDS: readonly MaskKind[] = [
   "date-decade",
   "none",
 ];
-export const MASK_CLASSIFICATIONS: readonly Classification[] = [
-  "public",
-  "pii",
-  "spi",
-  "phi",
-  "pci",
-  "internal",
-];
+const MASK_CLASSIFICATIONS = ["public", "pii", "spi", "phi", "pci", "internal"];
 
-class ColumnDefImpl implements ColumnDefType {
-  readonly _type: ColType;
-  readonly _nullable: boolean;
-  readonly _default: unknown;
-  readonly _primaryKey: boolean;
-  readonly _unique: boolean;
-  // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
-  // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector(n, {metric})`). #174: a standalone column mask (`.mask({…})`).
-  // Absent ⇒ omitted on the wire.
-  readonly _idPrefix: string | undefined;
-  readonly _vectorMetric: string | undefined;
-  readonly _mask: { kind: string; classification: string } | undefined;
-  readonly _generated: { expr: Node; stored: boolean } | undefined;
-  readonly _identity: { always: boolean } | undefined;
+// ===========================================================================
+// (B) The IMMUTABLE chainable `t.*` column-type lexicon (§4). NULLABLE BY
+// DEFAULT; `.notNull()` / `.default(x)` / `.ref(target)` / `.primaryKey()` /
+// `.unique()` opt in. Each modifier returns a FRESH ColumnDef (no receiver
+// mutation), so a hoisted type var is safe to reuse across columns. The
+// options-bag overload and the `string`/`int` aliases are REMOVED (§7).
+// ===========================================================================
 
-  constructor(
-    colType: ColType,
-    fields?: {
-      nullable?: boolean;
-      default?: unknown;
-      primaryKey?: boolean;
-      unique?: boolean;
-      idPrefix?: string;
-      vectorMetric?: string;
-      mask?: { kind: string; classification: string };
-      generated?: { expr: Node; stored: boolean };
-      identity?: { always: boolean };
-    },
-  ) {
+class ColumnDef {
+  /** @param {object} colType the dialect-neutral ColType wire value (§4).
+   *  @param {object} [fields] nullable/default/primaryKey/unique overrides. */
+  constructor(colType, fields) {
     this._type = colType;
-    this._nullable = fields?.nullable ?? true;
-    this._default = fields?.default;
-    this._primaryKey = fields?.primaryKey ?? false;
-    this._unique = fields?.unique ?? false;
-    this._idPrefix = fields?.idPrefix;
-    this._vectorMetric = fields?.vectorMetric;
-    this._mask = fields?.mask;
-    this._generated = fields?.generated;
-    this._identity = fields?.identity;
+    this._nullable = fields && fields.nullable !== undefined ? fields.nullable : true;
+    this._default = fields ? fields.default : undefined;
+    this._primaryKey = fields && fields.primaryKey !== undefined ? fields.primaryKey : false;
+    this._unique = fields && fields.unique !== undefined ? fields.unique : false;
+    // Migration-first P2a (§2b): the declared-only, uncatalogable facets carried
+    // on the IrColumn — the typed-id prefix (`t.id({prefix})`) and the pgvector
+    // distance metric (`t.vector(n, {metric})`). Absent ⇒ omitted on the wire.
+    this._idPrefix = fields ? fields.idPrefix : undefined;
+    this._vectorMetric = fields ? fields.vectorMetric : undefined;
+    // #174: a STANDALONE column mask (`.mask({ kind, classification })`) carried on the
+    // IrColumn. Absent ⇒ omitted on the wire. An encrypted column's auto-mask is IMPLIED
+    // by `t.encrypted()` (the engine re-derives it) — only an explicit mask lands here.
+    this._mask = fields ? fields.mask : undefined;
+    this._generated = fields ? fields.generated : undefined;
+    this._identity = fields ? fields.identity : undefined;
   }
 
   /** Clone with the named fields overridden — the basis of immutability (§4). */
-  private with(over: {
-    type?: ColType;
-    nullable?: boolean;
-    default?: unknown;
-    primaryKey?: boolean;
-    unique?: boolean;
-    idPrefix?: string;
-    vectorMetric?: string;
-    mask?: { kind: string; classification: string };
-    generated?: { expr: Node; stored: boolean };
-    identity?: { always: boolean };
-  }): ColumnDefImpl {
-    return new ColumnDefImpl(over.type ?? this._type, {
-      nullable: over.nullable ?? this._nullable,
+  _with(over) {
+    return new ColumnDef(over.type !== undefined ? over.type : this._type, {
+      nullable: over.nullable !== undefined ? over.nullable : this._nullable,
       default: "default" in over ? over.default : this._default,
-      primaryKey: over.primaryKey ?? this._primaryKey,
-      unique: over.unique ?? this._unique,
+      primaryKey: over.primaryKey !== undefined ? over.primaryKey : this._primaryKey,
+      unique: over.unique !== undefined ? over.unique : this._unique,
       idPrefix: "idPrefix" in over ? over.idPrefix : this._idPrefix,
       vectorMetric: "vectorMetric" in over ? over.vectorMetric : this._vectorMetric,
       mask: "mask" in over ? over.mask : this._mask,
@@ -429,40 +295,39 @@ class ColumnDefImpl implements ColumnDefType {
     });
   }
 
-  /** Internal: carry the typed-id prefix (`t.id({prefix})`). */
-  __withIdPrefix(prefix: string): ColumnDefImpl {
-    return this.with({ idPrefix: prefix });
-  }
-  /** Internal: carry the pgvector distance metric (`t.vector(n, {metric})`). */
-  __withVectorMetric(metric: string): ColumnDefImpl {
-    return this.with({ vectorMetric: metric });
+  notNull() {
+    return this._with({ nullable: false });
   }
 
-  notNull(): ColumnDefImpl {
-    return this.with({ nullable: false });
+  /** `.default(value | { fn: "now" | "genRandomUuid" })` → a structured IrDefault
+   *  (typed literal OR nullary synth scalar) — NEVER raw SQL (property A). */
+  default(value) {
+    return this._with({ default: toIrDefault(value) });
   }
-  default(value: ScalarValue | { fn: "now" | "genRandomUuid" }): ColumnDefImpl {
-    return this.with({ default: toIrDefault(value) });
-  }
-  ref(targetTable: string): ColumnDefImpl {
+
+  /** Re-target a column as a foreign-key reference. */
+  ref(targetTable) {
     requireString(targetTable, "t.*.ref(target)");
-    return this.with({ type: { ref: { references: targetTable } } as ColType });
-  }
-  primaryKey(): ColumnDefImpl {
-    return this.with({ primaryKey: true, nullable: false });
-  }
-  unique(): ColumnDefImpl {
-    return this.with({ unique: true });
+    return this._with({ type: { ref: { references: targetTable } } });
   }
 
-  /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
-   *  the field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask`
-   *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
-   *  `classification` is optional and DEFAULTS to `"pii"` (closed
-   *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector(n, { metric })`:
-   *  a friendly client-side OP_INVALID over the SAME closed set the engine's enums
-   *  enforce authoritatively. */
-  mask(opts: MaskOptions): ColumnDefImpl {
+  primaryKey() {
+    return this._with({ primaryKey: true, nullable: false });
+  }
+
+  unique() {
+    return this._with({ unique: true });
+  }
+
+  /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so the
+   *  field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask` sentinel
+   *  + `_masked` sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is
+   *  required and one of the closed `MASK_KINDS`; `classification` is optional and
+   *  defaults to `"pii"` (the SDK default), one of the closed `MASK_CLASSIFICATIONS`. A
+   *  `.mask()` on an ENCRYPTED column is allowed — it OVERRIDES the auto-mask. The
+   *  closed-set checks mirror `t.vector(n, { metric })`: a friendly client-side
+   *  OP_INVALID over the SAME closed set the engine's enums enforce authoritatively. */
+  mask(opts) {
     if (opts === null || typeof opts !== "object") {
       throw structuredError("OP_INVALID", "t.*.mask(opts): opts must be { kind, classification? }");
     }
@@ -484,60 +349,77 @@ class ColumnDefImpl implements ColumnDefType {
         { classification },
       );
     }
-    return this.with({ mask: { kind: opts.kind, classification } });
+    return this._with({ mask: { kind: opts.kind, classification } });
   }
 
-  generated(expr: ExprFn | ExprChainType | Expr, opts?: GeneratedOptions): ColumnDefImpl {
+  generated(expr, opts) {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.generated(expr, opts): opts must be { virtual?: boolean }");
     }
-    if (opts?.virtual !== undefined && typeof opts.virtual !== "boolean") {
+    if (opts && opts.virtual !== undefined && typeof opts.virtual !== "boolean") {
       throw structuredError("OP_INVALID", "t.*.generated(expr, { virtual }): virtual must be a boolean");
     }
-    return this.with({
-      generated: { expr: resolveExpr(expr as ExprFn | ExprChainType | Node)!, stored: opts?.virtual === true ? false : true },
+    return this._with({
+      generated: { expr: resolveExpr(expr), stored: opts && opts.virtual === true ? false : true },
     });
   }
 
-  identity(opts?: IdentityOptions): ColumnDefImpl {
+  identity(opts) {
     if (opts !== undefined && (opts === null || typeof opts !== "object")) {
       throw structuredError("OP_INVALID", "t.*.identity(opts): opts must be { always?: boolean }");
     }
-    if (opts?.always !== undefined && typeof opts.always !== "boolean") {
+    if (opts && opts.always !== undefined && typeof opts.always !== "boolean") {
       throw structuredError("OP_INVALID", "t.*.identity({ always }): always must be a boolean");
     }
-    return this.with({ identity: { always: opts?.always === true } });
+    return this._with({ identity: { always: opts && opts.always === true ? true : false } });
   }
 
-  __toIrColumn(name: string): Node {
+  /** Reduce to an `IrColumn` (the `createTable` columns[] shape). `name` is the
+   *  map key. `nullable`/`default`/`unique` omitted when at their defaults.
+   *  C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
+   *  `.unique()` and `.primaryKey()` suppresses the redundant column-level UNIQUE
+   *  (lock-step with the addColumn path + the differ). */
+  __toIrColumn(name) {
     return compact({
       name,
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      // C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
-      // `.unique()` and `.primaryKey()` would otherwise carry a redundant
-      // column-level UNIQUE (an extra index/constraint) on top of the table's pk
-      // constraint. Suppress it (lock-step with the addColumn path + the differ,
-      // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
-      // P2a/#174 — carry the declared-only facets onto the wire IrColumn (camelCase
-      // keys `idPrefix`/`vectorMetric`/`mask`, lock-step with `migrate_ops.js`).
-      // Absent ⇒ omitted (compact), so a plain column is byte-identical to the
-      // pre-facet image (checksum-neutral).
+      // Migration-first P2a (§2b): carry the declared-only facets onto the wire
+      // IrColumn so the fold / gen-types (and the runtime under P5) keep the
+      // typed-id brand + the vector metric. The wire KEYS are camelCase
+      // (`idPrefix` / `vectorMetric`) — the op-region nested-field convention the
+      // IrColumn now matches via `#[serde(rename = …)]`, aligning the spelling with
+      // the FieldDescriptor + the design §4. The metric VALUE is the closed
+      // camelCase token (`cosine | l2 | innerProduct`). Absent ⇒ omitted (compact),
+      // so a plain column is byte-identical to the pre-P2a image (checksum-neutral).
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
+      // #174: carry a STANDALONE mask onto the wire IrColumn (`{ kind, classification }`)
+      // so the offline fold + gen-types keep the `MaskedValue<T>` brand and the lower
+      // emits the `__zsmask` sentinel. Absent ⇒ omitted (compact), so a mask-less column
+      // is byte-identical to the pre-mask image (checksum-neutral).
       mask: this._mask,
       generated: this._generated,
       identity: this._identity,
     });
   }
-  __toAddColumnTail(): Node {
-    // #173: a typed-id prefix on an ADDED column is meaningless (an added column is
-    // never the system PK) — `Op::AddColumn` has no `idPrefix` slot. Carrying it
-    // would SILENTLY drop the prefix on the wire (the one outcome the closed-contract
-    // discipline forbids); REFUSE it with a structured OP_INVALID, lock-step with
-    // `migrate_ops.js`.
+
+  /** Reduce to the `addColumn` op tail (`{ type, nullable?, default?, vectorMetric?,
+   *  mask? }`).
+   *
+   *  #173: `Op::AddColumn` NOW carries the `vectorMetric` + `mask` facets (the engine
+   *  Op gained the slots), so a vector / masked ADD COLUMN renders the metric opclass /
+   *  `__zsmask` sentinel instead of silently dropping the facet. They are carried here.
+   *
+   *  `idPrefix` STAYS fail-closed: an added column is NEVER the system PK (the table
+   *  already has its `id`), so a `t.id({ prefix })` typed-id prefix on an added column is
+   *  meaningless — `Op::AddColumn` deliberately has no `idPrefix` slot. A facet-bearing
+   *  ColumnDef on an `add({ type })` would otherwise SILENTLY drop the prefix on the wire
+   *  (the one outcome the closed-contract discipline forbids); REFUSE it with a structured
+   *  OP_INVALID directing the author to declare `t.id({ prefix })` only in create(). */
+  __toAddColumnTail() {
     if (this._idPrefix !== undefined) {
       throw structuredError(
         "OP_INVALID",
@@ -551,7 +433,8 @@ class ColumnDefImpl implements ColumnDefType {
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
       // #173: carry the vector metric + standalone mask onto the addColumn op tail
-      // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
+      // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact),
+      // so a plain ADD COLUMN is byte-identical to the pre-#173 wire image.
       vectorMetric: this._vectorMetric,
       mask: this._mask,
       generated: this._generated,
@@ -560,70 +443,88 @@ class ColumnDefImpl implements ColumnDefType {
   }
 }
 
-function isColumnDef(x: unknown): x is ColumnDefImpl {
-  return x instanceof ColumnDefImpl;
+/** Marker the helpers use to tell a fluent `ColumnDef` from a bare ColType. */
+function isColumnDef(x) {
+  return x instanceof ColumnDef;
 }
 
 /** Base64-encode raw bytes (the `IrScalar::Bytes` wire carrier) without a Node
- *  `Buffer` dependency — runs identically in the V8 record host and Node. */
-function bytesToBase64(bytes: Uint8Array): string {
+ *  `Buffer` — `btoa` is a WHATWG global present in the V8 record host + Node. */
+function bytesToBase64(bytes) {
   let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
-  // `btoa` is a WHATWG global present in V8 + Node ≥16.
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
 
-/**
- * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
- * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
- *  - a JS `bigint` → `{ decimal: "<v>" }` (a bare bigint THROWS at JSON.stringify);
- *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
- *  - everything else passes through verbatim.
- */
-function toIrScalar(value: unknown): unknown {
+/** Normalize a JS scalar into the closed `IrScalar` WIRE carrier (§3.5):
+ *   - a JS `bigint` → `{ decimal: "<v>" }`;
+ *   - a `Uint8Array` → `{ bytes: "<base64>" }`;
+ *   - everything else passes through verbatim. */
+function toIrScalar(value) {
   if (typeof value === "bigint") return { decimal: value.toString() };
   if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
   return value;
 }
 
-function toIrDefault(value: ScalarValue | { fn: "now" | "genRandomUuid" }): Node {
-  if (value && typeof value === "object" && "fn" in value && typeof value.fn === "string") {
+/** Coerce a `.default(value)` arg into the closed `IrDefault` carrier:
+ *   - `{ fn: "now" | "genRandomUuid" }` → a nullary synth default;
+ *   - any other typed scalar → a `{ literal: { value } }` literal default. */
+function toIrDefault(value) {
+  if (value && typeof value === "object" && typeof value.fn === "string") {
     return { fn: { fn: value.fn } };
   }
   return { literal: { value: toIrScalar(value) } };
 }
 
-export const t: TypeLexicon = {
-  id: (opts?: IdOptions) => {
-    let col = new ColumnDefImpl("uuid").primaryKey().default({ fn: "genRandomUuid" });
+/** The immutable fluent column-type lexicon (§4). Canonical names only. */
+export const t = {
+  /** A conventional primary-key id: a non-null UUID PK defaulting to a DB-evaluated
+   *  `gen_random_uuid()` (the structured FnSynth default, never a frozen literal).
+   *
+   *  `t.id({ prefix })` (P2a §2b) records the declared typed-id prefix on the wire
+   *  `IrColumn.idPrefix`, so the fold / gen-types — and the runtime once P5 deletes
+   *  the declared-schema cache — keep the `usr_<base62>`-style typed-id brand. The
+   *  prefix is bounded at validate-time (charset / length / reserved deny-list);
+   *  the recorder records it verbatim (the engine is the authoritative validator). */
+  id: (opts) => {
+    let col = new ColumnDef("uuid").primaryKey().default({ fn: "genRandomUuid" });
     if (opts && opts.prefix !== undefined) {
       requireString(opts.prefix, "t.id({ prefix })");
-      col = col.__withIdPrefix(opts.prefix);
+      col = col._with({ idPrefix: opts.prefix });
     }
     return col;
   },
-  text: () => new ColumnDefImpl("text"),
-  numeric: (precision = 38, scale = 9) =>
-    new ColumnDefImpl({ decimal: { precision, scale } } as ColType),
-  timestamp: () => new ColumnDefImpl("timestamp"),
-  uuid: () => new ColumnDefImpl("uuid"),
-  bytes: () => new ColumnDefImpl("bytea"),
-  boolean: () => new ColumnDefImpl("bool"),
-  json: () => new ColumnDefImpl("json"),
+  text: () => new ColumnDef("text"),
+  /** Fixed-precision decimal. Defaults to (38, 9). */
+  numeric: (precision = 38, scale = 9) => new ColumnDef({ decimal: { precision, scale } }),
+  timestamp: () => new ColumnDef("timestamp"),
+  uuid: () => new ColumnDef("uuid"),
+  bytes: () => new ColumnDef("bytea"),
+  boolean: () => new ColumnDef("bool"),
+  json: () => new ColumnDef("json"),
+  /** A foreign-key reference column carrying a plain-string target table name. */
   ref: (targetTable) => {
     requireString(targetTable, "t.ref(target)");
-    return new ColumnDefImpl({ ref: { references: targetTable } } as ColType);
+    return new ColumnDef({ ref: { references: targetTable } });
   },
-  vector: (n, opts?: VectorOptions) => {
+  /** A pgvector embedding column of dimensionality `n`. `t.vector(n, { metric })`
+   *  (P2a §2b) records the declared distance metric on the wire
+   *  `IrColumn.vectorMetric` (the closed `cosine | l2 | innerProduct` set), so the
+   *  ivfflat/hnsw opclass renders the declared metric instead of defaulting — a
+   *  DECLARED-ONLY hint DB introspection cannot recover. The metric token is one of
+   *  the closed set; the engine REJECTS an out-of-set metric at deserialize. */
+  vector: (n, opts) => {
     if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
       throw structuredError("OP_INVALID", `t.vector(n): n must be a positive integer, got ${n}`);
     }
-    let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
+    let col = new ColumnDef({ vector: { vector: n } });
     if (opts && opts.metric !== undefined) {
       requireString(opts.metric, "t.vector(n, { metric })");
-      // LOW-1: a closed-set check on the metric token gives a friendly OP_INVALID at
-      // authoring time instead of a cryptic serde "unknown variant" at the Rust
-      // deserialize seam (the engine's closed `VectorMetric` enum stays authoritative).
+      // LOW-1: mirror how `n` is validated client-side — a closed-set check on the
+      // metric token gives a friendly OP_INVALID at authoring time instead of a
+      // cryptic serde "unknown variant" error at the Rust deserialize seam. The
+      // engine remains the authoritative validator (the closed `VectorMetric` enum);
+      // this is a redundant, earlier, better-worded guard over the SAME closed set.
       if (!VECTOR_METRICS.includes(opts.metric)) {
         throw structuredError(
           "OP_INVALID",
@@ -632,59 +533,59 @@ export const t: TypeLexicon = {
           { metric: opts.metric },
         );
       }
-      col = col.__withVectorMetric(opts.metric);
+      col = col._with({ vectorMetric: opts.metric });
     }
     return col;
   },
-  geoPoint: () => new ColumnDefImpl("geoPoint"),
-  integer: () => new ColumnDefImpl("int"),
-  int: () => new ColumnDefImpl("int"),
-  bigInt: () => new ColumnDefImpl("bigInt"),
-  float: () => new ColumnDefImpl("float"),
+  geoPoint: () => new ColumnDef("geoPoint"),
+  /** 32-bit signed integer. */
+  integer: () => new ColumnDef("int"),
+  int: () => new ColumnDef("int"),
+  bigInt: () => new ColumnDef("bigInt"),
+  float: () => new ColumnDef("float"),
   enum: (name) => {
     const n = typeof name === "string" ? name : name.name;
     requireString(n, "t.enum(name)");
-    return new ColumnDefImpl({ enum: { name: n } } as ColType);
+    return new ColumnDef({ enum: { name: n } });
   },
   domain: (name) => {
     const n = typeof name === "string" ? name : name.name;
     requireString(n, "t.domain(name)");
-    return new ColumnDefImpl({ domain: { name: n } } as ColType);
+    return new ColumnDef({ domain: { name: n } });
   },
+  /** An application-level encrypted column wrapping an inner `t.*` type. */
   encrypted: (arg) => {
-    const inner = arg && typeof arg === "object" && "of" in arg ? (arg as { of: unknown }).of : arg;
-    const innerType = isColumnDef(inner) ? inner._type : (inner as ColType);
+    const inner = arg && arg.of !== undefined ? arg.of : arg;
+    const innerType = isColumnDef(inner) ? inner._type : inner;
     if (innerType === undefined) {
       throw structuredError("OP_INVALID", "t.encrypted({ of }): of must be a ColumnDef or ColType");
     }
-    return new ColumnDefImpl({ encrypted: { of: innerType } } as ColType);
+    return new ColumnDef({ encrypted: { of: innerType } });
   },
 };
 
-function colTypeOf(typeArg: ColumnDefType | ColType): ColType {
+/** Resolve a column-type argument to its ColType wire value (a fluent ColumnDef
+ *  or a bare ColType string/object). */
+function colTypeOf(typeArg) {
   if (isColumnDef(typeArg)) return typeArg._type;
-  return typeArg as ColType;
+  return typeArg;
 }
 
-export function pgEnum(
-  name: string,
-  values: readonly string[],
-  args: CreateEnumArgs = {},
-): EnumHandle {
+export function pgEnum(name, values, args = {}) {
   const enumValues = stringArray(values, "pgEnum(name, values)");
   recordCreateEnum(name, enumValues, args);
-  const handle: EnumHandle = {
+  const handle = {
     name,
     values: enumValues,
-    create(createArgs: CreateEnumArgs = {}) {
+    create(createArgs = {}) {
       recordCreateEnum(name, enumValues, createArgs);
       return handle;
     },
-    drop(dropArgs: DropEnumArgs = {}) {
+    drop(dropArgs = {}) {
       recordDropEnum(name, dropArgs);
       return handle;
     },
-    comment(text: string | null, commentArgs: { schema?: string } = {}) {
+    comment(text, commentArgs = {}) {
       recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
     },
@@ -692,19 +593,19 @@ export function pgEnum(
   return handle;
 }
 
-export function pgDomain(name: string): DomainHandle {
+export function pgDomain(name) {
   requireString(name, "pgDomain(name)");
-  const handle: DomainHandle = {
+  const handle = {
     name,
-    create(args: CreateDomainArgs) {
+    create(args) {
       recordCreateDomain(name, args);
       return handle;
     },
-    drop(args: DropDomainArgs = {}) {
+    drop(args = {}) {
       recordDropDomain(name, args);
       return handle;
     },
-    comment(text: string | null, commentArgs: { schema?: string } = {}) {
+    comment(text, commentArgs = {}) {
       recordComment({ kind: "type", name, schema: commentArgs.schema }, text);
       return handle;
     },
@@ -712,23 +613,23 @@ export function pgDomain(name: string): DomainHandle {
   return handle;
 }
 
-export function sequence(name: string): SequenceHandle {
+export function sequence(name) {
   requireString(name, "sequence(name)");
-  const handle: SequenceHandle = {
+  const handle = {
     name,
-    create(args: CreateSequenceArgs = {}) {
+    create(args = {}) {
       recordCreateSequence(name, args);
       return handle;
     },
-    alter(args: AlterSequenceArgs) {
+    alter(args) {
       recordAlterSequence(name, args);
       return handle;
     },
-    drop(args: DropSequenceArgs = {}) {
+    drop(args = {}) {
       recordDropSequence(name, args);
       return handle;
     },
-    comment(text: string | null, commentArgs: { schema?: string } = {}) {
+    comment(text, commentArgs = {}) {
       recordComment({ kind: "sequence", name, schema: commentArgs.schema }, text);
       return handle;
     },
@@ -736,78 +637,120 @@ export function sequence(name: string): SequenceHandle {
   return handle;
 }
 
-// ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
+// ===========================================================================
+// (B continued) The single-handle fluent `(c) => Expr` builder (§3.6). `c` is
+// BOTH a column-accessor function (`c("name")` → a chainable ColRef) and the
+// `c.fn.*` scalar-function namespace. `coalesce`/`concatWs` live ONLY on `c.fn`
+// (§7 dedup). The chain auto-wraps bare JS values to `Literal`.
+// ===========================================================================
 
-/**
- * Lift a `@zeroship/db` schema field (a `t.*` `TypeBuilder` or its `FieldDef`)
- * into a migration `ColumnDef`, so a column declared in the live `@zeroship/db`
- * schema lowers through the IDENTICAL `ColType` path a hand-written migration
- * column does (PR5 goal A — one shared lexicon). The TYPE is bridged via the
- * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
- * carried over (`@zeroship/db` `.required()` → migration `.notNull()`). Table/
- * column NAMES are NEVER bound to the live schema. Returns a chainable
- * (immutable) `ColumnDef`, so a caller can still layer migration modifiers on top.
- */
-export function fromDb(field: DbSchemaField): ColumnDefType {
-  let def: ColumnDefImpl = new ColumnDefImpl(colTypeFromDbField(field));
-  const fd = field instanceof DbTypeBuilder ? field.toFieldDef() : field;
-  if (fd && typeof fd === "object" && (fd as { required?: boolean }).required === true) {
-    def = def.notNull();
-  }
-  if (fd && typeof fd === "object" && (fd as { unique?: boolean }).unique === true) {
-    def = def.unique();
-  }
-  return def;
+function chain(node) {
+  return new ExprChain(node);
 }
 
-// ── (B) The fluent `(c) => Expr` builder (§3.6) ──
-
-function chain(node: Node): ExprChainImpl {
-  return new ExprChainImpl(node);
+/** Auto-wrap a bare JS value to a `Literal` node; pass a chain/node through. */
+function exprArg(x) {
+  if (x instanceof ExprChain) return x.__node;
+  if (x && typeof x === "object" && typeof x.node === "string") return x; // a raw AST node
+  return { node: "literal", value: x };
 }
 
-function exprArg(x: unknown): Node {
-  if (x instanceof ExprChainImpl) return x.__node;
-  if (x && typeof x === "object" && typeof (x as Node).node === "string") return x as Node;
-  return { node: "literal", value: x as unknown };
-}
-
-class ExprChainImpl implements ExprChainType {
-  __node: Node;
-  constructor(node: Node) {
+class ExprChain {
+  constructor(node) {
     this.__node = node;
   }
-  private bin(op: string, x: unknown): ExprChainImpl {
-    return chain({ node: "binOp", op, lhs: this.__node, rhs: exprArg(x) });
-  }
-  eq(x: unknown) { return this.bin("eq", x); }
-  ne(x: unknown) { return this.bin("ne", x); }
-  lt(x: unknown) { return this.bin("lt", x); }
-  le(x: unknown) { return this.bin("le", x); }
-  gt(x: unknown) { return this.bin("gt", x); }
-  ge(x: unknown) { return this.bin("ge", x); }
-  and(e: unknown) { return this.bin("and", e); }
-  or(e: unknown) { return this.bin("or", e); }
+
+  // ── comparison ──
+  eq(x) { return chain({ node: "binOp", op: "eq", lhs: this.__node, rhs: exprArg(x) }); }
+  ne(x) { return chain({ node: "binOp", op: "ne", lhs: this.__node, rhs: exprArg(x) }); }
+  lt(x) { return chain({ node: "binOp", op: "lt", lhs: this.__node, rhs: exprArg(x) }); }
+  le(x) { return chain({ node: "binOp", op: "le", lhs: this.__node, rhs: exprArg(x) }); }
+  gt(x) { return chain({ node: "binOp", op: "gt", lhs: this.__node, rhs: exprArg(x) }); }
+  ge(x) { return chain({ node: "binOp", op: "ge", lhs: this.__node, rhs: exprArg(x) }); }
+
+  // ── boolean ──
+  and(e) { return chain({ node: "binOp", op: "and", lhs: this.__node, rhs: exprArg(e) }); }
+  or(e) { return chain({ node: "binOp", op: "or", lhs: this.__node, rhs: exprArg(e) }); }
   not() { return chain({ node: "unaryOp", op: "not", operand: this.__node }); }
-  add(x: unknown) { return this.bin("add", x); }
-  sub(x: unknown) { return this.bin("sub", x); }
-  mul(x: unknown) { return this.bin("mul", x); }
-  div(x: unknown) { return this.bin("div", x); }
-  concat(...parts: unknown[]) {
+
+  // ── arithmetic ──
+  add(x) { return chain({ node: "binOp", op: "add", lhs: this.__node, rhs: exprArg(x) }); }
+  sub(x) { return chain({ node: "binOp", op: "sub", lhs: this.__node, rhs: exprArg(x) }); }
+  mul(x) { return chain({ node: "binOp", op: "mul", lhs: this.__node, rhs: exprArg(x) }); }
+  div(x) { return chain({ node: "binOp", op: "div", lhs: this.__node, rhs: exprArg(x) }); }
+
+  // ── string/value ──
+  /** Raw `||` concatenation (NULL-propagating on BOTH backends), folded over the
+   *  receiver + every part. For NULL-skipping joins use `c.fn.concatWs` (§3.6). */
+  concat(...parts) {
     let acc = this.__node;
-    for (const p of parts) acc = { node: "binOp", op: "concat", lhs: acc, rhs: exprArg(p) };
+    for (const p of parts) {
+      acc = { node: "binOp", op: "concat", lhs: acc, rhs: exprArg(p) };
+    }
     return chain(acc);
   }
+
+  // ── null/bool tests ──
   isNull() { return chain({ node: "unaryOp", op: "isNull", operand: this.__node }); }
   isNotNull() { return chain({ node: "unaryOp", op: "isNotNull", operand: this.__node }); }
   isTrue() { return chain({ node: "unaryOp", op: "isTrue", operand: this.__node }); }
   isFalse() { return chain({ node: "unaryOp", op: "isFalse", operand: this.__node }); }
-  cast(target: "text" | "integer" | "real" | "boolean" | "blob" | "uuid") {
+
+  // ── cast ──
+  /** `.cast("integer" | "text" | "real" | "boolean" | "blob")` — the closed
+   *  portable target set (§3.6). */
+  cast(target) {
     return chain({ node: "cast", operand: this.__node, target });
   }
 }
 
-const fn: FnNamespace = {
+/** Build the single fluent handle `c`: a column-accessor function carrying the
+ *  `c.fn.*` namespace. `c("name")` → a chainable ColRef (a plain-string name). */
+function makeBuilder() {
+  const c = (name) => {
+    requireString(name, 'c("name")');
+    return chain({ node: "colRef", name });
+  };
+  c.col = c;
+  c.fn = cFn; // the scalar-function namespace (§3.6)
+  return c;
+}
+
+/** Resolve an expression slot: an `ExprFn` callback `(c) => Expr`, a chainable
+ *  `ExprChain`, or a raw closed-AST node object. Returns the closed-AST node. */
+function resolveExpr(slot) {
+  if (slot === undefined || slot === null) return undefined;
+  if (typeof slot === "function") {
+    const built = slot(makeBuilder());
+    return exprArg(built);
+  }
+  if (slot instanceof ExprChain) return slot.__node;
+  if (slot && typeof slot === "object" && typeof slot.node === "string") return slot;
+  throw structuredError(
+    "OP_INVALID",
+    "expression slot must be a (c) => Expr callback or a built expression",
+  );
+}
+
+/** Resolve a `set: { col: ExprFn }` map into a `{ col: node }` wire map. */
+function resolveSet(set) {
+  if (!set || typeof set !== "object") {
+    throw structuredError("OP_INVALID", "`set` must be an object of column → expression");
+  }
+  const out = {};
+  for (const col of Object.keys(set)) {
+    out[col] = resolveExpr(set[col]);
+  }
+  return out;
+}
+
+// ===========================================================================
+// (B continued) `c.fn.*` — the scalar-function namespace (§3.6). Reached off the
+// single builder handle (no importable `fn`). `coalesce`/`concatWs` live ONLY
+// here (§7 dedup). Each member builds exactly one closed-AST node.
+// ===========================================================================
+
+export const cFn = {
   lower: (e) => chain({ node: "fnCall", fn: "lower", args: [exprArg(e)] }),
   upper: (e) => chain({ node: "fnCall", fn: "upper", args: [exprArg(e)] }),
   trim: (e) => chain({ node: "fnCall", fn: "trim", args: [exprArg(e)] }),
@@ -815,6 +758,12 @@ const fn: FnNamespace = {
   abs: (e) => chain({ node: "fnCall", fn: "abs", args: [exprArg(e)] }),
   coalesce: (...args) => chain({ node: "fnCall", fn: "coalesce", args: args.map(exprArg) }),
   nullif: (a, b) => chain({ node: "fnCall", fn: "nullif", args: [exprArg(a), exprArg(b)] }),
+
+  // VENDOR (`@zeroship/migrate/pg`) scalars (vendor spec §2.10) — the GUC + identity
+  // functions the RLS policy / trigger predicates need (`0025`'s
+  // `current_setting('zeroship.tenant_app', true)`). Closed `fnCall` nodes, NOT a raw
+  // escape; PG-only (the containing vendor op is PgOnly). `currentSetting(name,
+  // missingOk?)` → `current_setting('…', <missingOk>)`; `currentUser()` → `current_user`.
   currentSetting: (name, missingOk) =>
     chain({
       node: "fnCall",
@@ -824,12 +773,18 @@ const fn: FnNamespace = {
         : [{ node: "literal", value: name }, { node: "literal", value: missingOk }],
     }),
   currentUser: () => chain({ node: "fnCall", fn: "currentUser", args: [] }),
-  concatWs: (sep, ...parts) => chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
+
+  /** NULL-skipping `concat_ws` (PG) / `coalesce`-folded `||` (SQLite) — the safe
+   *  join helper (§3.6). `sep` is a literal. */
+  concatWs: (sep, ...parts) =>
+    chain({ node: "fnSynth", fn: "concatWs", args: [exprArg(sep), ...parts.map(exprArg)] }),
+
+  /** The searched `CASE` form (`c.fn.case([[cond, val], …], elseVal)`). */
   case: (branches, elseVal) => {
     if (!Array.isArray(branches)) {
       throw structuredError("OP_INVALID", "c.fn.case(branches, else?): branches must be an array of [cond, result]");
     }
-    const node: Node = {
+    const node = {
       node: "case",
       branches: branches.map((b) => {
         if (!Array.isArray(b) || b.length !== 2) {
@@ -841,6 +796,9 @@ const fn: FnNamespace = {
     if (elseVal !== undefined) node.else = exprArg(elseVal);
     return chain(node);
   },
+
+  /** The engine-synthesized portable split helper (§9). `delim` is a string
+   *  literal; `n` a positive integer literal. */
   splitPart: (col, delim, n) => {
     splitPartGrammarLint(delim, n);
     return chain({
@@ -849,52 +807,27 @@ const fn: FnNamespace = {
       args: [exprArg(col), { node: "literal", value: delim }, { node: "literal", value: n }],
     });
   },
+
+  /** DB-evaluated apply-time scalars (the structured replacement for a frozen
+   *  `Date.now()` / UUID literal). Render to `now()` / `gen_random_uuid()`. */
   now: () => chain({ node: "fnSynth", fn: "now", args: [] }),
   genRandomUuid: () => chain({ node: "fnSynth", fn: "genRandomUuid", args: [] }),
 };
 
-function makeBuilder(): ExprBuilder {
-  const c = ((name: string) => {
-    requireString(name, 'c("name")');
-    return chain({ node: "colRef", name });
-  }) as unknown as ExprBuilder;
-  c.col = c;
-  c.fn = fn;
-  return c;
-}
+// ===========================================================================
+// (C) Existence-guard token mappers. The create/add family takes `ifNotExists`;
+// the drop/rename/alter family takes `ifExists`. Engine-synthesized via a catalog
+// probe — NOT a native `IF [NOT] EXISTS` clause.
+// ===========================================================================
 
-function resolveExpr(slot: ExprFn | ExprChainType | Node | undefined): Node | undefined {
-  if (slot === undefined || slot === null) return undefined;
-  if (typeof slot === "function") return exprArg(slot(makeBuilder()));
-  if (slot instanceof ExprChainImpl) return slot.__node;
-  if (slot && typeof slot === "object" && typeof (slot as Node).node === "string") return slot as Node;
-  throw structuredError("OP_INVALID", "expression slot must be a (c) => Expr callback or a built expression");
-}
-
-/** Internal hook used only by the `@zeroship/migrate/pg` subpath. */
-export function __pgResolveExpr(slot: ExprFn | ExprChainType | Expr | undefined): Node | undefined {
-  return resolveExpr(slot as ExprFn | ExprChainType | Node | undefined);
-}
-
-function resolveSet(set: Record<string, ExprFn>): Record<string, Node> {
-  if (!set || typeof set !== "object") {
-    throw structuredError("OP_INVALID", "`set` must be an object of column → expression");
-  }
-  const out: Record<string, Node> = {};
-  for (const col of Object.keys(set)) out[col] = resolveExpr(set[col])!;
-  return out;
-}
-
-// ── (C) Existence-guard token mappers ──
-
-function ifNotExistsGuard(v: boolean | undefined): "ifNotExists" | undefined {
+function ifNotExistsGuard(v) {
   return v ? "ifNotExists" : undefined;
 }
-function ifExistsGuard(v: boolean | undefined): "ifExists" | undefined {
+function ifExistsGuard(v) {
   return v ? "ifExists" : undefined;
 }
 
-function stringArray(values: unknown, what: string): string[] {
+function stringArray(values, what) {
   if (!Array.isArray(values)) {
     throw structuredError("OP_INVALID", `${what} must be a string[]`);
   }
@@ -902,7 +835,7 @@ function stringArray(values: unknown, what: string): string[] {
   return [...values];
 }
 
-function recordCreateEnum(name: string, values: readonly string[], args: CreateEnumArgs = {}): void {
+function recordCreateEnum(name, values, args = {}) {
   requireString(name, "pgEnum(name, values)");
   pushOrDeferUp(
     compact({
@@ -914,7 +847,7 @@ function recordCreateEnum(name: string, values: readonly string[], args: CreateE
   );
 }
 
-function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
+function recordDropEnum(name, args = {}) {
   requireString(name, "pgEnum(name, values).drop()");
   push(
     compact({
@@ -926,7 +859,7 @@ function recordDropEnum(name: string, args: DropEnumArgs = {}): void {
   );
 }
 
-function recordCreateDomain(name: string, args: CreateDomainArgs): void {
+function recordCreateDomain(name, args) {
   requireString(name, "pgDomain(name)");
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "pgDomain(name).create({ as, ... }) needs an object");
@@ -940,14 +873,14 @@ function recordCreateDomain(name: string, args: CreateDomainArgs): void {
       name,
       schema: args.schema,
       as: colTypeOf(args.as),
-      check: resolveExpr(args.check as ExprFn | ExprChainType | Node | undefined),
+      check: resolveExpr(args.check),
       default: args.default === undefined ? undefined : toIrDefault(args.default),
       notNull: args.notNull,
     }),
   );
 }
 
-function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
+function recordDropDomain(name, args = {}) {
   requireString(name, "pgDomain(name).drop()");
   push(
     compact({
@@ -959,7 +892,7 @@ function recordDropDomain(name: string, args: DropDomainArgs = {}): void {
   );
 }
 
-function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void {
+function recordCreateSequence(name, args = {}) {
   requireString(name, "sequence(name)");
   if (args === null || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).create(args) needs an object");
@@ -984,7 +917,7 @@ function recordCreateSequence(name: string, args: CreateSequenceArgs = {}): void
   );
 }
 
-function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
+function recordAlterSequence(name, args) {
   requireString(name, "sequence(name)");
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "sequence(name).alter(args) needs an object");
@@ -1008,7 +941,7 @@ function recordAlterSequence(name: string, args: AlterSequenceArgs): void {
   );
 }
 
-function recordDropSequence(name: string, args: DropSequenceArgs = {}): void {
+function recordDropSequence(name, args = {}) {
   requireString(name, "sequence(name)");
   push(
     compact({
@@ -1020,7 +953,7 @@ function recordDropSequence(name: string, args: DropSequenceArgs = {}): void {
   );
 }
 
-function recordComment(target: CommentTargetArg, text: string | null): void {
+function recordComment(target, text) {
   if (text !== null && typeof text !== "string") {
     throw structuredError("OP_INVALID", "comment text must be a string or null");
   }
@@ -1033,7 +966,7 @@ function recordComment(target: CommentTargetArg, text: string | null): void {
   );
 }
 
-function commentTargetToIr(target: CommentTargetArg): Node {
+function commentTargetToIr(target) {
   if (!target || typeof target !== "object") {
     throw structuredError("OP_INVALID", "comment target must be a closed target object");
   }
@@ -1057,44 +990,50 @@ function commentTargetToIr(target: CommentTargetArg): Node {
         name: target.name,
       });
     default:
-      throw structuredError("OP_INVALID", `unsupported comment target kind ${(target as { kind?: unknown }).kind}`);
+      throw structuredError("OP_INVALID", `unsupported comment target kind ${target.kind}`);
   }
 }
 
-// ── (D) The internal op-construction helpers (the single source of truth) ──
-//
-// These build + push the EXACT canonical op object the Rust `Op` enum / the
-// recorder twin emit (byte-identical IR except the C1 FK-actions delta). They are
-// internal — only the fluent `table()` handle calls them.
+// ===========================================================================
+// (D) The internal op-construction helpers (the single source of truth). These
+// build + push the EXACT canonical op object the Rust closed `Op` enum /
+// `op-ir.schema.json` deserialize (byte-identical to the pre-redesign flat
+// surface except the C1 FK-actions delta). Only the fluent `table()` handle calls
+// them.
+// ===========================================================================
 
-function recordCreateTable(name: string, args: CreateTableArgs): void {
-  const cols: Node[] = [];
-  const constraints: Node[] = [];
-  const indexes: Node[] = [];
-  const pkCols: string[] = [];
+function recordCreateTable(name, args) {
+  const cols = [];
+  const constraints = [];
+  const indexes = [];
+  const pkCols = [];
 
-  for (const colName of Object.keys(args.columns)) {
-    const def = args.columns[colName];
+  const columns = args.columns || {};
+  for (const colName of Object.keys(columns)) {
+    const def = columns[colName];
     if (!isColumnDef(def)) {
-      throw structuredError("OP_INVALID", `create column "${colName}" must be a t.* ColumnDef`);
+      throw structuredError(
+        "OP_INVALID",
+        `create column "${colName}" must be a t.* ColumnDef (got ${typeof def})`,
+      );
     }
     cols.push(def.__toIrColumn(colName));
     if (def._primaryKey) pkCols.push(colName);
   }
   // A composite `primaryKey: [...]` wins over per-column `.primaryKey()` hoists.
-  const pk = args.primaryKey && args.primaryKey.length > 0 ? args.primaryKey : pkCols;
+  const pk = Array.isArray(args.primaryKey) && args.primaryKey.length > 0 ? args.primaryKey : pkCols;
   if (pk.length > 0) constraints.push({ kind: { kind: "pk", columns: pk } });
 
-  for (const uq of args.uniques ?? []) {
+  for (const uq of args.uniques || []) {
     constraints.push(compact({ name: uq.name, kind: { kind: "unique", columns: uq.columns } }));
   }
-  for (const ck of args.checks ?? []) {
+  for (const ck of args.checks || []) {
     constraints.push(compact({ name: ck.name, kind: { kind: "check", expr: resolveExpr(ck.expr) } }));
   }
-  for (const exclusion of args.exclusions ?? []) {
+  for (const exclusion of args.exclusions || []) {
     constraints.push(exclusionConstraintFromSpec(exclusion));
   }
-  for (const fkSpec of args.foreignKeys ?? []) {
+  for (const fkSpec of args.foreignKeys || []) {
     constraints.push(
       fkConstraintFromSpec({
         name: fkSpec.name,
@@ -1105,7 +1044,7 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
       }),
     );
   }
-  for (const idx of args.indexes ?? []) {
+  for (const idx of args.indexes || []) {
     indexes.push(
       compact({
         name: idx.name,
@@ -1131,10 +1070,7 @@ function recordCreateTable(name: string, args: CreateTableArgs): void {
   );
 }
 
-function recordSetTableOptions(
-  table: string,
-  args: { softDelete?: boolean; versioning?: boolean; strictness?: TableStrictness; schema?: string },
-): void {
+function recordSetTableOptions(table, args) {
   push(
     compact({
       op: "setTableOptions",
@@ -1145,10 +1081,7 @@ function recordSetTableOptions(
   );
 }
 
-function recordDropTable(
-  table: string,
-  args: { ifExists?: boolean; cascade?: boolean; schema?: string },
-): void {
+function recordDropTable(table, args) {
   push(
     compact({
       op: "dropTable",
@@ -1160,11 +1093,7 @@ function recordDropTable(
   );
 }
 
-function recordRenameTable(
-  table: string,
-  to: string,
-  args: { ifExists?: boolean; schema?: string },
-): void {
+function recordRenameTable(table, to, args) {
   push(
     compact({
       op: "renameTable",
@@ -1176,12 +1105,7 @@ function recordRenameTable(
   );
 }
 
-function recordAddColumn(
-  table: string,
-  column: string,
-  type: ColumnDefImpl,
-  args: { ifNotExists?: boolean; schema?: string },
-): void {
+function recordAddColumn(table, column, type, args) {
   push(
     compact({
       op: "addColumn",
@@ -1192,16 +1116,12 @@ function recordAddColumn(
       existenceGuard: ifNotExistsGuard(args.ifNotExists),
     }),
   );
-  // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
-  // follow-on unique constraint (mirroring the createTable per-column `.unique()`
-  // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
-  // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT). Likewise a
-  // `.primaryKey()` on an added column hoists a pk add.
-  //
-  // A PRIMARY KEY already IMPLIES uniqueness, so when BOTH are set the follow-on
-  // UNIQUE is redundant DDL (an extra index/constraint) — suppress it when
-  // `_primaryKey` is set, mirroring how the differ never emits a separate UNIQUE
-  // for the PK column. Only the pk add is recorded.
+  // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: an
+  // ADD COLUMN has no inline UNIQUE, so it lowers to a separate ADD CONSTRAINT.
+  // Likewise `.primaryKey()` hoists a pk add. A PRIMARY KEY already IMPLIES
+  // uniqueness, so when BOTH are set the follow-on UNIQUE is redundant DDL —
+  // suppress it (lock-step with the TS surface + the differ, which never emits a
+  // separate UNIQUE for the PK column). Only the pk add is recorded.
   if (type._unique && !type._primaryKey) {
     push(
       compact({
@@ -1226,11 +1146,7 @@ function recordAddColumn(
   }
 }
 
-function recordDropColumn(
-  table: string,
-  column: string,
-  args: { ifExists?: boolean; schema?: string },
-): void {
+function recordDropColumn(table, column, args) {
   push(
     compact({
       op: "dropColumn",
@@ -1242,13 +1158,7 @@ function recordDropColumn(
   );
 }
 
-function recordRenameColumn(
-  table: string,
-  from: string,
-  to: string,
-  type: ColumnDefType,
-  args: { schema?: string },
-): void {
+function recordRenameColumn(table, from, to, type, args) {
   push(
     compact({
       op: "renameColumn",
@@ -1261,11 +1171,7 @@ function recordRenameColumn(
   );
 }
 
-function recordAlterColumn(
-  table: string,
-  name: string,
-  change: { type?: ColumnDefType; nullable?: boolean; using?: ExprFn; schema?: string },
-): void {
+function recordAlterColumn(table, name, change) {
   if (change.type !== undefined) {
     push(
       compact({
@@ -1297,13 +1203,7 @@ function recordAlterColumn(
 /** Build an `IrConstraint` of kind `fk`. **C1**: `onDelete`/`onUpdate` ARE
  *  emitted (compacted — omitted when absent, so an action-free FK is byte-
  *  identical to the pre-C1 wire image). */
-function fkConstraintFromSpec(spec: {
-  name?: string;
-  columns: string[];
-  references: ForeignKeyReference;
-  onDelete?: RefAction;
-  onUpdate?: RefAction;
-}): Node {
+function fkConstraintFromSpec(spec) {
   if (!spec || typeof spec !== "object" || !spec.references) {
     throw structuredError("OP_INVALID", ".foreignKey(name).add needs { columns, references:{ table, columns } }");
   }
@@ -1320,18 +1220,7 @@ function fkConstraintFromSpec(spec: {
   });
 }
 
-function recordAddForeignKey(
-  table: string,
-  name: string,
-  args: {
-    columns: string[];
-    references: ForeignKeyReference;
-    onDelete?: RefAction;
-    onUpdate?: RefAction;
-    ifNotExists?: boolean;
-    schema?: string;
-  },
-): void {
+function recordAddForeignKey(table, name, args) {
   push(
     compact({
       op: "addConstraint",
@@ -1349,11 +1238,7 @@ function recordAddForeignKey(
   );
 }
 
-function recordAddUnique(
-  table: string,
-  name: string,
-  args: { columns: string[]; ifNotExists?: boolean; schema?: string },
-): void {
+function recordAddUnique(table, name, args) {
   if (!Array.isArray(args.columns)) {
     throw structuredError("OP_INVALID", ".unique(name).add needs { columns: string[] }");
   }
@@ -1368,11 +1253,7 @@ function recordAddUnique(
   );
 }
 
-function recordAddCheck(
-  table: string,
-  name: string,
-  args: { expr: ExprFn; ifNotExists?: boolean; schema?: string },
-): void {
+function recordAddCheck(table, name, args) {
   if (!args || args.expr === undefined) {
     throw structuredError("OP_INVALID", ".check(name).add needs { expr: (c) => Expr }");
   }
@@ -1387,9 +1268,7 @@ function recordAddCheck(
   );
 }
 
-function exclusionConstraintFromSpec(
-  spec: { name?: string } & ExclusionConstraintArgs,
-): Node {
+function exclusionConstraintFromSpec(spec) {
   if (!spec || typeof spec !== "object" || !Array.isArray(spec.elements)) {
     throw structuredError(
       "OP_INVALID",
@@ -1402,19 +1281,16 @@ function exclusionConstraintFromSpec(
       kind: "exclusion",
       usingMethod: spec.using,
       elements: spec.elements.map(exclusionElementToIr),
-      wherePredicate: resolveExpr(spec.where as ExprFn | ExprChainType | Node | undefined),
+      wherePredicate: resolveExpr(spec.where),
       deferrable: spec.deferrable,
       initiallyDeferred: spec.initiallyDeferred,
     }),
   });
 }
 
-function exclusionElementToIr(element: ExclusionElementArg): Node {
+function exclusionElementToIr(element) {
   if (!element || typeof element !== "object") {
-    throw structuredError(
-      "OP_INVALID",
-      "exclusion element must be { target, operator }",
-    );
+    throw structuredError("OP_INVALID", "exclusion element must be { target, operator }");
   }
   return {
     target: exclusionTargetToIr(element.target),
@@ -1422,51 +1298,44 @@ function exclusionElementToIr(element: ExclusionElementArg): Node {
   };
 }
 
-function exclusionTargetToIr(target: ExclusionElementArg["target"]): Node {
+function exclusionTargetToIr(target) {
   if (typeof target === "string") {
     requireString(target, "exclusion target column");
     return { kind: "column", name: target };
   }
-  const expr = resolveExpr(target as ExprFn | ExprChainType | Node | undefined);
+  const expr = resolveExpr(target);
   if (!expr) {
     throw structuredError("OP_INVALID", "exclusion target must be a column name or expression");
   }
-  return {
-    kind: "expr",
-    expr,
-  };
+  return { kind: "expr", expr };
 }
 
-function indexElementToIr(element: IndexElementArg): Node {
+function indexElementToIr(element) {
   if (typeof element === "string") {
     requireString(element, "index element column");
     return { kind: "column", name: element };
   }
   if (element && typeof element === "object" && "kind" in element) {
     if (element.kind === "column") {
-      requireString((element as { name?: unknown }).name, "index column element name");
-      return { kind: "column", name: (element as { name: string }).name };
+      requireString(element.name, "index column element name");
+      return { kind: "column", name: element.name };
     }
     if (element.kind === "expr") {
-      const expr = resolveExpr((element as { expr?: ExprFn | ExprChainType | Node }).expr);
+      const expr = resolveExpr(element.expr);
       if (!expr) {
         throw structuredError("OP_INVALID", "index expr element needs { kind: \"expr\", expr }");
       }
       return { kind: "expr", expr };
     }
   }
-  const expr = resolveExpr(element as ExprFn | ExprChainType | Node | undefined);
+  const expr = resolveExpr(element);
   if (!expr) {
     throw structuredError("OP_INVALID", "index element must be a column name or expression");
   }
   return { kind: "expr", expr };
 }
 
-function recordAddExclusion(
-  table: string,
-  name: string,
-  args: ExclusionAddArgs,
-): void {
+function recordAddExclusion(table, name, args) {
   push(
     compact({
       op: "addConstraint",
@@ -1478,11 +1347,7 @@ function recordAddExclusion(
   );
 }
 
-function recordDropConstraint(
-  table: string,
-  name: string,
-  args: { ifExists?: boolean; schema?: string },
-): void {
+function recordDropConstraint(table, name, args) {
   push(
     compact({
       op: "dropConstraint",
@@ -1494,18 +1359,7 @@ function recordDropConstraint(
   );
 }
 
-function recordCreateIndex(
-  table: string,
-  name: string,
-  args: {
-    columns: IndexElementArg[];
-    unique?: boolean;
-    using?: import("./types.js").IndexMethod;
-    where?: ExprFn;
-    ifNotExists?: boolean;
-    schema?: string;
-  },
-): void {
+function recordCreateIndex(table, name, args) {
   if (!Array.isArray(args.columns)) {
     throw structuredError("OP_INVALID", ".index(name).add needs { columns: IndexElementArg[] }");
   }
@@ -1524,11 +1378,7 @@ function recordCreateIndex(
   );
 }
 
-function recordDropIndex(
-  table: string,
-  name: string,
-  args: { ifExists?: boolean; concurrently?: boolean; unique?: boolean; schema?: string },
-): void {
+function recordDropIndex(table, name, args) {
   push(
     compact({
       op: "dropIndex",
@@ -1543,22 +1393,20 @@ function recordDropIndex(
   );
 }
 
-function normalizeInsertRows<R extends Row = Row>(
-  rows: R | R[] | undefined,
-  what: string,
-): { columns: string[]; rows: unknown[][] } {
-  if (rows === undefined) throw structuredError("OP_INVALID", `${what}: rows is required`);
-  const arr = (Array.isArray(rows) ? rows : [rows]) as R[];
-  const columns = arr.length > 0 ? Object.keys(arr[0]) : [];
-  const positional = arr.map((r) =>
-    columns.map((col) =>
-      Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar((r as Row)[col]) : null,
-    ),
+function normalizeInsertRows(rows, what) {
+  let normalizedRows = rows;
+  if (normalizedRows === undefined) {
+    throw structuredError("OP_INVALID", `${what}: rows is required`);
+  }
+  if (!Array.isArray(normalizedRows)) normalizedRows = [normalizedRows];
+  const columns = normalizedRows.length > 0 ? Object.keys(normalizedRows[0]) : [];
+  const positional = normalizedRows.map((r) =>
+    columns.map((col) => (Object.prototype.hasOwnProperty.call(r, col) ? toIrScalar(r[col]) : null)),
   );
   return { columns, rows: positional };
 }
 
-function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): void {
+function recordInsert(table, args) {
   const normalized = normalizeInsertRows(args.rows, "insert({ rows })");
   push(
     compact({
@@ -1572,17 +1420,18 @@ function recordInsert<R extends Row = Row>(table: string, args: InsertArgs<R>): 
   );
 }
 
-function normalizeOnConflict(
-  oc: { columns: string[]; doUpdate?: Record<string, unknown> } | undefined,
-): Node | undefined {
-  if (oc === undefined) return undefined;
-  if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
-  const doUpdate: Record<string, unknown> = {};
+/** Normalize an `onConflict.doUpdate` `column → scalar` map through the IrScalar
+ *  carrier so a bigint/Uint8Array assignment matches the Rust `IrOnConflict`
+ *  `BTreeMap<String, IrScalar>` shape. */
+function normalizeOnConflict(oc) {
+  if (oc === undefined || oc === null) return undefined;
+  if (oc.doUpdate === undefined) return { columns: oc.columns };
+  const doUpdate = {};
   for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrScalar(oc.doUpdate[col]);
-  return { columns: oc.columns, doUpdate } as Node;
+  return { columns: oc.columns, doUpdate };
 }
 
-function recordUpdate(table: string, args: UpdateArgs): void {
+function recordUpdate(table, args) {
   push(
     compact({
       op: "update",
@@ -1595,26 +1444,20 @@ function recordUpdate(table: string, args: UpdateArgs): void {
   );
 }
 
-function recordDel(table: string, args: DelArgs): void {
+function recordDel(table, args) {
   if (args.where === undefined || args.where === null) {
-    throw structuredError("OP_INVALID", "del({ where }): where is mandatory");
+    throw structuredError("OP_INVALID", "del({ where }): where is mandatory (no unfiltered delete)");
   }
-  push(
-    compact({
-      op: "delete",
-      table,
-      where: resolveExpr(args.where),
-      limit: args.limit,
-      schema: args.schema,
-    }),
-  );
+  push(compact({ op: "delete", table, where: resolveExpr(args.where), limit: args.limit, schema: args.schema }));
 }
 
 const DEFAULT_BACKFILL_CURSOR = "id";
 const DEFAULT_BACKFILL_BATCH = 1000;
 
-function recordBackfill(table: string, args: BackfillArgs): void {
-  if (args.set === undefined) throw structuredError("OP_INVALID", "backfill({ set }): set is required");
+function recordBackfill(table, args) {
+  if (args.set === undefined) {
+    throw structuredError("OP_INVALID", "backfill({ set }): set is required");
+  }
   push(
     compact({
       op: "backfill",
@@ -1629,144 +1472,107 @@ function recordBackfill(table: string, args: BackfillArgs): void {
   );
 }
 
-type SelectAstBuilder = ViewQueryBuilder & { __selectAst(): SelectAst };
-
-function normalizeTableRef(input: string | TableRef, what: string): TableRef {
+function normalizeTableRef(input, what) {
   if (typeof input === "string") return { name: input };
   if (!input || typeof input !== "object") {
     throw structuredError("OP_INVALID", `${what} must be a table name string or { name, schema?, alias? }`);
   }
   requireString(input.name, `${what}.name`);
-  if (input.schema !== undefined && input.schema !== null) requireString(input.schema, `${what}.schema`);
-  if (input.alias !== undefined && input.alias !== null) requireString(input.alias, `${what}.alias`);
-  return compact({ name: input.name, schema: input.schema ?? undefined, alias: input.alias ?? undefined }) as TableRef;
+  if (input.schema !== undefined) requireString(input.schema, `${what}.schema`);
+  if (input.alias !== undefined) requireString(input.alias, `${what}.alias`);
+  return compact({ name: input.name, schema: input.schema, alias: input.alias });
 }
 
-function viewExpr(slot: ExprFn | ExprChainType | Node): Expr {
-  return resolveExpr(slot)! as unknown as Expr;
-}
-
-function normalizeSelectItem(item: string | SelectItem | ExprFn | ExprChainType | Expr): SelectItem {
+function normalizeSelectItem(item) {
   if (typeof item === "string") return { kind: "colRef", name: item };
-  if (typeof item === "function" || item instanceof ExprChainImpl) {
-    return { kind: "expr", expr: viewExpr(item as ExprFn | ExprChainType) };
+  if (typeof item === "function" || item instanceof ExprChain) {
+    return { kind: "expr", expr: resolveExpr(item) };
   }
   if (item && typeof item === "object") {
-    const node = item as Node;
-    if (node.node !== undefined) return { kind: "expr", expr: viewExpr(node) };
-    if (node.kind === "colRef") {
-      requireString(node.name, "select item colRef.name");
-      if (node.table !== undefined && node.table !== null) requireString(node.table, "select item colRef.table");
-      if (node.alias !== undefined && node.alias !== null) requireString(node.alias, "select item colRef.alias");
-      return compact({
-        kind: "colRef",
-        table: node.table ?? undefined,
-        name: node.name,
-        alias: node.alias ?? undefined,
-      }) as SelectItem;
+    if (item.node !== undefined) return { kind: "expr", expr: resolveExpr(item) };
+    if (item.kind === "colRef") {
+      requireString(item.name, "select item colRef.name");
+      if (item.table !== undefined) requireString(item.table, "select item colRef.table");
+      if (item.alias !== undefined) requireString(item.alias, "select item colRef.alias");
+      return compact({ kind: "colRef", table: item.table, name: item.name, alias: item.alias });
     }
-    if (node.kind === "expr") {
-      if (node.alias !== undefined && node.alias !== null) requireString(node.alias, "select item expr.alias");
-      return compact({
-        kind: "expr",
-        expr: viewExpr(node.expr as ExprFn | ExprChainType | Node),
-        alias: node.alias ?? undefined,
-      }) as SelectItem;
+    if (item.kind === "expr") {
+      if (item.alias !== undefined) requireString(item.alias, "select item expr.alias");
+      return compact({ kind: "expr", expr: resolveExpr(item.expr), alias: item.alias });
     }
   }
   throw structuredError("OP_INVALID", "select item must be a column name, expression, or SelectItem object");
 }
 
-function normalizeOrderDir(dir: unknown, what: string): "asc" | "desc" | undefined {
-  if (dir === undefined || dir === null) return undefined;
-  if (dir === "asc" || dir === "desc") return dir;
-  throw structuredError("OP_INVALID", `${what}.dir must be asc or desc`);
-}
-
-function normalizeOrderItem(item: string | OrderItem | ExprFn | ExprChainType | Expr): OrderItem {
+function normalizeOrderItem(item) {
   if (typeof item === "string") return { kind: "colRef", name: item };
-  if (typeof item === "function" || item instanceof ExprChainImpl) {
-    return { kind: "expr", expr: viewExpr(item as ExprFn | ExprChainType) };
+  if (typeof item === "function" || item instanceof ExprChain) {
+    return { kind: "expr", expr: resolveExpr(item) };
   }
   if (item && typeof item === "object") {
-    const node = item as Node;
-    if (node.node !== undefined) return { kind: "expr", expr: viewExpr(node) };
-    if (node.kind === "colRef") {
-      requireString(node.name, "order item colRef.name");
-      if (node.table !== undefined && node.table !== null) requireString(node.table, "order item colRef.table");
-      return compact({
-        kind: "colRef",
-        table: node.table ?? undefined,
-        name: node.name,
-        dir: normalizeOrderDir(node.dir, "order item colRef"),
-      }) as OrderItem;
+    if (item.node !== undefined) return { kind: "expr", expr: resolveExpr(item) };
+    if (item.kind === "colRef") {
+      requireString(item.name, "order item colRef.name");
+      if (item.table !== undefined) requireString(item.table, "order item colRef.table");
+      return compact({ kind: "colRef", table: item.table, name: item.name, dir: item.dir });
     }
-    if (node.kind === "expr") {
-      return compact({
-        kind: "expr",
-        expr: viewExpr(node.expr as ExprFn | ExprChainType | Node),
-        dir: normalizeOrderDir(node.dir, "order item expr"),
-      }) as OrderItem;
+    if (item.kind === "expr") {
+      return compact({ kind: "expr", expr: resolveExpr(item.expr), dir: item.dir });
     }
   }
   throw structuredError("OP_INVALID", "orderBy item must be a column name, expression, or OrderItem object");
 }
 
-function viewQueryBuilder(): SelectAstBuilder {
-  const state: {
-    from?: TableRef;
-    projection: SelectItem[];
-    joins: Join[];
-    where?: Expr;
-    orderBy?: OrderItem[];
-    limit?: number;
-  } = {
+function viewQueryBuilder() {
+  const state = {
+    from: undefined,
     projection: [],
     joins: [],
+    where: undefined,
+    orderBy: undefined,
+    limit: undefined,
   };
-
-  let builder: SelectAstBuilder;
-  builder = {
-    from(table: string | TableRef) {
+  const builder = {
+    from(table) {
       state.from = normalizeTableRef(table, "view query from(table)");
       return builder;
     },
-    select(items: Array<string | SelectItem | ExprFn | ExprChainType | Expr>) {
+    select(items) {
       if (!Array.isArray(items)) {
         throw structuredError("OP_INVALID", "view query select(items): items must be an array");
       }
       state.projection = items.map(normalizeSelectItem);
       return builder;
     },
-    join(kind: JoinKind, table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+    join(kind, table, on) {
       if (kind !== "inner" && kind !== "left") {
         throw structuredError("OP_INVALID", "view query join(kind): kind must be inner or left");
       }
       state.joins.push({
         kind,
         table: normalizeTableRef(table, "view query join(table)"),
-        on: viewExpr(on as ExprFn | ExprChainType | Node),
+        on: resolveExpr(on),
       });
       return builder;
     },
-    innerJoin(table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+    innerJoin(table, on) {
       return builder.join("inner", table, on);
     },
-    leftJoin(table: string | TableRef, on: ExprFn | ExprChainType | Expr) {
+    leftJoin(table, on) {
       return builder.join("left", table, on);
     },
-    where(expr: ExprFn | ExprChainType | Expr) {
-      state.where = viewExpr(expr as ExprFn | ExprChainType | Node);
+    where(expr) {
+      state.where = resolveExpr(expr);
       return builder;
     },
-    orderBy(items: Array<string | OrderItem | ExprFn | ExprChainType | Expr>) {
+    orderBy(items) {
       if (!Array.isArray(items)) {
         throw structuredError("OP_INVALID", "view query orderBy(items): items must be an array");
       }
       state.orderBy = items.map(normalizeOrderItem);
       return builder;
     },
-    limit(n: number) {
+    limit(n) {
       if (typeof n !== "number" || !Number.isInteger(n) || n < 0) {
         throw structuredError("OP_INVALID", `view query limit(n): n must be a non-negative integer, got ${n}`);
       }
@@ -1784,34 +1590,25 @@ function viewQueryBuilder(): SelectAstBuilder {
         where: state.where,
         orderBy: state.orderBy,
         limit: state.limit,
-      }) as SelectAst;
+      });
     },
   };
-
   return builder;
 }
 
-function isSelectAstBuilder(x: unknown): x is SelectAstBuilder {
-  return Boolean(x && typeof x === "object" && typeof (x as SelectAstBuilder).__selectAst === "function");
-}
-
-function isSelectAst(x: unknown): x is SelectAst {
-  return Boolean(x && typeof x === "object" && (x as SelectAst).from !== undefined);
-}
-
-function resolveSelectAst(as: CreateViewArgs["as"]): SelectAst {
+function resolveSelectAst(as) {
   if (typeof as === "function") {
     const q = viewQueryBuilder();
     const built = as(q) || q;
-    if (isSelectAstBuilder(built)) return built.__selectAst();
-    if (isSelectAst(built)) return built;
+    if (built && typeof built.__selectAst === "function") return built.__selectAst();
+    if (built && typeof built === "object" && built.from !== undefined) return built;
   }
-  if (isSelectAstBuilder(as)) return as.__selectAst();
-  if (isSelectAst(as)) return as;
+  if (as && typeof as === "object" && typeof as.__selectAst === "function") return as.__selectAst();
+  if (as && typeof as === "object" && as.from !== undefined) return as;
   throw structuredError("OP_INVALID", "view.create({ as }) must be a query-builder callback or SelectAst");
 }
 
-function recordCreateView(name: string, args: CreateViewArgs & { schema?: string }): void {
+function recordCreateView(name, args) {
   if (!args || args.as === undefined) {
     throw structuredError("OP_INVALID", "view(name).create({ as }) requires a structured SelectAst builder");
   }
@@ -1828,7 +1625,7 @@ function recordCreateView(name: string, args: CreateViewArgs & { schema?: string
   );
 }
 
-function recordCreateRawView(name: string, args: CreateRawViewArgs & { schema?: string }): void {
+function recordCreateRawView(name, args) {
   if (!args || typeof args !== "object") {
     throw structuredError("OP_INVALID", "view(name).createRaw({ sql }) needs an object");
   }
@@ -1846,7 +1643,7 @@ function recordCreateRawView(name: string, args: CreateRawViewArgs & { schema?: 
   );
 }
 
-function recordDropView(name: string, args: DropViewArgs & { schema?: string }): void {
+function recordDropView(name, args) {
   push(
     compact({
       op: "dropView",
@@ -1858,20 +1655,19 @@ function recordDropView(name: string, args: DropViewArgs & { schema?: string }):
   );
 }
 
-const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"] as const;
+const TRIGGER_RAISE_LEVELS = ["abort", "fail", "ignore", "rollback"];
 
-function triggerBodyBuilder(): TriggerBodyBuilder {
+function triggerBodyBuilder() {
   return {
     raise(args) {
       if (!args || typeof args !== "object") {
         throw structuredError("OP_INVALID", "b.raise({ level, message, errcode? }) needs an object");
       }
       requireString(args.level, "b.raise({ level })");
-      if (!(TRIGGER_RAISE_LEVELS as readonly string[]).includes(args.level)) {
+      if (!TRIGGER_RAISE_LEVELS.includes(args.level)) {
         throw structuredError(
           "OP_INVALID",
-          `b.raise({ level }): level must be one of ${TRIGGER_RAISE_LEVELS.join(" | ")}, ` +
-            `got ${JSON.stringify(args.level)}`,
+          `b.raise({ level }): level must be one of ${TRIGGER_RAISE_LEVELS.join(" | ")}, got ${JSON.stringify(args.level)}`,
           { level: args.level },
         );
       }
@@ -1882,7 +1678,7 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
         level: args.level,
         message: args.message,
         errcode: args.errcode,
-      }) as TriggerStmt;
+      });
     },
     insert(args) {
       if (!args || typeof args !== "object") {
@@ -1896,7 +1692,7 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
         columns: normalized.columns,
         rows: normalized.rows,
         schema: args.schema,
-      }) as TriggerStmt;
+      });
     },
     update(args) {
       if (!args || typeof args !== "object") {
@@ -1909,7 +1705,7 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
         set: resolveSet(args.set),
         where: resolveExpr(args.where),
         schema: args.schema,
-      }) as TriggerStmt;
+      });
     },
     del(args) {
       if (!args || typeof args !== "object") {
@@ -1925,17 +1721,17 @@ function triggerBodyBuilder(): TriggerBodyBuilder {
         where: resolveExpr(args.where),
         limit: args.limit,
         schema: args.schema,
-      }) as TriggerStmt;
+      });
     },
     select(expr) {
-      return { stmt: "select", expr: resolveExpr(expr)! } as TriggerStmt;
+      return { stmt: "select", expr: resolveExpr(expr) };
     },
   };
 }
 
-function resolveTriggerAction(args: CreateTriggerArgs): Node {
-  const hasExecute = "execute" in args && args.execute !== undefined;
-  const hasBody = "body" in args && args.body !== undefined;
+function resolveTriggerAction(args) {
+  const hasExecute = args.execute !== undefined;
+  const hasBody = args.body !== undefined;
   if (hasExecute === hasBody) {
     throw structuredError(
       "OP_INVALID",
@@ -1946,7 +1742,7 @@ function resolveTriggerAction(args: CreateTriggerArgs): Node {
     requireString(args.execute, ".createTrigger({ execute })");
     return { kind: "executeFunction", name: args.execute };
   }
-  if (!("body" in args) || typeof args.body !== "function") {
+  if (typeof args.body !== "function") {
     throw structuredError("OP_INVALID", ".createTrigger({ body }) must be a function");
   }
   const statements = args.body(triggerBodyBuilder());
@@ -1954,46 +1750,47 @@ function resolveTriggerAction(args: CreateTriggerArgs): Node {
     throw structuredError("OP_INVALID", ".createTrigger({ body }) must return an array of trigger statements");
   }
   for (const stmt of statements) {
-    if (!stmt || typeof stmt !== "object" || typeof (stmt as Node).stmt !== "string") {
+    if (!stmt || typeof stmt !== "object" || typeof stmt.stmt !== "string") {
       throw structuredError("OP_INVALID", "trigger body entries must be statements returned by the trigger body builder");
     }
   }
   return { kind: "body", statements };
 }
 
-// ── (E) The fluent `table()` handle — the SOLE public entry (§3) ──
+// ===========================================================================
+// (E) The fluent `table()` handle — the SOLE public entry (§3). The byte-for-byte
+// twin of `sdks/migrate/src/ops.ts`'s `table()`. A reusable value carrying only
+// `{ name, schemaDefault }`; terminals record EAGERLY and return the handle, so it
+// is valid for unlimited chaining + var-reuse (§4). A per-op `schema` overrides
+// the table default by key presence.
+// ===========================================================================
 
-/** Per-op-wins-over-table-default schema precedence (§3/§4): a per-op `schema`
- *  overrides the table default only when the KEY is present with a defined value;
- *  an omitted key (or an explicit `undefined`) keeps the table default. */
-function pickSchema(perCall: { schema?: string } | undefined, dflt: string | undefined): string | undefined {
+/** Per-op-wins-over-table-default schema precedence (§3/§4). */
+function pickSchema(perCall, dflt) {
   if (perCall && perCall.schema !== undefined) return perCall.schema;
   return dflt;
 }
 
-function pickViewColumns(
-  perCall: { columns?: string[] } | undefined,
-  dflt: string[] | undefined,
-): string[] | undefined {
+function pickViewColumns(perCall, dflt) {
   if (perCall && perCall.columns !== undefined) return perCall.columns;
   return dflt;
 }
 
-function requireColumnDef(x: unknown, where: string): asserts x is ColumnDefImpl {
+function requireColumnDef(x, where) {
   if (!isColumnDef(x)) {
     throw structuredError("OP_INVALID", `${where} must be a t.* ColumnDef`);
   }
 }
 
-export function comment(target: CommentTargetArg, text: string | null): void {
+export function comment(target, text) {
   recordComment(target, text);
 }
 
-export function table(name: string, opts: TableOptions = {}): TableHandle {
+export function table(name, opts = {}) {
   requireString(name, "table(name, …)");
   const dflt = opts.schema;
 
-  const handle: TableHandle = {
+  const handle = {
     // §3.1 — the table itself
     create(args) {
       recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) });
@@ -2035,8 +1832,9 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       recordComment({ kind: "table", name, schema: pickSchema(args, dflt) }, text);
       return handle;
     },
+
     // §3.2 — columns
-    column(col): ColumnRef {
+    column(col) {
       requireString(col, ".column(name)");
       const id = registerSelector("column", col);
       return {
@@ -2075,7 +1873,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
 
     // §3.3 — constraints
-    foreignKey(fkName): ForeignKeyRef {
+    foreignKey(fkName) {
       requireString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
       return {
@@ -2086,7 +1884,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         },
       };
     },
-    unique(uqName): UniqueRef {
+    unique(uqName) {
       requireString(uqName, ".unique(name)");
       const id = registerSelector("unique", uqName);
       return {
@@ -2097,7 +1895,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         },
       };
     },
-    check(ckName): CheckRef {
+    check(ckName) {
       requireString(ckName, ".check(name)");
       const id = registerSelector("check", ckName);
       return {
@@ -2108,7 +1906,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         },
       };
     },
-    exclusion(exName): ExclusionRef {
+    exclusion(exName) {
       requireString(exName, ".exclusion(name)");
       const id = registerSelector("exclusion", exName);
       return {
@@ -2119,7 +1917,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
         },
       };
     },
-    constraint(cName): ConstraintRef {
+    constraint(cName) {
       requireString(cName, ".constraint(name)");
       const id = registerSelector("constraint", cName);
       return {
@@ -2137,7 +1935,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
     },
 
     // §3.4 — indexes
-    index(idxName): IndexRef {
+    index(idxName) {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
       return {
@@ -2182,7 +1980,10 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       return handle;
     },
 
-    // `@zeroship/migrate/pg` — table-scoped privileged primitives.
+    // ── VENDOR (`@zeroship/migrate/pg`) — table-scoped privileged primitives ──
+    // RLS / policies hang off the table handle (vendor spec §2.4/§2.5).
+    // Exposed always; the engine's capability gate refuses them fail-closed under
+    // a confined capability set. Each pushes a vendor op carrying the table.
     enableRowLevelSecurity() {
       push(compact({ op: "enableRls", table: name, schema: dflt }));
       return handle;
@@ -2199,7 +2000,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       push(compact({ op: "noForceRls", table: name, schema: dflt }));
       return handle;
     },
-    createPolicy(args: CreateTablePolicyArgs) {
+    createPolicy(args) {
       requireString(args.name, ".createPolicy({ name })");
       push(compact({
         op: "createPolicy",
@@ -2213,7 +2014,7 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
       }));
       return handle;
     },
-    dropPolicy(args: DropTablePolicyArgs) {
+    dropPolicy(args) {
       requireString(args.name, ".dropPolicy({ name })");
       push(compact({
         op: "dropPolicy",
@@ -2255,12 +2056,12 @@ export function table(name: string, opts: TableOptions = {}): TableHandle {
   return handle;
 }
 
-export function view(name: string, opts: ViewOptions = {}): ViewHandle {
+export function view(name, opts = {}) {
   requireString(name, "view(name, …)");
   const dflt = opts.schema;
   const dfltColumns = opts.columns;
 
-  const handle: ViewHandle = {
+  const handle = {
     create(args) {
       recordCreateView(name, {
         ...args,
@@ -2294,54 +2095,229 @@ export function view(name: string, opts: ViewOptions = {}): ViewHandle {
   return handle;
 }
 
-// ── (C) Determinism lint ──
+// ===========================================================================
+// VENDOR (`@zeroship/migrate/pg`) — the standalone `pg.*` namespace for the
+// database-/role-/schema-level privileged primitives (vendor spec §2.1–2.6,
+// §2.11). These have no table handle to hang off. Each eagerly records a vendor
+// op onto the ambient recorder, byte-identically to the Rust `Op` wire shape
+// (internally-tagged camelCase; absent optionals OMITTED via `compact`). The
+// engine's capability gate refuses every one fail-closed under a confined
+// capability set; the rendered SQL is then deny-list-scanned at lower.
+// ===========================================================================
+export const pg = {
+  createSchema(args) {
+    requireString(args.name, "pg.createSchema({ name })");
+    return push(compact({
+      op: "createSchema",
+      name: args.name,
+      ifNotExists: args.ifNotExists,
+      authorization: args.authorization,
+    }));
+  },
+  dropSchema(args) {
+    requireString(args.name, "pg.dropSchema({ name })");
+    return push(compact({
+      op: "dropSchema",
+      name: args.name,
+      ifExists: args.ifExists,
+      cascade: args.cascade,
+    }));
+  },
+  createExtension(args) {
+    requireString(args.name, "pg.createExtension({ name })");
+    return push(compact({
+      op: "createExtension",
+      name: args.name,
+      ifNotExists: args.ifNotExists,
+      schema: args.schema,
+    }));
+  },
+  dropExtension(args) {
+    requireString(args.name, "pg.dropExtension({ name })");
+    return push(compact({ op: "dropExtension", name: args.name, ifExists: args.ifExists }));
+  },
+  createRole(args) {
+    requireString(args.name, "pg.createRole({ name })");
+    return push(compact({
+      op: "createRole",
+      name: args.name,
+      login: args.login,
+      password: args.password,
+      bypassRls: args.bypassRls,
+      createRole: args.createRole,
+      createDb: args.createDb,
+      superuser: args.superuser,
+      inRole: args.inRole,
+      setSearchPath: args.setSearchPath,
+      ifNotExists: args.ifNotExists,
+    }));
+  },
+  alterRole(args) {
+    requireString(args.name, "pg.alterRole({ name })");
+    return push(compact({
+      op: "alterRole",
+      name: args.name,
+      setSearchPath: args.setSearchPath,
+      resetSearchPath: args.resetSearchPath,
+    }));
+  },
+  dropRole(args) {
+    requireString(args.name, "pg.dropRole({ name })");
+    return push(compact({ op: "dropRole", name: args.name, ifExists: args.ifExists }));
+  },
+  dropOwnedBy(args) {
+    if (!Array.isArray(args.roles)) {
+      throw structuredError("OP_INVALID", "pg.dropOwnedBy({ roles }): roles must be an array");
+    }
+    return push(compact({ op: "dropOwnedBy", roles: args.roles }));
+  },
+  grant(args) {
+    return push(compact({
+      op: "grant",
+      privileges: args.privileges,
+      on: args.on,
+      to: args.to,
+      withGrantOption: args.withGrantOption,
+    }));
+  },
+  revoke(args) {
+    return push(compact({
+      op: "revoke",
+      privileges: args.privileges,
+      on: args.on,
+      from: args.from,
+    }));
+  },
+  createFunction(args) {
+    requireString(args.name, "pg.createFunction({ name })");
+    requireString(args.returns, "pg.createFunction({ returns })");
+    requireString(args.language, "pg.createFunction({ language })");
+    requireString(args.body, "pg.createFunction({ body })");
+    return push(compact({
+      op: "createFunction",
+      name: args.name,
+      schema: args.schema,
+      args: args.args,
+      returns: args.returns,
+      language: args.language,
+      replace: args.replace,
+      volatility: args.volatility,
+      body: args.body,
+    }));
+  },
+  dropFunction(args) {
+    requireString(args.name, "pg.dropFunction({ name })");
+    return push(compact({
+      op: "dropFunction",
+      name: args.name,
+      schema: args.schema,
+      argTypes: args.argTypes,
+      ifExists: args.ifExists,
+    }));
+  },
+  /** The gated raw-statement escape (`pg.sql\`…\``, vendor spec §2.11). A tagged
+   *  template whose interpolation slots accept ONLY typed binds (never identifiers
+   *  / SQL) — the binds become positional placeholders, the verbatim text is
+   *  embedded and `pg_query`-scanned by the guard at lower. */
+  sql(strings, ...binds) {
+    // Reassemble the template into a single statement, replacing each interpolation
+    // slot with a positional placeholder ($1, $2, …) so a bind can never be string-
+    // concatenated into the statement shape.
+    let out = strings[0];
+    for (let i = 0; i < binds.length; i++) {
+      out += `$${i + 1}` + strings[i + 1];
+    }
+    return push(compact({
+      op: "pgRaw",
+      sql: out,
+      binds: binds.length > 0 ? binds.map(scalarBind) : undefined,
+    }));
+  },
+};
 
-const NONDETERMINISM_PATTERNS: { re: RegExp; name: string; steer: string }[] = [
+/** Coerce a `pg.sql` bind into the IR scalar wire form. Numbers/strings/bools pass
+ *  through; everything else is rejected fail-closed (a `pg.sql` bind is a typed
+ *  scalar, never an object/identifier). */
+function scalarBind(v) {
+  const t = typeof v;
+  if (t === "string" || t === "boolean") return v;
+  if (t === "number") {
+    if (!Number.isInteger(v)) {
+      throw structuredError("OP_INVALID", `pg.sql bind ${v} must be an integer scalar (use a decimal string for non-integers)`);
+    }
+    return v;
+  }
+  throw structuredError("OP_INVALID", `pg.sql bind must be a typed scalar (string/number/boolean); got ${t}`);
+}
+
+// ===========================================================================
+// (C) Determinism lint. Flag the JS nondeterminism accessors (`Date.now()` /
+// `Math.random()` / `crypto.randomUUID()` / `new Date()`), steering authors to
+// the DB-evaluated `c.fn.now()` / `c.fn.genRandomUuid()` (`FnSynth`) scalars. A
+// best-effort, AST-free SOURCE scan; the authoritative determinism guarantee is
+// the build-once committed artifact, this is the pre-commit catch.
+// ===========================================================================
+
+const NONDETERMINISM_PATTERNS = [
   { re: /\bDate\s*\.\s*now\s*\(/, name: "Date.now()", steer: "c.fn.now()" },
-  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "c.fn.genRandomUuid() or a DB-evaluated value" },
+  { re: /\bMath\s*\.\s*random\s*\(/, name: "Math.random()", steer: "c.fn.genRandomUuid() (for an id) or a DB-evaluated value" },
   { re: /\bcrypto\s*\.\s*randomUUID\s*\(/, name: "crypto.randomUUID()", steer: "c.fn.genRandomUuid()" },
   { re: /\bnew\s+Date\s*\(/, name: "new Date(...)", steer: "c.fn.now()" },
 ];
 
 /**
- * Lint a migration's SOURCE for the nondeterminism accessors (`Date.now()` /
- * `Math.random()` / `crypto.randomUUID()` / `new Date()`).
+ * Lint a migration's SOURCE TEXT for the nondeterminism accessors. Returns an
+ * array of `{ code, accessor, suggested_fix, reason }` findings (empty ⇒ clean).
  *
  * SCOPE — intentional coarse whole-source scan: it OVER-flags (a clock accessor
- * in a comment trips it) and NEVER under-flags. The build-once committed artifact
- * already neutralizes post-deploy non-determinism, so the lint's only job is a
- * best-effort pre-commit STEER where a false positive is cheap (rephrase) and a
- * false negative (a baked build-time value slipping through) is the real hazard.
- * Findings are surfaced as WARNINGS on the record path, never a hard reject.
+ * in a comment / a non-op helper trips it) and NEVER under-flags. The record path
+ * surfaces these as WARNINGS, never a hard reject.
  */
-export function lintDeterminism(source: string): DeterminismFinding[] {
+export function lintDeterminism(source) {
   if (typeof source !== "string") return [];
-  const findings: DeterminismFinding[] = [];
+  const findings = [];
   for (const { re, name, steer } of NONDETERMINISM_PATTERNS) {
     if (re.test(source)) {
       findings.push({
         code: "NONDETERMINISTIC_OP_ARG",
         accessor: name,
         suggested_fix: `replace ${name} with the DB-evaluated ${steer}`,
-        reason: `${name} bakes a build-time value into the artifact; use the structured FnSynth scalar`,
+        reason:
+          `${name} bakes a build-time value into the migration artifact; for a value that ` +
+          "must be computed at apply time use the structured FnSynth scalar",
       });
     }
   }
   return findings;
 }
 
-function splitPartGrammarLint(delim: unknown, n: unknown): void {
-  const fail = (reason: string) => {
+// ---------------------------------------------------------------------------
+// `c.fn.splitPart` grammar lint (§9) — the dialect-NEUTRAL subset broken on BOTH
+// backends (a non-string/empty delimiter, a non-positive-int n). A violation
+// throws a structured EXPR_NOT_PORTABLE error. The portability ENVELOPE
+// (single-ASCII delimiter, 1<=n<=8) is dialect-gated and deferred to the Rust
+// validator.
+// ---------------------------------------------------------------------------
+
+function splitPartGrammarLint(delim, n) {
+  const fail = (reason) => {
     throw structuredError("EXPR_NOT_PORTABLE", reason, {
       suggested_fix:
-        "pass a non-empty string-literal delimiter and a positive-integer n; to target SQLite, " +
-        "stay in-envelope (single-ASCII delimiter, 1<=n<=8)",
+        "pass a non-empty string-literal delimiter and a positive-integer n; to target " +
+        "SQLite too, stay in-envelope (single-ASCII delimiter, 1<=n<=8) — a multi-char/" +
+        "non-ASCII delimiter or n>8 renders only on Postgres (dialect_scope=PgOnly)",
     });
   };
-  if (typeof delim !== "string") fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);
-  if ((delim as string).length === 0) fail("c.fn.splitPart delimiter must be a non-empty string literal");
+  if (typeof delim !== "string") {
+    fail(`c.fn.splitPart delimiter must be a string literal; got ${typeof delim}`);
+  }
+  if (delim.length === 0) {
+    fail("c.fn.splitPart delimiter must be a non-empty string literal");
+  }
   if (typeof n !== "number" || !Number.isInteger(n)) {
     fail(`c.fn.splitPart part index n must be a positive integer literal; got ${JSON.stringify(n)}`);
   }
-  if ((n as number) < 1) fail(`c.fn.splitPart part index n must be a positive integer; got ${n}`);
+  if (n < 1) {
+    fail(`c.fn.splitPart part index n must be a positive integer; got ${n}`);
+  }
 }
