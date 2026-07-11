@@ -54,15 +54,6 @@ thiserror = "2"
 # Utilities
 hex = "0.4"
 libc = "0.2"
-bytes = "1"
-socket2 = { version = "0.5", features = ["all"] }
-
-# Postgres wire protocol / type codec — used by the vendored compio-native
-# Postgres driver (`native-pg` profile).
-postgres-protocol = "0.6"
-postgres-types = { version = "0.2", features = ["with-uuid-1"] }
-fallible-iterator = "0.2"
-percent-encoding = "2"
 # Kernel-sandbox primitives for the build-time recorder child (seccomp-bpf
 # default-deny + Landlock read-only filesystem ruleset). Pure-Rust, no C
 # toolchain. Linux-only.
@@ -83,10 +74,6 @@ tempfile = "3"
 # used only to DISABLE extension loading at open (the migration conn is CDC-free +
 # extension-free to creator SQL).
 rusqlite = { version = "0.39", features = ["bundled", "load_extension", "hooks"] }
-
-# Bespoke compio-native Postgres driver — the native `PgSession` impl (the
-# `native-pg` profile). Self-contained: no internal deps, all crates.io.
-compio-postgres = { path = "crates/compio-postgres" }
 
 # Internal crates
 zero-migrate-schema = { path = "crates/zero-migrate-schema" }
