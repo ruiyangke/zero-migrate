@@ -122,12 +122,12 @@ function addonCandidates(): string[] {
   // the worktree root is `../../../`.
   out.push(
     new URL(
-      `../../../crates/zeroship-migrate-node/zeroship-migrate-node.${triple}.node`,
+      `../../../crates/zero-migrate-node/zero-migrate-node.${triple}.node`,
       import.meta.url,
     ).pathname,
   );
   out.push(
-    new URL(`../../../crates/zeroship-migrate-node/index.node`, import.meta.url).pathname,
+    new URL(`../../../crates/zero-migrate-node/index.node`, import.meta.url).pathname,
   );
   return out;
 }

@@ -1,0 +1,22 @@
+{
+  "name": "@zeroship/db",
+  "version": "0.0.0",
+  "description": "Minimal standalone @zeroship/db type-builder surface consumed by @zeroship/migrate's db-lexicon bridge (TypeBuilder + FieldDef). This is a decoupled, self-contained subset — NOT the full monorepo @zeroship/db (query/CRUD/aggregation live in the platform package). See the follow-up note in the repo README.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "catalog:"
+  }
+}

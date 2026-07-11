@@ -1,6 +1,6 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zeroship-migrate/op-ir.schema.json (the engine's single-source-of-
+// Source: crates/zero-migrate/op-ir.schema.json (the engine's single-source-of-
 // truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
@@ -16,19 +16,7 @@
  * semantics agree — §3.3.1).
  */
 export type BinaryOp =
-  | "eq"
-  | "ne"
-  | "lt"
-  | "le"
-  | "gt"
-  | "ge"
-  | "and"
-  | "or"
-  | "add"
-  | "sub"
-  | "mul"
-  | "div"
-  | "concat";
+  "eq" | "ne" | "lt" | "le" | "gt" | "ge" | "and" | "or" | "add" | "sub" | "mul" | "div" | "concat";
 
 /**
  * A unary operator admitted in the closed AST (§3.3.1).

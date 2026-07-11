@@ -15,79 +15,119 @@ exotic syntax.
   a frozen wire contract and a deterministic content checksum. The same IR
   renders to every supported dialect.
 - **Multi-dialect apply.**
-  - **Postgres** — a native, `io_uring`-based async client (`compio-postgres`),
-    with an online + shadow-dry-run apply harness. Also runnable through a
-    host-supplied, driver-neutral session seam (`host-pg`) with no native driver
-    linked.
+  - **Postgres** — applied through a driver-neutral session seam (`host-pg`) fed
+    by the host `pg` npm driver via the `zero-migrate-node` napi bridge. No native
+    Rust Postgres driver is shipped in this standalone.
   - **SQLite** — an in-process, hardened, extension-free `rusqlite` connection
     (bundled amalgamation) with a table-rebuild path for unsupported ALTERs.
-  - **MySQL** — applied through a host-supplied JS driver isolate (optional,
-    behind `v8-host`).
+  - **MySQL** — applied through the host `mysql2` npm driver via the same napi
+    bridge (Node-side, no embedded V8).
 - **Security first.** A confined migrator role, a parse-time deny-list over the
   real PG grammar, an immutable journal, a plan/apply gate, advisory-lock
-  serialization, and a two-phase apply/recovery flow. The build-time recorder for
-  untrusted authoring runs in a kernel sandbox (seccomp-bpf + Landlock, Linux).
-- **Portable core, V8-free by construction.** The guard / IR / render /
-  Postgres+SQLite apply / journal core builds with **zero** heavyweight
-  dependencies and no V8. The JS authoring front-end (evaluate a migration or
-  schema module to IR) and the live-MySQL driver are optional, behind a host
-  seam that names no V8 type.
+  serialization, and a two-phase apply/recovery flow.
+- **Node-native, V8-FREE by construction.** The engine ships **no embedded V8**.
+  The guard / IR / render / SQLite apply / journal core builds with zero
+  heavyweight dependencies. Authoring, MySQL, and Postgres all execute in the
+  **Node process** (the `@zeroship/migrate` host-recorder evals the DSL into an
+  op-IR envelope; the `zero-migrate-node` napi addon LOWERs it in Rust — stamping
+  `owner_app` and folding the authoritative checksum — then applies it over the
+  `pg` / `mysql2` npm drivers). There is no `v8` crate anywhere in the build graph
+  or dev-dependencies.
 
 ## Workspace layout
 
 ```
 crates/
 ├── zero-migrate/         The migration engine (guard, IR, render, apply, journal).
+│                         V8-FREE — no embedded V8, no `v8` dependency.
 ├── zero-migrate-schema/  Shared schema-authority core: DDL builders, diff
 │                         classifier, live introspection, sentinel codec.
-├── zero-migrate-host/    In-Rust V8 host impl for the engine's authoring/driver
-│                         seams, backed by the public `v8` crate.
-├── zero-migrate-node/    Node/Bun N-API addon (host-driven pg/mysql2 apply over
-│                         the driver-neutral session seam). Its own workspace.
-└── compio-postgres/      Native compio/io_uring Postgres client.
+└── zero-migrate-node/    Node/Bun N-API addon: host-driven pg/mysql2 apply over
+                          the driver-neutral session seam. Its own workspace.
 sdks/
-└── migrate/              The `op.*` authoring DSL (TypeScript).
+├── migrate/              The `op.*` authoring DSL + the Node host facade
+│                         (`@zeroship/migrate/host`: host-recorder → napi apply).
+└── db/                   A decoupled, self-contained subset of the `@zeroship/db`
+                          type-builder (TypeBuilder + FieldDef) the migrate
+                          `db-lexicon` bridge consumes. See the follow-up note below.
 docs/
 └── reference/            Reference documentation.
 ```
 
 ## Build profiles
 
-The engine crate carries feature flags that control which apply backends and the
-JS front-end are compiled:
+The engine crate carries feature flags that control which apply backends are
+compiled. **No profile pulls V8** — authoring/MySQL/PG execution all run on Node
+via the napi bridge.
 
 | Profile | Command | What it links |
 | --- | --- | --- |
-| **Core (V8-free, host-driven PG)** | `cargo build -p zero-migrate --no-default-features --features host-pg` | Guard + IR + render + SQLite apply + journal + the driver-neutral PG seam. No native driver, no V8. |
-| **Native PG (V8-free)** | `cargo build -p zero-migrate --no-default-features --features native-pg` | The above + the native `compio-postgres` driver + PG introspection. |
-| **Full (JS authoring + MySQL)** | `cargo build -p zero-migrate` (default) | The above + the V8-backed authoring front-end and live-MySQL backend, behind the host seam. Requires the JS SDK bundles. |
+| **Default (host-pg + SQLite + CLI)** | `cargo build -p zero-migrate` | Guard + IR + render + SQLite apply + journal + the driver-neutral PG seam + the standalone CLI. No native driver, no V8. |
+| **Library core (host-driven PG)** | `cargo build -p zero-migrate --no-default-features --features host-pg` | The above minus the CLI. This is what the `zero-migrate-node` napi addon links. |
+| **Lean core (SQLite only)** | `cargo build -p zero-migrate --no-default-features` | Guard + IR + render + SQLite apply + journal, PG seam omitted. |
+
+The napi addon is built separately (it is its own excluded workspace):
+
+```bash
+cd crates/zero-migrate-node && napi build --platform --release
+```
 
 ## Testing
 
 ```bash
-# The V8-free core (guard / IR / render / SQLite apply / journal) + schema core.
-cargo test -p zero-migrate-schema
-cargo test -p zero-migrate --lib -- --test-threads=1
+# The V8-free Rust core (guard / IR / render / SQLite apply / journal) + schema core.
+cargo test -p zero-migrate-schema --lib
+cargo test -p zero-migrate --lib
 
-# Postgres-backed tests need a reachable Postgres. The default DSN is
-#   host=localhost port=5440 user=postgres password=... dbname=zero_migrate_test
-# Override with MIGRATE_TEST_DB.
+# The V8-free integration suites (SQLite + host-pg seam). Postgres-backed tests
+# need a reachable Postgres; the standalone ships no native PG driver, so those
+# suites are `native-pg`-gated (permanently off here) and compile to empty.
+cargo test -p zero-migrate
+
+# The Node-native authoring → IR → apply path. Build the SDKs + the napi addon,
+# then run the host authoring test (offline arm always; the apply arm uses a
+# reachable Postgres at postgres://postgres:...@localhost:5440/zero_migrate_test
+# and auto-skips if unreachable).
+pnpm install
+pnpm build                                   # @zeroship/db → @zeroship/migrate
+(cd crates/zero-migrate-node && napi build --platform --release)
+pnpm --filter @zeroship/migrate test         # DSL + IR + drift suites
+pnpm --filter @zeroship/migrate test:host    # authoring → apply over the napi bridge
 ```
 
-## Status of the V8-host authoring front-end
+## Node-native authoring path
 
-The engine core (guard / IR / render / Postgres + SQLite apply / journal) and the
-schema core are fully self-contained and build with no V8 and no external runtime
-dependency.
+Authoring, MySQL, and Postgres execution all run in the Node process — there is no
+embedded V8. The flow (`@zeroship/migrate/host`):
 
-The **JS authoring front-end** (evaluate a migration/schema module to IR) and the
-**live-MySQL driver isolate** are wired through an engine-owned host seam
-(`AuthoringHost` / `RecorderPlatform` / `JsDriverHost`) implemented in
-`zero-migrate-host` against the public `v8` crate. The `AuthoringHost` (module-graph
-evaluation + globals) and `RecorderPlatform` (V8 platform init) seams are
-implemented; the `JsDriverHost` (mysql2-over-`node:net` driver isolate) is a
-mini-runtime that is not yet ported to the standalone host. The authoring path
-additionally consumes the built `op.*` / schema JS SDK bundles.
+1. the pure-JS **host recorder** (`src/host-recorder.ts`) evals a migration's
+   `up()` (the `table()` / `t.*` DSL) and drains it into a
+   `{ ir_version, name, ops }` op-IR envelope. It computes NO checksum and stamps
+   NO `owner_app` — those are Rust-owned provenance/integrity fields;
+2. the **`zero-migrate-node` napi addon** `applyIr` LOWERs the envelope in Rust
+   (stamps `owner_app`, folds the authoritative `Checksum::of_ir` and the confined
+   system-column shape), then drives the engine's `executor::apply` over the host
+   `pg` / `mysql2` npm driver via the `hostDriver` session seam.
+
+`plan()` (DB-free structural + confinement pre-check via the addon's `loadVerify`)
+and `status()` / `history()` (journal reads over the host driver) round out the
+facade.
+
+## Follow-up: `@zeroship/db` decoupling
+
+The migrate authoring DSL's `db-lexicon` bridge (`fromDb` / `colTypeFromDbField` —
+the "lift a live `@zeroship/db` schema field into a migration column" convenience)
+imports `TypeBuilder` + `FieldDef` from `@zeroship/db`. The core `t.*` / `table()`
+authoring surface lives in `@zeroship/migrate` itself and does NOT need it; the
+bridge is the only consumer.
+
+`sdks/db` here is a **decoupled, self-contained subset** of that type-builder — a
+real `TypeBuilder` (`.required()` / `.optional()` / `.unique()` / `.toFieldDef()`)
+and the `FieldDef` union the bridge maps, enough to build and run the `db-lexicon`
+tests. It is NOT the full platform `@zeroship/db` (query / CRUD / aggregation /
+generated `env.db` typing). For a fully shippable npm package the bridge should
+either vendor the real `@zeroship/db` type surface or be made lazy/optional so
+`@zeroship/migrate` carries no hard dependency on it.
 
 ## License
 
