@@ -1,0 +1,106 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+# The N-API addon is its OWN standalone workspace (empty `[workspace]` table in its
+# manifest) so a plain `cargo build` of this workspace never pulls the napi
+# toolchain / Node ABI. It is built separately via `napi build`.
+exclude = ["crates/zero-migrate-node"]
+
+# ---------------------------------------------------------------------------
+# Shared package metadata
+# ---------------------------------------------------------------------------
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+# ---------------------------------------------------------------------------
+# Shared dependency versions (single source of truth)
+# ---------------------------------------------------------------------------
+
+[workspace.dependencies]
+# Async / I/O — compio (io_uring), NOT tokio. The engine's Postgres executor +
+# apply flow run out-of-band on the compio run loop.
+compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
+# Executor-agnostic future combinators (`FutureExt::catch_unwind`,
+# `futures::executor::block_on`). NOT an async runtime.
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
+toml = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+
+# CLI argument parsing (sync — no async runtime). `env` backs the
+# `--database-url` / `DATABASE_URL` fallback.
+clap = { version = "4", features = ["derive", "env"] }
+
+# JSON Schema generation for the `op.*` migration IR contract (op-ir.schema.json).
+schemars = "1"
+
+# Crypto / hashing
+sha2 = "0.10"
+hmac = "0.12"
+base64 = "0.22"
+
+# IDs — UUIDv7-shaped migration ids, base62-encoded.
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+
+# Error handling
+thiserror = "2"
+
+# Utilities
+hex = "0.4"
+libc = "0.2"
+bytes = "1"
+socket2 = { version = "0.5", features = ["all"] }
+
+# Postgres wire protocol / type codec — used by the vendored compio-native
+# Postgres driver (`native-pg` profile).
+postgres-protocol = "0.6"
+postgres-types = { version = "0.2", features = ["with-uuid-1"] }
+fallible-iterator = "0.2"
+percent-encoding = "2"
+# Kernel-sandbox primitives for the build-time recorder child (seccomp-bpf
+# default-deny + Landlock read-only filesystem ruleset). Pure-Rust, no C
+# toolchain. Linux-only.
+seccompiler = "0.5"
+landlock = "0.4"
+
+# Logging / tracing facade (no runtime, no crypto).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "env-filter", "fmt", "ansi", "json", "tracing-log"] }
+
+# Bounded MPMC queue — the migration actor's single-writer queue.
+flume = { version = "0.11", default-features = false, features = ["async"] }
+
+# Auto-cleaning temp file / directory helper (dev-dep: per-test temp SQLite files).
+tempfile = "3"
+
+# SQLite migration backend — bundled amalgamation (3.51.3). `load_extension` is
+# used only to DISABLE extension loading at open (the migration conn is CDC-free +
+# extension-free to creator SQL).
+rusqlite = { version = "0.39", features = ["bundled", "load_extension", "hooks"] }
+
+# Bespoke compio-native Postgres driver — the native `PgSession` impl (the
+# `native-pg` profile). Self-contained: no internal deps, all crates.io.
+compio-postgres = { path = "crates/compio-postgres" }
+
+# Internal crates
+zero-migrate-schema = { path = "crates/zero-migrate-schema" }
+
+# ---------------------------------------------------------------------------
+# Shared lints
+# ---------------------------------------------------------------------------
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }

@@ -1,0 +1,17 @@
+# Rust build output
+/target
+**/target
+
+# Node / napi
+node_modules/
+*.node
+dist-node/
+
+# napi build artifacts
+crates/zero-migrate-node/index.js
+crates/zero-migrate-node/index.d.ts
+crates/zero-migrate-node/*.node
+
+# OS / editor
+.DS_Store
+*.swp
