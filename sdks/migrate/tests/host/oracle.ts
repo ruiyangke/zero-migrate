@@ -51,7 +51,7 @@ const HOST = "localhost";
 const PORT = 5440;
 const USER = "postgres";
 const PASSWORD = "zeroship";
-const DBNAME = "zeroship_migrate_test";
+const DBNAME = "zero_migrate_test";
 const PG_URL = `postgres://${USER}:${PASSWORD}@${HOST}:${PORT}/${DBNAME}`;
 const OWNER_APP = "app_widgets";
 // The GENUINE native-pg (compio) reference apply — a dev-only fixture binary

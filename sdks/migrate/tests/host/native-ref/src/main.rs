@@ -16,10 +16,10 @@
 use std::path::Path;
 use std::process::ExitCode;
 
-use zeroship_migrate::{
+use zero_migrate::{
     apply_standalone, connect, Approval, ExecutorConfig, GuardConfig, PostgresBackend,
 };
-use zeroship_migrate::model::profile::PolicyProfile;
+use zero_migrate::model::profile::PolicyProfile;
 
 #[compio::main]
 async fn main() -> ExitCode {
