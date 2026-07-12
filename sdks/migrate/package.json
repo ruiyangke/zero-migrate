@@ -1,7 +1,7 @@
 {
   "name": "zero-migrate",
   "version": "0.0.0",
-  "description": "The zero-migrate authoring DSL: op.* / table() builders, defineMigration types, and the pure-JS recorder. Zero native code, zero runtime deps.",
+  "description": "The zero-migrate authoring DSL: fluent table() / view() builders, the t.* column-type lexicon, the closed Expr AST, and the pure-JS recorder. Zero native code, zero runtime deps.",
   "type": "module",
   "exports": {
     ".": {
