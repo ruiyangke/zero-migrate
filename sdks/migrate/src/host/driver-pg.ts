@@ -11,7 +11,7 @@
 //
 //  1. int8/numeric/int8[] cross as STRINGS via CONNECTION-SCOPED type parsers. The
 //     IR's exact-integer domain (`event_seq`, `version`, seq bounds) crosses as
-//     `seam::Value::Text` and must never lose precision. node-pg's DEFAULT parsers
+//     `driver::Value::Text` and must never lose precision. node-pg's DEFAULT parsers
 //     already return oid 20 (int8) / 1700 (numeric) as strings, BUT
 //     `pg.types.setTypeParser` is GLOBAL and MUTABLE — a host app that overrode the
 //     int8 parser to `Number` would silently truncate large bigints below the seam
@@ -175,7 +175,7 @@ async function runVerb(client: PgClient, request: JsRequest): Promise<JsReply> {
       });
       const columns = result.fields.map((f) => f.name);
       // Per-column OIDs: used to classify int8/numeric (→ exact `intStr` cell, the
-      // seam's `seam::Value::Int` exact-integer domain, §D.2) vs a genuine text column
+      // seam's `driver::Value::Int` exact-integer domain, §D.2) vs a genuine text column
       // (→ `text` cell). Without the OID we could not tell a stringified int8 from a
       // real text value.
       const oids = result.fields.map((f) => f.dataTypeID);
@@ -222,10 +222,10 @@ const OID_BOOL = 16;
 
 /**
  * Marshal a `pg` result value (already parsed by the connection-scoped parsers) →
- * a neutral cell the addon deserializes to `seam::Value`, classified by the column's
+ * a neutral cell the addon deserializes to `driver::Value`, classified by the column's
  * OID (§D.2):
  * - int8 (20) / numeric (1700): arrive as EXACT STRINGS via the scoped parser →
- *   `{ kind:"int", intStr }` (the seam's exact-integer `seam::Value::Int` domain —
+ *   `{ kind:"int", intStr }` (the seam's exact-integer `driver::Value::Int` domain —
  *   `event_seq`, `version`; NEVER `Number(x)`, which truncates > 2^53).
  * - int4 (23) / int2 (21): JS number → `{ kind:"int", int }`.
  * - bool (16): `{ kind:"bool" }`.
