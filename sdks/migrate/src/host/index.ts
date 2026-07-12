@@ -21,6 +21,7 @@
 
 import { loadAddon, currentIrVersion, type MigrateAddon } from "./addon.js";
 import { openPgSession, type HostDriver } from "./driver-pg.js";
+import { openMysqlSession } from "./driver-mysql2.js";
 import { buildEnvelope, type IrEnvelope, type MigrationModule } from "../host-recorder.js";
 
 export { currentIrVersion } from "./addon.js";
@@ -28,27 +29,35 @@ export type { IrEnvelope, MigrationModule } from "../host-recorder.js";
 
 /** A driver target the facade opens a pinned host session against.
  *
- *  Only `postgres` exists today: the shipped apply path routes every driver
- *  through `executor::apply`, which is hard-wired to Postgres SQL (advisory
- *  locks, journal DDL, `SET ROLE`). A MySQL arm would be a typed lie — it would
- *  advertise an apply target that errors on the first statement. MySQL apply
- *  returns once its own `Backend` (dialect-specific lock/journal/placeholder
- *  SQL) rides the seam. Render/plan still accept the `"mysql"` dialect string. */
-export type DriverConfig = { kind: "postgres"; url: string };
+ *  Both NETWORK dialects ride the SAME `SqlSession` seam: `postgres` (`pg`) and
+ *  `mysql` (`mysql2`). Each dialect's lock / journal / placeholder SQL lives in
+ *  its own `MigrationBackend` (`PostgresBackend` — `pg_advisory_lock`, `SET ROLE`;
+ *  `MysqlBackend` — `GET_LOCK`, `?` placeholders), and the addon selects the
+ *  backend from the `dialect` string. SQLite is NOT a host driver — it runs
+ *  in-process via rusqlite and never crosses the seam. */
+export type DriverConfig =
+  | { kind: "postgres"; url: string }
+  | { kind: "mysql"; url: string };
 
-/** The dialect string the addon lower + load-verify expect. */
-function dialectOf(driver: DriverConfig): "postgres" {
+/** The dialect string the addon lower + load-verify + backend-select expect. */
+function dialectOf(driver: DriverConfig): "postgres" | "mysql" {
   return driver.kind;
 }
 
 /** Open the pinned host session for a driver and return its `hostDriver` callback +
- *  a `close()`. PG uses `driver-pg.ts` (connection-scoped exact-integer parsers). */
+ *  a `close()`. PG uses `driver-pg.ts` (connection-scoped exact-integer parsers);
+ *  MySQL uses `driver-mysql2.ts` (real `mysql2/promise` over node:net, BIGINT/DECIMAL
+ *  as exact strings). */
 async function openSession(
   driver: DriverConfig,
 ): Promise<{ hostDriver: HostDriver; close: () => Promise<void> }> {
   if (driver.kind === "postgres") {
     const s = await openPgSession(driver.url);
     return { hostDriver: s.hostDriver, close: s.close };
+  }
+  if (driver.kind === "mysql") {
+    const s = await openMysqlSession(driver.url);
+    return { hostDriver: s.hostDriver as HostDriver, close: s.close };
   }
   throw new Error(`zero-migrate/host: unsupported driver ${JSON.stringify((driver as { kind: string }).kind)}`);
 }
