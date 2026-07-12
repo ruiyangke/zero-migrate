@@ -1,10 +1,18 @@
 [workspace]
 members = ["crates/*"]
 resolver = "3"
-# The N-API addon is its OWN standalone workspace (empty `[workspace]` table in its
-# manifest) so a plain `cargo build` of this workspace never pulls the napi
-# toolchain / Node ABI. It is built separately via `napi build`.
-exclude = ["crates/zero-migrate-node"]
+# The N-API addon (`zero-migrate-node`) is a full workspace member — it inherits
+# the shared `[workspace.package]` / `[workspace.dependencies]` / `[workspace.lints]`
+# and resolves against the single root lockfile. It is a `cdylib` leaf: `cargo build`
+# compiles it fine (napi_build only emits allow-undefined link args for the Node ABI,
+# resolved at `.node` load time), but it is kept OUT of the default build/test flow
+# via `default-members` below so a bare `cargo build`/`cargo test` never pulls the
+# napi toolchain path. Build the loadable `.node` separately via `napi build`.
+default-members = [
+    "crates/zero-migrate",
+    "crates/zero-migrate-guard",
+    "crates/zero-migrate-ir",
+]
 
 # ---------------------------------------------------------------------------
 # Shared package metadata
@@ -86,3 +94,13 @@ missing_debug_implementations = "warn"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+
+# ---------------------------------------------------------------------------
+# Release profile — LTO + symbol strip for the shipped `zero-migrate-node` `.node`
+# artifact. Profile tables in a non-root workspace member are ignored by cargo, so
+# these must live at the workspace root (they apply to every member's release build).
+# ---------------------------------------------------------------------------
+
+[profile.release]
+lto = true
+strip = "symbols"
