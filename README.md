@@ -71,7 +71,8 @@ via the napi bridge.
 | **Library core (host-driven PG)** | `cargo build -p zero-migrate --no-default-features --features host-pg` | The above minus the CLI. This is what the `zero-migrate-node` napi addon links. |
 | **Lean core (SQLite only)** | `cargo build -p zero-migrate --no-default-features` | Guard + IR + render + SQLite apply + journal, PG seam omitted. |
 
-The napi addon is built separately (it is its own excluded workspace):
+The napi addon is a workspace member (kept out of `default-members`, so a bare
+`cargo build`/`cargo test` skips it); the loadable `.node` is built separately:
 
 ```bash
 cd crates/zero-migrate-node && napi build --platform --release
