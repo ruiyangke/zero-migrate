@@ -1,0 +1,39 @@
+{
+  "name": "zero-migrate-engine",
+  "version": "0.0.0",
+  "description": "The zero-migrate host runtime: loads the native addon, ships pg/mysql2 driver adapters, and exposes apply/plan/status/history/validate over the driver seam.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "zero-migrate": "./dist/cli-bin.js"
+  },
+  "files": ["dist", "src", "native"],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit",
+    "test:host": "NODE_ENV=test node --import tsx --test tests/host/*.test.ts"
+  },
+  "dependencies": {
+    "zero-migrate": "workspace:*"
+  },
+  "optionalDependencies": {
+    "pg": "^8.13.0",
+    "mysql2": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/pg": "^8.11.0",
+    "tsup": "^8.5.1",
+    "tsx": "catalog:",
+    "typescript": "catalog:"
+  }
+}

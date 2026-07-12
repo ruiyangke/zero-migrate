@@ -375,12 +375,12 @@ test(".default(nextval(name,{schema})) emits IrDefault::Nextval", () => {
   const createOps = record(() => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
+        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
   });
   assert.deepEqual(createOps[0].columns[0].default, {
-    nextval: { name: "audit_events_id_seq", schema: "zeroship" },
+    nextval: { name: "audit_events_id_seq", schema: "zero_migrate" },
   });
 
   const addOps = record(() => {
@@ -397,7 +397,7 @@ test("public and engine recorders match for nextval defaults", () => {
   const publicOps = record(() => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
+        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
     table("audit_events").column("id").add({
@@ -407,7 +407,7 @@ test("public and engine recorders match for nextval defaults", () => {
   const engineOps = recordEngine(({ table, t, nextval }) => {
     table("audit_events").create({
       columns: {
-        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zeroship" })),
+        id: t.bigInt().notNull().default(nextval("audit_events_id_seq", { schema: "zero_migrate" })),
       },
     });
     table("audit_events").column("id").add({
@@ -472,10 +472,10 @@ test(".foreignKey().add() field order is irrelevant (named fields, not positiona
 
 test(".foreignKey().add() records composite/non-id references without serializing reference schema", () => {
   const ops = record(() =>
-    table("billing_line_provider_refs", { schema: "zeroship" }).foreignKey("billing_line_provider_refs_line_fk").add({
+    table("billing_line_provider_refs", { schema: "zero_migrate" }).foreignKey("billing_line_provider_refs_line_fk").add({
       columns: ["invoice_id", "app_id", "segment_no"],
       references: {
-        schema: "zeroship",
+        schema: "zero_migrate",
         table: "invoice_lines",
         columns: ["invoice_id", "app_id", "segment_no"],
       },
@@ -1230,7 +1230,7 @@ test("table CHECK expressions allow immutable PG nodes, record aggregates, and r
       expr: (() => ({
         node: "fnCall",
         fn: "currentSetting",
-        args: [{ node: "literal", value: "zeroship.tenant_app" }],
+        args: [{ node: "literal", value: "zero_migrate.tenant_app" }],
       })) as any,
     })),
     (e: any) => e.code === "OP_INVALID" && /check constraint/.test(e.message) && /currentSetting/.test(e.message),
@@ -1653,7 +1653,7 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
   const inDomain = (name: string, elems: string[]) => ({
     op: "createDomain",
     name,
-    schema: "zeroship",
+    schema: "zero_migrate",
     as: "text",
     check: { node: "inList", expr: { node: "colRef", name: "VALUE" }, elems, negated: false },
   });
@@ -1676,7 +1676,7 @@ test("platform corpus domain checks record byte-identical VALUE colRef ops", asy
     {
       op: "createDomain",
       name: "billing_period",
-      schema: "zeroship",
+      schema: "zero_migrate",
       as: "date",
       check: {
         node: "binOp",

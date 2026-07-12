@@ -96,22 +96,11 @@ const banner = `/* eslint-disable */
 const raw = await readFile(schemaPath, "utf8");
 const schema = JSON.parse(raw);
 
-// The engine schema's doc descriptions still carry the historical platform
-// package names (`@zeroship/migrate`, `@zeroship/db`) transcribed from the Rust
-// `#[doc]` comments. The standalone JS package is `zero-migrate` with the db
-// type-builder inlined, so rewrite those specifiers in the emitted TS doc strings
-// (JS-side only — the Rust schema source is left untouched). Purely cosmetic; the
-// enum tokens themselves are unaffected.
+// The engine schema's doc descriptions carry the `zero-migrate` brand directly
+// (the Rust `#[doc]` comments name the standalone package + its `zero-migrate/pg`
+// vendor namespace), so the emitted TS doc strings need no specifier rewrite —
+// this is an identity pass-through kept as a seam for any future doc-only remap.
 function sanitizeDoc(node) {
-  if (typeof node === "string") {
-    return node.replaceAll("@zeroship/migrate", "zero-migrate").replaceAll("@zeroship/db", "db");
-  }
-  if (Array.isArray(node)) return node.map(sanitizeDoc);
-  if (node && typeof node === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(node)) out[k] = sanitizeDoc(v);
-    return out;
-  }
   return node;
 }
 

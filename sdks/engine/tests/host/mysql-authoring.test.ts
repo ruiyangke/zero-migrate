@@ -1,0 +1,166 @@
+// Live-MySQL host apply e2e (redesign step 4e) — the MySQL analogue of
+// `authoring.test.ts`, GATED behind `ZERO_MIGRATE_MYSQL_URL`.
+//
+// Proves the V8-FREE authoring path end-to-end against a REAL MySQL server, using
+// the SAME `SqlSession` seam Postgres rides:
+//   1. the pure-JS host recorder drains the migration DSL into a `{ ir_version,
+//      name, ops }` op-IR envelope (no embedded V8, no in-Rust recorder);
+//   2. the `zero-migrate-node` napi addon LOWERs the envelope in Rust (stamps
+//      `owner_app`, folds the authoritative `Checksum::of_ir`, folds the confined
+//      system shape) for the `mysql` dialect, then drives `executor::apply_with_lock_mysql`
+//      — the `MysqlBackend` (`GET_LOCK`, MySQL journal DDL, `?` placeholders) — over
+//      the real `mysql2` npm driver (`driver-mysql2.ts`) via the `hostDriver` seam.
+//
+// This is the structural proof of the C1 fix: a `{ kind: "mysql" }` driver routes
+// into the MySQL backend, NOT the Postgres executor, and applies a real migration.
+//
+// GATING: unless `ZERO_MIGRATE_MYSQL_URL` is set, the whole test SKIPS cleanly, so
+// DB-free CI stays green. Set it to e.g.
+//   mysql://root:root@127.0.0.1:3310/zmtest
+// (a dedicated throwaway server — see the redesign step 4e runbook).
+
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
+
+import { apply } from "zero-migrate-engine";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+
+// Point the addon loader at the sibling crate's prebuilt `.node` unless the caller
+// already set an explicit path (matches `authoring.test.ts`).
+if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
+  const { platform, arch } = process;
+  const abi = platform === "linux" ? "-gnu" : "";
+  process.env.ZERO_MIGRATE_ADDON_PATH = join(
+    HERE,
+    `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
+  );
+}
+
+const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
+
+/** Import the shared sample migration (`createTable widgets` + `addColumn qty`). */
+async function loadMigration() {
+  return import("./mig/20260711000001_create_widgets.ts");
+}
+
+/** A fresh, unique database name so parallel runs / reruns never collide. MySQL
+ *  identifiers cap at 64 chars and `<db>_migrations` must also fit, so keep it short. */
+function uniqueDatabase(prefix: string): string {
+  return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
+}
+
+// ---------------------------------------------------------------------------
+// Live-MySQL apply — the napi addon lowers for the `mysql` dialect + applies over
+// the real `mysql2` driver into a fresh throwaway database. Skips (does not fail)
+// when `ZERO_MIGRATE_MYSQL_URL` is unset.
+// ---------------------------------------------------------------------------
+test("Live MySQL apply: napi addon lowers + applies the authored IR over the mysql2 driver", async (t) => {
+  if (!MYSQL_URL) {
+    t.skip("ZERO_MIGRATE_MYSQL_URL unset — live-MySQL e2e skipped (DB-free CI stays green)");
+    return;
+  }
+
+  // The `mysql2` driver is an optionalDependency; fail the test loudly if the URL
+  // is set but the driver is missing (a real misconfiguration, not a skip).
+  const mysql = (await import("mysql2/promise")).default;
+
+  // A root/admin connection: creates the project database + reads back the journal
+  // and schema. The apply itself opens its OWN pinned session via the host facade.
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+
+  const database = uniqueDatabase("node_mysql");
+  const meta = `${database}_migrations`;
+
+  try {
+    // MySQL qualifies the created table as `<database>`.`widgets`, so the project
+    // database must exist before apply (the addon's journal bootstrap creates only
+    // the `<database>_migrations` meta database). The e2e owns the project database.
+    await admin.query(`CREATE DATABASE \`${database}\``);
+
+    const mig = await loadMigration();
+
+    const outcome = await apply({
+      migration: mig as never,
+      ownerApp: "app_widgets",
+      projectSchema: database,
+      driver: { kind: "mysql", url: MYSQL_URL },
+      registry: {},
+      approved: false,
+      appliedBy: "deploy",
+      nameFallback: "create_widgets",
+    });
+
+    assert.ok(outcome.applied.length > 0, "at least one migration id applied");
+
+    // The `widgets` table exists in the project database.
+    const [tblRows] = await admin.query(
+      `SELECT COUNT(*) AS n FROM information_schema.tables
+        WHERE table_schema = ? AND table_name = 'widgets'`,
+      [database],
+    );
+    assert.equal(
+      Number((tblRows as Array<{ n: number | string }>)[0].n),
+      1,
+      "widgets table was created in the project database",
+    );
+
+    // The author columns AND the addon-folded confined system columns are present.
+    const [colRows] = await admin.query(
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = 'widgets'`,
+      [database],
+    );
+    const colNames = new Set(
+      (colRows as Array<{ column_name?: string; COLUMN_NAME?: string }>).map(
+        (r) => (r.column_name ?? r.COLUMN_NAME) as string,
+      ),
+    );
+    for (const col of ["label", "status", "qty"]) {
+      assert.ok(colNames.has(col), `author column ${col} present (got ${JSON.stringify([...colNames])})`);
+    }
+    for (const col of ["id", "created_at", "updated_at", "version"]) {
+      assert.ok(colNames.has(col), `folded system column ${col} present`);
+    }
+
+    // The MySQL journal (in the `<database>_migrations` meta database) recorded the
+    // applied migration steps. The MySQL journal is the single consolidated events
+    // table, discriminated by `event_kind = 'applied'`.
+    const [journalRows] = await admin.query(
+      `SELECT name FROM \`${meta}\`.schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq`,
+    );
+    const journalNames = (journalRows as Array<{ name?: string; NAME?: string }>).map(
+      (r) => (r.name ?? r.NAME) as string,
+    );
+    assert.ok(journalNames.length > 0, "MySQL journal has applied rows");
+    assert.ok(
+      journalNames.includes("create_table_widgets"),
+      `journal records the create_table step (got ${JSON.stringify(journalNames)})`,
+    );
+    assert.ok(
+      journalNames.includes("add_column_widgets_qty"),
+      `journal records the add_column step (got ${JSON.stringify(journalNames)})`,
+    );
+
+    // The journal is the MySQL native total order (BIGINT AUTO_INCREMENT event_seq).
+    const [seqRows] = await admin.query(
+      `SELECT MIN(event_seq) AS lo, MAX(event_seq) AS hi FROM \`${meta}\`.schema_migrations`,
+    );
+    const lo = Number((seqRows as Array<{ lo: number | string }>)[0].lo);
+    const hi = Number((seqRows as Array<{ hi: number | string }>)[0].hi);
+    assert.ok(hi >= lo && lo >= 1, "event_seq is a positive monotonic native total order");
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});

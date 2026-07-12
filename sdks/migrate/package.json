@@ -1,26 +1,22 @@
 {
   "name": "zero-migrate",
   "version": "0.0.0",
-  "description": "No-raw-SQL, fully-structured, named-ESM-import op builder for portable bi-dialect (Postgres + SQLite) migrations.",
+  "description": "The zero-migrate authoring DSL: fluent table() / view() builders, the t.* column-type lexicon, the closed Expr AST, and the pure-JS recorder. Zero native code, zero runtime deps.",
   "type": "module",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./host": {
-      "types": "./dist/host.d.ts",
-      "import": "./dist/host.js"
-    },
-    "./host-recorder": {
-      "types": "./dist/host-recorder.d.ts",
-      "import": "./dist/host-recorder.js"
+    "./internal/recorder": {
+      "types": "./dist/internal/recorder.d.ts",
+      "import": "./dist/internal/recorder.js"
     }
   },
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "src", "native"],
+  "files": ["dist", "src"],
   "scripts": {
     "gen:ir-types": "node scripts/gen-ir-types.mjs",
     "gen:dialect-table": "node scripts/gen-dialect-table.mjs",
@@ -29,16 +25,10 @@
     "typecheck": "tsc --noEmit",
     "typecheck:types": "tsc --noEmit -p tsconfig.types.json",
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.types.json",
-    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts",
-    "test:host": "NODE_ENV=test node --import tsx --test tests/host/*.test.ts"
-  },
-  "optionalDependencies": {
-    "pg": "^8.13.0",
-    "mysql2": "^3.11.0"
+    "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/pg": "^8.11.0",
     "json-schema-to-typescript": "^15.0.4",
     "tsup": "^8.5.1",
     "tsx": "catalog:",

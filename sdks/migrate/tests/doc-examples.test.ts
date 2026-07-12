@@ -112,7 +112,7 @@ function typecheck(harnessSource: string): string | null {
   // The harness MUST live inside the package tree so node module resolution
   // finds the package's own `node_modules` (`zero-migrate`).
   // A throwaway subdir UNDER `node_modules/` (already gitignored, so a crash
-  // leftover is never accidentally tracked); a sibling of `@zeroship/*`, so the
+  // leftover is never accidentally tracked); a sibling of `@zero_migrate/*`, so the
   // parent-dir resolution from the harness still reaches the package's deps.
   const dir = mkdtempSync(join(PKG_ROOT, "node_modules", ".doc-gate-"));
   try {

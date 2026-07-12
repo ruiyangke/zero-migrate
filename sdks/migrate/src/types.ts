@@ -204,7 +204,7 @@ export interface ColumnDef {
   unique(): ColumnDef;
   /**
    * Declare a STANDALONE column mask (#174) — the field reads back as
-   * `MaskedValue<T>` and the op lower emits the `__zsmask` sentinel + `_masked`
+   * `MaskedValue<T>` and the op lower emits the `zero-migrate:mask` sentinel + `_masked`
    * sibling (the same shape `t.encrypted()`'s auto-mask uses). `kind` is REQUIRED
    * (closed {@link MaskKind}); `classification` is optional and DEFAULTS to `"pii"`
    * (closed {@link Classification}). `kind: "none"` is the explicit opt-out. A
@@ -712,7 +712,7 @@ export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noA
 export type IndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
 
 export interface PartitionBoundSentinel {
-  readonly __zeroshipPartitionBound: "minValue" | "maxValue";
+  readonly __zeroMigratePartitionBound: "minValue" | "maxValue";
 }
 
 export type PartitionBoundInput = string | number | PartitionBoundSentinel;
