@@ -53,12 +53,6 @@ thiserror = "2"
 
 # Utilities
 hex = "0.4"
-libc = "0.2"
-# Kernel-sandbox primitives for the build-time recorder child (seccomp-bpf
-# default-deny + Landlock read-only filesystem ruleset). Pure-Rust, no C
-# toolchain. Linux-only.
-seccompiler = "0.5"
-landlock = "0.4"
 
 # Logging / tracing facade (no runtime, no crypto).
 tracing = "0.1"
