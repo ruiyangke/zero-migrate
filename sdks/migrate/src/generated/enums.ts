@@ -278,6 +278,6 @@ export type FuncVolatility = "volatile" | "stable" | "immutable";
 
 /**
  * Per-collection deploy-time data-validation strictness, mirroring the
- * `db` `schema(...).strictness(...)` builder.
+ * built-in `schema(...).strictness(...)` builder.
  */
 export type TableStrictness = "strict" | "lenient" | "off";

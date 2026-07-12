@@ -1,7 +1,7 @@
 # `zero-migrate` — the op DSL
 
 `zero-migrate` is the no-raw-SQL, fully-structured authoring surface for
-zeroship database migrations. A migration is a `.ts` module that imports the
+database migrations. A migration is a `.ts` module that imports the
 helpers it needs from `zero-migrate` and exports a single
 `default { name?, up, down? }` object. You
 describe schema changes (DDL) and data migrations (DML) once through the fluent
@@ -33,9 +33,9 @@ transform the closed surface cannot express is a hard, structured error, not a
 back door to hand-written SQL.
 
 The TypeScript authoring surface lives in `sdks/migrate/src/` (the npm
-`zero-migrate` package). Its engine-side twin — the recorder the Rust
-runtime evaluates in V8 to turn a migration into the frozen IR wire shape —
-lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit the
+`zero-migrate` package). Its engine-side twin — the recorder that turns a
+migration into the frozen IR wire shape — lives in
+`crates/zero-migrate/src/frontend/op_recorder.js`. Both emit the
 identical dialect-neutral op objects; the canonical IR shape is the frozen
 contract.
 
@@ -236,7 +236,7 @@ No mature migration tool binds migration files to the live schema:
 - **Kysely** deliberately uses `Kysely<any>` inside migrations — its docs state
   migrations should not be typed against the current schema, precisely because
   the schema changes over time.
-- **Alembic** uses string names: `op.add_column("users", …)`. zeroship's
+- **Alembic** uses string names: `op.add_column("users", …)`. zero-migrate's
   `table("users").column(…)` likewise carries plain-string names.
 - **Drizzle** migrations are generated SQL, not type-checked against the live
   schema.
@@ -693,7 +693,7 @@ it. The default semantic is **shape-verify-or-fail**, never a bare skip:
 > TOCTOU window. `decide` is pure Rust over the snapshot, never a SQL-level
 > conditional. On `SatisfiedNoop` the version still lands (a journaled completed row)
 > so a re-deploy skips it via normal pending computation; on `FailDrift` the txn is
-> rolled back and nothing is applied or journaled. (`crates/zeroship-migrate/src/guard_probe.rs`,
+> rolled back and nothing is applied or journaled. (`crates/zero-migrate/src/guard_probe.rs`,
 > `executor.rs` PG `apply_transactional`, `backend_sqlite/mod.rs` SQLite
 > `apply_up_transactional`.)
 >
@@ -966,7 +966,7 @@ This envelope is enforced across **two layers**, not one:
 
 - The record-time JS grammar lint (`sdks/migrate/src/ops.ts:698-712`, the
   `splitPartGrammarLint`; mirrored at
-  `crates/zeroship-migrate/src/frontend/migrate_ops.js:1106-1127`) rejects only the
+  `crates/zero-migrate/src/frontend/op_recorder.js:1106-1127`) rejects only the
   *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
   and a non-integer or non-positive `n`. It does **not** check single-ASCII,
   multi-character, or the `1 ≤ n ≤ 8` bound (the recorder twin's own comment is
@@ -1048,7 +1048,7 @@ lowers to a dual-dialect online change:
 
 Both lowerings are implemented and covered by tests (the PG expand-contract and
 the SQLite rebuild apply end-to-end in
-`crates/zeroship-migrate/tests/ir_rename_pr2_pg.rs` /
+`crates/zero-migrate/tests/ir_rename_pr2_pg.rs` /
 `ir_rename_pr2_sqlite.rs`).
 
 **What is not yet wired for production deploy.** The production control-plane
@@ -1058,7 +1058,7 @@ migrations through `apply_bundle_migrations` under `Approval::None`, which
 approved-apply go-live surfaces (`apply_bundle_migrations_approved` /
 `apply_bundle_ir_sqlite` with `Approval::Approved`,
 `crates/control/src/deploy_migrate.rs:286`,
-`crates/zeroship-migrate/src/ir_apply.rs:130`) are reachable only from tests
+`crates/zero-migrate/src/ir_apply.rs:130`) are reachable only from tests
 today. That test-only status is load-bearing and pinned by a regression test
 (`production_deploy_handler_never_wires_the_unguarded_approved_go_live_surface`,
 `crates/control/tests/deploy_migrate_test.rs:643`), which fails RED the instant
@@ -1122,7 +1122,7 @@ apply-relevant change.
 
 Migration-first: the op.* migration set is the source of truth for the schema, and
 the typed `env.db` surface is **generated from it** rather than from a separate
-declared schema object on the app entry. The `zeroship-migrate-js gen-types`
+declared schema object on the app entry. The `zero-migrate-js gen-types`
 subcommand records each `migrations/*.ts` source file through the sandboxed
 recorder in version order, folds the transient IR into a per-collection field map
 (the same fold the engine uses internally), and emits two artifacts:
@@ -1141,12 +1141,12 @@ recorder in version order, folds the transient IR into a per-collection field ma
 
 ```bash
 # emit (writes both artifacts into the output dir)
-zeroship-migrate-js gen-types --dir migrations --out generated/zeroship
+zero-migrate-js gen-types --dir migrations --out generated/db
 
 # CI generated-artifact check (no DB, no write): regenerate in memory and diff
 # against the committed generated artifacts — fails non-zero if they no longer
 # track the migrations
-zeroship-migrate-js gen-types --dir migrations --out generated/zeroship --check
+zero-migrate-js gen-types --dir migrations --out generated/db --check
 ```
 
 The declared-only facets ([Sensitive-data facets](#sensitive-data-facets)) survive
@@ -1160,15 +1160,13 @@ Include the generated module in the app's `tsconfig.json`:
 
 ```json
 {
-  "include": ["src", "generated/zeroship/env.db.ts"]
+  "include": ["src", "generated/db/env.db.ts"]
 }
 ```
 
-The `@zeroship/vite-plugin` is a thin client of this same CLI: it regenerates the
-artifacts on dev-server boot and on any change under the migrations dir, and runs
-the `--check` generated-artifact gate on a production build. See
-[vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
-for the build/watch wiring.
+A build/watch integration can be a thin client of this same CLI: regenerating the
+artifacts on dev-server boot and on any change under the migrations dir, and running
+the `--check` generated-artifact gate on a production build.
 
 > **Implemented: Postgres vendor primitives.** `zero-migrate` exposes direct
 > named exports and one PG-first `table()` handle, not a `pg` namespace object.
@@ -1176,7 +1174,7 @@ for the build/watch wiring.
 > `grant`, `revoke`, `createFunction`, `dropFunction`, `domain`, `sequence`, and
 > `raw`; table-scoped vendor operations are methods on `table(name)`.
 > Policies are authored as `table(name).policy(policyName).create/drop(...)`.
-> These are Postgres-only and capability-gated so the platform's own privileged
+> These are Postgres-only and capability-gated so privileged
 > DDL can be authored in the DSL.
 > The engine lowers
 > these vendor ops through the Postgres vendor renderer, hard-gated to the
@@ -1185,7 +1183,7 @@ for the build/watch wiring.
 
 ## Offline SQL preview (`plan`)
 
-`zeroship-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
+`zero-migrate plan --dir <d> --dialect <pg|sqlite>` renders the **exact
 per-dialect SQL the pending migration set WOULD execute** — without a database and
 without applying anything. This is the canonical Alembic `--sql` / Atlas / Flyway /
 dbmate feature, here for **go-live review**. Before approving an
@@ -1302,7 +1300,7 @@ snippets compile inside never-executed function bodies, so it does **not**
 exercise record-time runtime checks (the `splitPartGrammarLint` throw, `del`'s
 mandatory-`where` reject). Those runtime invariants are covered separately by
 `sdks/migrate/tests/ops.test.ts` and by the Rust apply gate
-(`crates/zeroship-migrate/tests/doc_hero_apply.rs`), which applies the appendix
+(`crates/zero-migrate/tests/doc_hero_apply.rs`), which applies the appendix
 IR byte-identically on real PG + SQLite. Do not read a green TS gate as proof a
 snippet would also survive record-time.
 
@@ -1311,9 +1309,9 @@ snippet would also survive record-time.
 - **Security / threat model** — the recorder runs untrusted creator code inside
   a kernel sandbox (seccomp + landlock + netns); the apply path runs under a
   least-privilege per-app migrator role behind a parse deny-list and an immutable
-  journal. See [zeroship-migrate-guide.md](./zeroship-migrate-guide.md) for the
+  journal. See [zero-migrate-guide.md](./zero-migrate-guide.md) for the
   engine threat model and apply path.
-- **The IR and expression contract** — [zeroship-migrate-guide.md](./zeroship-migrate-guide.md)
+- **The IR and expression contract** — [zero-migrate-guide.md](./zero-migrate-guide.md)
   covers the IR wire contract, typing stance, closed expression AST, and DML
   portability boundary.
 - **SQLite divergences** — intentional Postgres↔SQLite differences in search,
