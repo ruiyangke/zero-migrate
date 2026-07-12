@@ -1,7 +1,7 @@
 // `zero-migrate/host` — the creator-facing HOST facade (design §D.3).
 //
 // A thin async layer over the prebuilt N-API addon (`crates/zero-migrate-node`,
-// Phase C). The creator never sees N-API, `SeamRow`, or the `hostDriver` callback:
+// Phase C). The creator never sees N-API, `seam::Row`, or the `hostDriver` callback:
 //
 //   import { apply, plan, status, history } from "zero-migrate/host";
 //   await apply({ migration, ownerApp, projectSchema, driver: { kind:"postgres", url } });
