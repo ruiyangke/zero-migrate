@@ -70,6 +70,7 @@ tempfile = "3"
 rusqlite = { version = "0.39", features = ["bundled", "load_extension", "hooks"] }
 
 # Internal crates
+zero-migrate-ir = { path = "crates/zero-migrate-ir" }
 zero-migrate-schema = { path = "crates/zero-migrate-schema" }
 
 # ---------------------------------------------------------------------------
