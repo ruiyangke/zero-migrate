@@ -72,7 +72,6 @@ rusqlite = { version = "0.39", features = ["bundled", "load_extension", "hooks"]
 # Internal crates
 zero-migrate-ir = { path = "crates/zero-migrate-ir" }
 zero-migrate-guard = { path = "crates/zero-migrate-guard" }
-zero-migrate-schema = { path = "crates/zero-migrate-schema" }
 
 # ---------------------------------------------------------------------------
 # Shared lints

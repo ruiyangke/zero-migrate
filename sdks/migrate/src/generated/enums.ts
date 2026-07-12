@@ -181,7 +181,7 @@ export type ExistenceGuard = "ifNotExists" | "ifExists";
  * injection-shaped action string into the FK render seam. Camel-cased on the
  * wire (`"cascade"`, `"setNull"`, `"noAction"`, …); the per-dialect SQL spelling
  * (`SET NULL`, `NO ACTION`, …) is the render seam's job via
- * [`zero_migrate_schema::query::normalize_fk_action`].
+ * `zero_migrate::schema::query::normalize_fk_action`.
  */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 

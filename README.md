@@ -38,10 +38,14 @@ exotic syntax.
 
 ```
 crates/
-├── zero-migrate/         The migration engine (guard, IR, render, apply, journal).
-│                         V8-FREE — no embedded V8, no `v8` dependency.
-├── zero-migrate-schema/  Shared schema-authority core: DDL builders, diff
-│                         classifier, live introspection, sentinel codec.
+├── zero-migrate/         The migration engine (render, apply, journal, and the
+│                         `schema` module: DDL builders, diff classifier, sentinel
+│                         codec, schema-shape descriptors). V8-FREE — no embedded
+│                         V8, no `v8` dependency.
+├── zero-migrate-ir/      Leaf wire contract: MigrationIr, the closed Op/Expr AST,
+│                         the SqlDialect target enum, the structural validator.
+├── zero-migrate-guard/   The pg_query(libpg_query)-backed SQL security layer:
+│                         parse-time deny-list, classification, advisories.
 └── zero-migrate-node/    Node/Bun N-API addon: host-driven pg/mysql2 apply over
                           the driver-neutral session seam. Its own workspace.
 sdks/
@@ -76,8 +80,10 @@ cd crates/zero-migrate-node && napi build --platform --release
 ## Testing
 
 ```bash
-# The V8-free Rust core (guard / IR / render / SQLite apply / journal) + schema core.
-cargo test -p zero-migrate-schema --lib
+# The V8-free Rust core (IR, guard, and the engine: schema / render / SQLite
+# apply / journal).
+cargo test -p zero-migrate-ir --lib
+cargo test -p zero-migrate-guard --lib
 cargo test -p zero-migrate --lib
 
 # The V8-free integration suites (SQLite + host-pg seam). Postgres-backed tests
