@@ -2,7 +2,7 @@
 //
 // Proves the V8-FREE authoring path end-to-end, entirely in the Node process:
 //   1. the pure-JS host recorder (`host-recorder.ts`) evals the migration DSL
-//      (`table()`/`t.*` from `@zeroship/migrate`) into a `{ ir_version, name, ops }`
+//      (`table()`/`t.*` from `zero-migrate`) into a `{ ir_version, name, ops }`
 //      op-IR envelope — NO embedded V8, NO in-Rust recorder;
 //   2. the `zero-migrate-node` napi addon LOWERs the envelope in Rust (stamps
 //      `owner_app`, folds the authoritative `Checksum::of_ir` + the confined system
@@ -26,8 +26,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { buildEnvelope } from "@zeroship/migrate/host-recorder";
-import { currentIrVersion, apply } from "@zeroship/migrate/host";
+import { buildEnvelope } from "zero-migrate/host-recorder";
+import { currentIrVersion, apply } from "zero-migrate/host";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -47,7 +47,7 @@ const PG_URL =
   process.env.ZERO_MIGRATE_TEST_PG_URL ??
   "postgres://postgres:zeroship@localhost:5440/zero_migrate_test";
 
-/** Import the sample migration (`.ts`) — resolves `@zeroship/migrate` to this
+/** Import the sample migration (`.ts`) — resolves `zero-migrate` to this
  *  package's dist (one shared recorder singleton). Runs under `node --import tsx`. */
 async function loadMigration() {
   return import("./mig/20260711000001_create_widgets.ts");

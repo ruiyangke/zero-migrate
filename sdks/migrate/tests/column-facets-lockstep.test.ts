@@ -5,7 +5,7 @@
 // S0.5 collapsed the recorder twin: there is no longer a hand-kept
 // `migrate_ops.js`. The SDK recorder (`src/ops.ts`) and the engine-embedded
 // recorder (`dist/embedded-recorder.js`, the `tsup` build output the
-// `zeroship-migrate` crate `include_str!`s into V8) are now the SAME source,
+// `zero-migrate` crate `include_str!`s into V8) are now the SAME source,
 // compiled two ways. This test is the design's "one-release parity tripwire →
 // artifact-identity assertion": re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the

@@ -1,4 +1,4 @@
-// `@zeroship/migrate` — the fluent DSL records the same frozen wire ops the
+// `zero-migrate` — the fluent DSL records the same frozen wire ops the
 // engine recorder + golden corpus pin. The DSL's `__begin`/`__drain` ambient
 // recorder (the build-evaluator seam) is driven directly so a test can assert the
 // recorded op objects without the Rust V8 host. Table authoring is via the
@@ -38,7 +38,7 @@ import {
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 // The engine-embedded recorder is now the COMPILED artifact
-// (`dist/embedded-recorder.js`) the `zeroship-migrate` crate `include_str!`s —
+// (`dist/embedded-recorder.js`) the `zero-migrate` crate `include_str!`s —
 // the same `tsup` build output of `src/ops.ts`. Importing it here (instead
 // of the deleted `migrate_ops.js` twin) makes this an artifact-identity oracle:
 // the SDK source and the shipped engine artifact record byte-identically.
@@ -62,7 +62,7 @@ function record(up: () => void): any[] {
 async function importPlatformCorpusMigration(relativePath: string): Promise<{ up(): void }> {
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
   const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
-  const source = (await readFile(sourcePath, "utf8")).replaceAll(`from "@zeroship/migrate"`, `from "${indexUrl}"`);
+  const source = (await readFile(sourcePath, "utf8")).replaceAll(`from "zero-migrate"`, `from "${indexUrl}"`);
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
   return import(dataUrl) as Promise<{ up(): void }>;
 }
@@ -73,8 +73,8 @@ function recordEngine(up: (api: { table: any; t: any; nextval: any; decimal: any
   return engDrain();
 }
 
-test("@zeroship/migrate core exports enumType, pg vendor names, and omits old names", async () => {
-  const imported = await import("@zeroship/migrate");
+test("zero-migrate core exports enumType, pg vendor names, and omits old names", async () => {
+  const imported = await import("zero-migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
   assert.equal(typeof imported.now, "function");

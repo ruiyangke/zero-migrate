@@ -64,9 +64,9 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "schema",
     "sequence",
   ];
-  assert.equal(coreExports.has("table"), true, "table must be exported from @zeroship/migrate root declarations");
+  assert.equal(coreExports.has("table"), true, "table must be exported from zero-migrate root declarations");
   for (const name of rootedVendorExports) {
-    assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
+    assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
   }
 
   const forbiddenInternalExports = [
@@ -83,18 +83,18 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "pg" + "Table",
   ];
   for (const name of forbiddenInternalExports) {
-    assert.equal(coreExports.has(name), false, `${name} must stay out of @zeroship/migrate root declarations`);
+    assert.equal(coreExports.has(name), false, `${name} must stay out of zero-migrate root declarations`);
   }
 
   const indexDts = readFileSync(new URL("../dist/index.d.ts", import.meta.url), "utf8");
   assert.doesNotMatch(indexDts, /\bCreateRawViewArgs\b/);
   assert.doesNotMatch(indexDts, /\bcreateRaw\b/);
 
-  const runtimeRoot = await import("@zeroship/migrate");
+  const runtimeRoot = await import("zero-migrate");
   for (const name of rootedVendorExports) {
     assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
   }
   for (const name of forbiddenInternalExports) {
-    assert.equal((runtimeRoot as Record<string, unknown>)[name], undefined, `${name} must stay out of @zeroship/migrate root runtime exports`);
+    assert.equal((runtimeRoot as Record<string, unknown>)[name], undefined, `${name} must stay out of zero-migrate root runtime exports`);
   }
 });

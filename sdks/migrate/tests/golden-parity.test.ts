@@ -1,4 +1,4 @@
-// Byte-identity oracle: the fluent `@zeroship/migrate` authoring surface records
+// Byte-identity oracle: the fluent `zero-migrate` authoring surface records
 // the SAME author ops the engine's embedded recorder (`migrate_ops.js`) committed
 // before the Rust build path resolves profile-owned table shape into the golden
 // corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js` are two

@@ -35,12 +35,12 @@ import pg from "pg";
 // Portable "this dir" across Bun (`HERE`) and Node (derive from URL).
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-import { apply, status, history, currentIrVersion } from "@zeroship/migrate/host";
-import { buildEnvelope } from "@zeroship/migrate/host-recorder";
+import { apply, status, history, currentIrVersion } from "zero-migrate/host";
+import { buildEnvelope } from "zero-migrate/host-recorder";
 
 // The migration module. Under Bun we import the `.ts` directly; under plain Node
 // (which can't import `.ts`) we import the `bun build`-transpiled `.mjs` sibling.
-// Both resolve `@zeroship/migrate` EXTERNAL → the same recorder module instance.
+// Both resolve `zero-migrate` EXTERNAL → the same recorder module instance.
 const IS_BUN = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
 const migMod = IS_BUN
   ? await import("./mig/20260711000001_create_widgets.ts")
@@ -62,7 +62,7 @@ const NATIVE_REF_BIN =
   join(HERE, "native-ref/target/debug/migrate-native-ref");
 const NATIVE_JS_BIN =
   process.env.ZEROSHIP_MIGRATE_JS_BIN ??
-  join(HERE, "../../../../target/debug/zeroship-migrate-js");
+  join(HERE, "../../../../target/debug/zero-migrate-js");
 const MIG_TS = join(HERE, "mig/20260711000001_create_widgets.ts");
 
 let failures = 0;
@@ -322,7 +322,7 @@ async function main() {
   }
 
   // ---- ShadowUnsupported honesty: no dryRun verb in the facade ----
-  const facade = await import("@zeroship/migrate/host");
+  const facade = await import("zero-migrate/host");
   record(
     "shadow-deferred honesty: the host facade exposes NO `dryRun` verb (host shadow §F deferred)",
     !("dryRun" in facade),

@@ -1,9 +1,9 @@
-// `@zeroship/migrate/host` — the creator-facing HOST facade (design §D.3).
+// `zero-migrate/host` — the creator-facing HOST facade (design §D.3).
 //
-// A thin async layer over the prebuilt N-API addon (`crates/zeroship-migrate-node`,
+// A thin async layer over the prebuilt N-API addon (`crates/zero-migrate-node`,
 // Phase C). The creator never sees N-API, `SeamRow`, or the `hostDriver` callback:
 //
-//   import { apply, plan, status, history } from "@zeroship/migrate/host";
+//   import { apply, plan, status, history } from "zero-migrate/host";
 //   await apply({ migration, ownerApp, projectSchema, driver: { kind:"postgres", url } });
 //
 // The flow for `apply` (§D.1/§D.3):
@@ -51,7 +51,7 @@ async function openSession(
     const s = await openMysqlSession(driver.url);
     return { hostDriver: s.hostDriver as HostDriver, close: s.close };
   }
-  throw new Error(`@zeroship/migrate/host: unsupported driver ${JSON.stringify((driver as { kind: string }).kind)}`);
+  throw new Error(`zero-migrate/host: unsupported driver ${JSON.stringify((driver as { kind: string }).kind)}`);
 }
 
 /** Common inputs to the host verbs. */
@@ -218,7 +218,7 @@ export async function history(
  */
 export function generate(): never {
   throw new Error(
-    "@zeroship/migrate/host: `generate` (schema-diff autogenerate) is not wired in v1 " +
+    "zero-migrate/host: `generate` (schema-diff autogenerate) is not wired in v1 " +
       "— the Phase-C addon exposes no generate entry. Author migrations with the DSL and " +
       "use `apply`/`plan`.",
   );

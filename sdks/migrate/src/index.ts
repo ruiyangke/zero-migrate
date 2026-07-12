@@ -1,4 +1,4 @@
-// `@zeroship/migrate` — the no-raw-SQL, fully-structured, FLUENT-only op builder
+// `zero-migrate` — the no-raw-SQL, fully-structured, FLUENT-only op builder
 // for portable bi-dialect (PG + SQLite) migrations (design
 // `2026-06-25-op-dsl-fluent-redesign.md`).
 //
@@ -8,7 +8,7 @@
 // strings (NOT live-schema-bound). Every expression is the fluent `(c) => Expr`
 // builder; there is no raw escape and no `Raw` type (property A).
 //
-//   import { table, t } from "@zeroship/migrate";
+//   import { table, t } from "zero-migrate";
 //
 //   export default {
 //     up() {
@@ -53,7 +53,7 @@ export {
   raw,
   // the immutable fluent column-type lexicon
   t,
-  // the shared `@zeroship/db` lexicon bridge (PR5 goal A): lift a live-schema
+  // the shared `db` lexicon bridge (PR5 goal A): lift a live-schema
   // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
   fromDb,
   // the determinism lint (best-effort source scan)
@@ -69,12 +69,19 @@ export type {
   RevokeArgs,
 } from "./ops.js";
 
-// The single-source `@zeroship/db` field → migration `ColType` reduction (PR5
-// goal A) + its structured boundary error. The JS inverse of the engine's Rust
+// The single-source db field → migration `ColType` reduction (PR5 goal A) + its
+// structured boundary error. The JS inverse of the engine's Rust
 // `col_type_to_token`; the proof the migration DSL and the runtime schema share
 // ONE type lexicon.
 export { colTypeFromDbField, UnsupportedColTypeError } from "./db-lexicon.js";
 export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
+
+// The inlined db type-builder surface (`fromDb`/`colTypeFromDbField` input side).
+// `dbType` is the `t.*` lexicon a live db schema field is authored with; the
+// migrate bridge lifts it into a migration ColumnDef. Exposed here so a caller
+// (and the bridge tests) can construct db fields without a separate db package.
+export { t as dbType, TypeBuilder as DbTypeBuilder } from "./db-types.js";
+export type { FieldDef, TypeName, EncryptedOptions } from "./db-types.js";
 
 export type {
   // authoring types

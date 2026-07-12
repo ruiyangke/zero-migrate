@@ -1,8 +1,8 @@
-// `@zeroship/migrate` — the fluent-only op-builder DSL implementation
+// `zero-migrate` — the fluent-only op-builder DSL implementation
 // (design `2026-06-25-op-dsl-fluent-redesign.md`).
 //
 // This is the TS authoring surface a creator imports:
-//   import { table, t } from "@zeroship/migrate";
+//   import { table, t } from "zero-migrate";
 //
 //   export default {
 //     up() {
@@ -13,7 +13,7 @@
 //   };
 //
 // It is the typed peer of the engine-embedded recorder
-// (`crates/zeroship-migrate/src/frontend/migrate_ops.js`, which the Rust runtime
+// (`crates/zero-migrate/src/frontend/migrate_ops.js`, which the Rust runtime
 // `include_str!`s into V8 at build/record time). Both emit the IDENTICAL
 // dialect-neutral op objects the closed Rust `Op` enum / `op-ir.schema.json`
 // deserialize — the `.ir.json` wire shape is frozen (byte-identical to the
@@ -138,7 +138,7 @@ import type {
   ViewQueryBuilder,
 } from "./types.js";
 
-import { TypeBuilder as DbTypeBuilder } from "@zeroship/db";
+import { TypeBuilder as DbTypeBuilder } from "./db-types.js";
 
 import { colTypeFromDbField, type DbSchemaField } from "./db-lexicon.js";
 
@@ -1644,15 +1644,15 @@ export function raw(args: PgRawArgs): Node {
   });
 }
 
-// ── (A) The shared `@zeroship/db` lexicon bridge (PR5) ──
+// ── (A) The shared `db` lexicon bridge (PR5) ──
 
 /**
- * Lift a `@zeroship/db` schema field (a `t.*` `TypeBuilder` or its `FieldDef`)
- * into a migration `ColumnDef`, so a column declared in the live `@zeroship/db`
+ * Lift a `db` schema field (a `t.*` `TypeBuilder` or its `FieldDef`)
+ * into a migration `ColumnDef`, so a column declared in the live `db`
  * schema lowers through the IDENTICAL `ColType` path a hand-written migration
  * column does (PR5 goal A — one shared lexicon). The TYPE is bridged via the
  * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
- * carried over (`@zeroship/db` `.required()` → migration `.notNull()`). Table/
+ * carried over (`db` `.required()` → migration `.notNull()`). Table/
  * column NAMES are NEVER bound to the live schema. Returns a chainable
  * (immutable) `ColumnDef`, so a caller can still layer migration modifiers on top.
  */

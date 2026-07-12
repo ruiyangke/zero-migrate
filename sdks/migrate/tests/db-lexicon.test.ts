@@ -1,6 +1,6 @@
-// PR5 goal (A) — the migration DSL and the runtime `@zeroship/db` schema share
+// PR5 goal (A) — the migration DSL and the runtime `db` schema share
 // ONE column-type lexicon. These tests pin the single-source bridge
-// (`colTypeFromDbField` / `fromDb`): a `@zeroship/db` `t.*` field reduces to the
+// (`colTypeFromDbField` / `fromDb`): a `db` `t.*` field reduces to the
 // IDENTICAL dialect-neutral `ColType` the migration DSL's own `t.*` produces, so
 // a `t.ref("users")` FK declared in a live schema lowers the same way an `{ref}`
 // migration column does. Names stay plain strings — never live-schema-bound.
@@ -8,9 +8,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { t as dbT } from "@zeroship/db";
-
-import { colTypeFromDbField, fromDb, t, table, UnsupportedColTypeError } from "../src/index.js";
+import {
+  colTypeFromDbField,
+  dbType as dbT,
+  fromDb,
+  t,
+  table,
+  UnsupportedColTypeError,
+} from "../src/index.js";
 import { __begin, __drain } from "../src/ops.js";
 
 /** The dialect-neutral `ColType` the migration `t.*` records for a column — read
@@ -19,7 +24,7 @@ function migrateColType(def: unknown): unknown {
   return (def as { _type: unknown })._type;
 }
 
-test("ONE lexicon: a @zeroship/db field reduces to the same ColType the migration t.* produces", () => {
+test("ONE lexicon: a db field reduces to the same ColType the migration t.* produces", () => {
   // `dbT.string()` reduces to the neutral `"string"` ColType (the migration
   // lexicon's canonical text type is `t.text()`→`"text"`; the `string` token is a
   // distinct wire variant only the db bridge still produces, §7 alias removal).
@@ -71,7 +76,7 @@ test("fromDb lifts a live-schema field into a migration column on the SAME ColTy
   assert.equal(viaSchema[0].columns[0].nullable, false, "required() → notNull carried over");
 });
 
-test("fromDb carries .unique() over from the @zeroship/db field", () => {
+test("fromDb carries .unique() over from the db field", () => {
   __begin();
   table("u").create({ columns: { email: fromDb(dbT.string().unique()) } });
   const ops = __drain();

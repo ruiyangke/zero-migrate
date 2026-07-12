@@ -1,7 +1,7 @@
 // Host recorder (design §D.1) — the pure-JS half of authoring a `.ir.json`.
 //
-// The in-Rust V8 recorder (`crates/zeroship-migrate/src/frontend/op_recorder.js`)
-// imports a creator migration + `{ __begin, __drain }` from `@zeroship/migrate`,
+// The in-Rust V8 recorder (`crates/zero-migrate/src/frontend/op_recorder.js`)
+// imports a creator migration + `{ __begin, __drain }` from `zero-migrate`,
 // runs `up()` under a fresh ambient recorder, drains the op list, and emits the
 // `{ ir_version, name, ops }` ENVELOPE for the Rust host to read back. The in-V8
 // isolate was only ever a *sandbox* for untrusted `up()`, never an authoring
@@ -92,7 +92,7 @@ function resolveName(mod: MigrationModule, fallback: string): string {
  * structured `OP_OUTSIDE_RECORDER` error rather than a silently-lost op (§D.1).
  *
  * IMPORTANT: `__begin`/`__drain` and the migration's `table()`/`t.*` calls MUST
- * resolve to the SAME `@zeroship/migrate` module instance (one ambient recorder
+ * resolve to the SAME `zero-migrate` module instance (one ambient recorder
  * singleton). A bundler that duplicates the module would drain an empty list; the
  * facade/oracle imports the migration through the same resolution as this module.
  */
@@ -138,7 +138,7 @@ export function buildEnvelope(
  * Dynamic-import a migration module from a path, then {@link buildEnvelope}. The
  * path must resolve to a module the runtime can import directly (an already-built
  * `.js`, or a `.ts` under Bun / a Node `.ts` loader). For an arbitrary `.ts` on
- * plain Node, pre-bundle it (esbuild) so `@zeroship/migrate` resolves to THIS
+ * plain Node, pre-bundle it (esbuild) so `zero-migrate` resolves to THIS
  * package's dist (one recorder instance) and hand the resulting module here.
  */
 export async function buildEnvelopeFromPath(

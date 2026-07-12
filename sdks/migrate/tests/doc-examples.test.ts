@@ -1,17 +1,17 @@
-// CI DOC-EXAMPLE GATE (PR8) — the typed `@zeroship/migrate` examples in
+// CI DOC-EXAMPLE GATE (PR8) — the typed `zero-migrate` examples in
 // `docs/reference/migrate-op-dsl.md` must TYPECHECK against the REAL package
 // types, so a future API change that rots a documented snippet FAILS CI.
 //
 // HOW IT WORKS. The test extracts every fenced ```ts block from the reference
 // doc, assembles them into ONE synthesized TypeScript module that imports the
-// real `@zeroship/migrate` surface, and runs `tsc --noEmit` over it. A snippet
+// real `zero-migrate` surface, and runs `tsc --noEmit` over it. A snippet
 // that no longer compiles (a renamed op, a dropped `t.*` factory, a changed
 // signature, a removed scalar-namespace member) is a hard test failure — the doc cannot
 // silently rot.
 //
 //   - A block that is itself a module (`export default …` / `export interface …`)
 //     is emitted verbatim at module scope (the hero migration carries its own
-//     `import { … } from "@zeroship/migrate"`).
+//     `import { … } from "zero-migrate"`).
 //   - A bare op-call fragment (e.g. a standalone `createTable(…)` / `update(…)`)
 //     is wrapped in a `function _frag_N() { … }` body, under a module preamble
 //     that imports the FULL documented vocabulary, so it typechecks exactly as if
@@ -46,8 +46,8 @@ const VOCAB_PREAMBLE = `import {
   t, fromDb, lintDeterminism,
   now, genRandomUuid, currentSetting, currentUser, interval, concatWs,
   dialect,
-} from "@zeroship/migrate";
-import { t as dbT } from "@zeroship/db";
+  dbType as dbT,
+} from "zero-migrate";
 `;
 
 /** Pull every fenced ```ts block out of the markdown doc, in order.
@@ -84,12 +84,12 @@ function assembleHarness(blocks: string[]): string {
       // collides with the next module example. Wrap each module example in its
       // own namespace via a unique const alias is not possible (it's a default
       // export), so re-emit module examples inside a fresh block is not enough.
-      // Instead, strip the `import … from "@zeroship/migrate"` (the harness
+      // Instead, strip the `import … from "zero-migrate"` (the harness
       // already imports the vocab) and downgrade `export default {…}` to a typed
       // local so multiple modules coexist. `export interface`/`export type`
       // become plain declarations.
-      let body = b.replace(/^\s*import[^\n]*from\s+["']@zeroship\/migrate["'];?\s*$/gm, "");
-      body = body.replace(/^\s*export\s+default\s+/m, `const _mod_${moduleBlocks.length}: import("@zeroship/migrate").Migration = `);
+      let body = b.replace(/^\s*import[^\n]*from\s+["']zero-migrate["'];?\s*$/gm, "");
+      body = body.replace(/^\s*export\s+default\s+/m, `const _mod_${moduleBlocks.length}: import("zero-migrate").Migration = `);
       body = body.replace(/^\s*export\s+(interface|type|const|function)\s+/m, "$1 ");
       moduleBlocks.push(body);
     } else {
@@ -106,11 +106,11 @@ function assembleHarness(blocks: string[]): string {
 }
 
 /** Run `tsc --noEmit` over a single synthesized harness file rooted in the
- *  package, so it resolves the REAL `@zeroship/migrate` + `@zeroship/db` types.
+ *  package, so it resolves the REAL `zero-migrate` types.
  *  Returns null on success, or the compiler diagnostics on failure. */
 function typecheck(harnessSource: string): string | null {
   // The harness MUST live inside the package tree so node module resolution
-  // finds the package's own `node_modules` (`@zeroship/migrate`/`@zeroship/db`).
+  // finds the package's own `node_modules` (`zero-migrate`).
   // A throwaway subdir UNDER `node_modules/` (already gitignored, so a crash
   // leftover is never accidentally tracked); a sibling of `@zeroship/*`, so the
   // parent-dir resolution from the harness still reaches the package's deps.
@@ -152,7 +152,7 @@ test("doc-gate: every typed example in migrate-op-dsl.md typechecks against the 
   assert.equal(
     diagnostics,
     null,
-    `a typed example in docs/reference/migrate-op-dsl.md no longer compiles against @zeroship/migrate.\n` +
+    `a typed example in docs/reference/migrate-op-dsl.md no longer compiles against zero-migrate.\n` +
       `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
   );
 });

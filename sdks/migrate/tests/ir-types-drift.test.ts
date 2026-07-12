@@ -2,7 +2,7 @@
 // + the generated enum tokens (`src/generated/enums.ts`): every `Op` variant tag,
 // every `Expr` node tag, the `ColType` token set, and every closed string-enum
 // token in the TS types is pinned against the engine's single-source-of-truth
-// schema `crates/zeroship-migrate/op-ir.schema.json`. A schema change that adds /
+// schema `crates/zero-migrate/op-ir.schema.json`. A schema change that adds /
 // renames a variant or token FAILS here, forcing the manual transcription to be
 // updated in lockstep (so the ergonomics types cannot silently rot vs the
 // contract). The golden `.ir.json` corpus remains the authoritative contract.
@@ -382,6 +382,6 @@ test("committed generated/enums.ts is up to date with the schema (regenerate + d
   assert.equal(
     readFileSync(out, "utf8"),
     readFileSync(committed, "utf8"),
-    "src/generated/enums.ts is stale — run `pnpm --filter @zeroship/migrate gen:ir-types`",
+    "src/generated/enums.ts is stale — run `pnpm --filter zero-migrate gen:ir-types`",
   );
 });

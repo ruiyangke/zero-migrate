@@ -25,18 +25,19 @@ export default defineConfig([
     external: ["pg", "mysql2", "mysql2/promise"],
     clean: true,
   },
-  // The engine-embedded recorder artifact (DSL redesign S0.5): ONE
-  // self-contained ESM file the `zeroship-migrate` crate `include_str!`s as the
-  // in-V8 `@zeroship/migrate` module (replaces the hand-kept `migrate_ops.js`
-  // twin). No code-splitting (must be a single file for `include_str!`), no
-  // `.d.ts` (runtime artifact only). `@zeroship/db` stays external — the engine
-  // module graph resolves it, exactly as the npm package does.
+  // The recorder artifact (DSL redesign S0.5): ONE self-contained ESM file
+  // exposing the FULL recorder surface — the internal recorder seam
+  // (`__begin`/`__drain`), the producer census (`opProducers`), the value-position
+  // `cCase` helper, the internal `__pgDomain`/`__pgSequence` handles, AND the whole
+  // public vendor surface — in one module. The SDK's recorder-internal tests import
+  // it (`tests/{ops,sequences-exclusion,column-facets-lockstep}.test.ts`). No
+  // code-splitting (single file), no `.d.ts` (build artifact only). The inlined db
+  // type-builder (`./db-types.ts`) is bundled in — there is no external db dep.
   {
     ...shared,
     entry: { "embedded-recorder": "src/embedded-recorder.ts" },
     splitting: false,
     dts: false,
     clean: false,
-    external: ["@zeroship/db"],
   },
 ]);

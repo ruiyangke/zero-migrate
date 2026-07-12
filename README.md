@@ -28,7 +28,7 @@ exotic syntax.
 - **Node-native, V8-FREE by construction.** The engine ships **no embedded V8**.
   The guard / IR / render / SQLite apply / journal core builds with zero
   heavyweight dependencies. Authoring, MySQL, and Postgres all execute in the
-  **Node process** (the `@zeroship/migrate` host-recorder evals the DSL into an
+  **Node process** (the `zero-migrate` host-recorder evals the DSL into an
   op-IR envelope; the `zero-migrate-node` napi addon LOWERs it in Rust — stamping
   `owner_app` and folding the authoritative checksum — then applies it over the
   `pg` / `mysql2` npm drivers). There is no `v8` crate anywhere in the build graph
@@ -45,11 +45,12 @@ crates/
 └── zero-migrate-node/    Node/Bun N-API addon: host-driven pg/mysql2 apply over
                           the driver-neutral session seam. Its own workspace.
 sdks/
-├── migrate/              The `op.*` authoring DSL + the Node host facade
-│                         (`@zeroship/migrate/host`: host-recorder → napi apply).
-└── db/                   A decoupled, self-contained subset of the `@zeroship/db`
-                          type-builder (TypeBuilder + FieldDef) the migrate
-                          `db-lexicon` bridge consumes. See the follow-up note below.
+└── migrate/              The `zero-migrate` npm package: the `op.*` authoring DSL +
+                          the Node host facade (`zero-migrate/host`: host-recorder →
+                          napi apply). Carries the inlined minimal db type-builder
+                          (`src/db-types.ts` — `TypeBuilder` + `FieldDef`, exported
+                          as `dbType`) the `db-lexicon` bridge consumes, so it has no
+                          external db dependency.
 docs/
 └── reference/            Reference documentation.
 ```
@@ -89,16 +90,16 @@ cargo test -p zero-migrate
 # reachable Postgres at postgres://postgres:...@localhost:5440/zero_migrate_test
 # and auto-skips if unreachable).
 pnpm install
-pnpm build                                   # @zeroship/db → @zeroship/migrate
+pnpm build                                   # builds the zero-migrate package
 (cd crates/zero-migrate-node && napi build --platform --release)
-pnpm --filter @zeroship/migrate test         # DSL + IR + drift suites
-pnpm --filter @zeroship/migrate test:host    # authoring → apply over the napi bridge
+pnpm --filter zero-migrate test              # DSL + IR + drift suites
+pnpm --filter zero-migrate test:host         # authoring → apply over the napi bridge
 ```
 
 ## Node-native authoring path
 
 Authoring, MySQL, and Postgres execution all run in the Node process — there is no
-embedded V8. The flow (`@zeroship/migrate/host`):
+embedded V8. The flow (`zero-migrate/host`):
 
 1. the pure-JS **host recorder** (`src/host-recorder.ts`) evals a migration's
    `up()` (the `table()` / `t.*` DSL) and drains it into a
@@ -113,21 +114,22 @@ embedded V8. The flow (`@zeroship/migrate/host`):
 and `status()` / `history()` (journal reads over the host driver) round out the
 facade.
 
-## Follow-up: `@zeroship/db` decoupling
+## The inlined db type-builder (`fromDb` bridge)
 
-The migrate authoring DSL's `db-lexicon` bridge (`fromDb` / `colTypeFromDbField` —
-the "lift a live `@zeroship/db` schema field into a migration column" convenience)
-imports `TypeBuilder` + `FieldDef` from `@zeroship/db`. The core `t.*` / `table()`
-authoring surface lives in `@zeroship/migrate` itself and does NOT need it; the
-bridge is the only consumer.
+The authoring DSL's `db-lexicon` bridge (`fromDb` / `colTypeFromDbField` — the
+"lift a live db schema field into a migration column" convenience) reduces a db
+field into a migration `ColumnDef` on the identical `ColType` path a hand-written
+migration column takes. It needs a `TypeBuilder` (`.required()` / `.optional()` /
+`.unique()` / `.toFieldDef()`) and the `FieldDef` union it maps.
 
-`sdks/db` here is a **decoupled, self-contained subset** of that type-builder — a
-real `TypeBuilder` (`.required()` / `.optional()` / `.unique()` / `.toFieldDef()`)
-and the `FieldDef` union the bridge maps, enough to build and run the `db-lexicon`
-tests. It is NOT the full platform `@zeroship/db` (query / CRUD / aggregation /
-generated `env.db` typing). For a fully shippable npm package the bridge should
-either vendor the real `@zeroship/db` type surface or be made lazy/optional so
-`@zeroship/migrate` carries no hard dependency on it.
+That minimal type-builder is **inlined** into the `zero-migrate` package
+(`sdks/migrate/src/db-types.ts`) and exported as `dbType` (the `t.*` factory
+lexicon), `DbTypeBuilder`, and the `FieldDef` / `TypeName` types — so a caller can
+`fromDb(dbType.ref("users"))` with no external db dependency. It is a real
+implementation, not a stub: it carries the exact `type` discriminants + facet
+fields (`encrypted` / `refTarget` / `vectorDims` / `required` / `unique`) the
+bridge maps. It is NOT a full ORM surface (query / CRUD / aggregation / generated
+`env.db` typing) — only the FK/column-type bridge inputs the migrate engine needs.
 
 ## License
 

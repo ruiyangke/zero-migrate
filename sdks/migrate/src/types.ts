@@ -1,4 +1,4 @@
-// `@zeroship/migrate` — the authoring-surface TS types (fluent-only redesign,
+// `zero-migrate` — the authoring-surface TS types (fluent-only redesign,
 // design `2026-06-25-op-dsl-fluent-redesign.md`).
 //
 // These are MANUAL types that codegen cannot express: the fluent `table()`
@@ -223,7 +223,7 @@ export interface ColumnDef {
   autoIncrement(): ColumnDef;
 }
 
-/** The fluent `t.*` column-type lexicon (shared in shape with `@zeroship/db`).
+/** The fluent `t.*` column-type lexicon (shared in shape with `db`).
  *  Canonical names only — the `string`/`int` aliases and the `{notNull,default}`
  *  options-bag overload are REMOVED (§7). */
 export interface TypeLexicon {
@@ -267,7 +267,7 @@ export interface TypeLexicon {
   inet(): ColumnDef;
   /** A named enum reference declared with `enumType(name).create({ values })`. */
   enum(name: string | EnumHandle): ColumnDef;
-  /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate`. */
+  /** A named domain reference declared with `domain(name).create(...)` from `zero-migrate`. */
   domain(name: string | DomainHandle): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
   encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;

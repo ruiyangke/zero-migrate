@@ -1,7 +1,7 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
 // Source: crates/zero-migrate/op-ir.schema.json (the engine's single-source-of-
-// truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
+// truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
 // (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden .ir.json corpus is
@@ -231,7 +231,7 @@ export type JoinKind = "inner" | "left";
 export type OrderDir = "asc" | "desc";
 
 /**
- * **VENDOR (`@zeroship/migrate/pg`)** — the CLOSED privilege lexicon for
+ * **VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for
  * `Op::Grant`/`Op::Revoke` (vendor spec §2.3). A CLOSED enum, so serde REJECTS an
  * out-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an
  * injection-shaped privilege string into the GRANT render seam (the
@@ -278,6 +278,6 @@ export type FuncVolatility = "volatile" | "stable" | "immutable";
 
 /**
  * Per-collection deploy-time data-validation strictness, mirroring the
- * `@zeroship/db` `schema(...).strictness(...)` builder.
+ * `db` `schema(...).strictness(...)` builder.
  */
 export type TableStrictness = "strict" | "lenient" | "off";

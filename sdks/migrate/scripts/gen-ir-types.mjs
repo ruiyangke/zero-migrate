@@ -16,7 +16,7 @@
 // + the `Checksum::of_ir` round-trip (in `crates/zero-migrate/tests`)
 // remain the contract source of truth (§4.3 / PR3). Regenerate with:
 //
-//   pnpm --filter @zeroship/migrate gen:ir-types
+//   pnpm --filter zero-migrate gen:ir-types
 //
 // then commit the regenerated `src/generated/enums.ts`.
 
@@ -86,7 +86,7 @@ const ENUM_DEFS = [
 const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
 // Source: crates/zero-migrate/op-ir.schema.json (the engine's single-source-of-
-// truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
+// truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
 // (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden .ir.json corpus is
@@ -96,9 +96,28 @@ const banner = `/* eslint-disable */
 const raw = await readFile(schemaPath, "utf8");
 const schema = JSON.parse(raw);
 
+// The engine schema's doc descriptions still carry the historical platform
+// package names (`@zeroship/migrate`, `@zeroship/db`) transcribed from the Rust
+// `#[doc]` comments. The standalone JS package is `zero-migrate` with the db
+// type-builder inlined, so rewrite those specifiers in the emitted TS doc strings
+// (JS-side only — the Rust schema source is left untouched). Purely cosmetic; the
+// enum tokens themselves are unaffected.
+function sanitizeDoc(node) {
+  if (typeof node === "string") {
+    return node.replaceAll("@zeroship/migrate", "zero-migrate").replaceAll("@zeroship/db", "db");
+  }
+  if (Array.isArray(node)) return node.map(sanitizeDoc);
+  if (node && typeof node === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(node)) out[k] = sanitizeDoc(v);
+    return out;
+  }
+  return node;
+}
+
 const parts = [];
 for (const name of ENUM_DEFS) {
-  const def = schema.$defs[name];
+  const def = sanitizeDoc(schema.$defs[name]);
   if (!def) throw new Error(`enum def ${name} missing from schema`);
   const ts = await compile({ ...def, title: name }, name, {
     bannerComment: "",

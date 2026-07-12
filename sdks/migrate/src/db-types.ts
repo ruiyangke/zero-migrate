@@ -1,23 +1,25 @@
-// Minimal, self-contained `@zeroship/db` type-builder surface.
+// Minimal, self-contained db type-builder surface (re-authored INSIDE
+// `zero-migrate`).
 //
-// SCOPE: this is the DECOUPLED subset that `@zeroship/migrate`'s `db-lexicon`
-// bridge (`colTypeFromDbField` / `fromDb`) depends on — the `FieldDef` schema-field
-// shape and the fluent `TypeBuilder` (`t.*` factories return one; `.toFieldDef()`
-// reduces it to a `FieldDef`). It is NOT the full platform `@zeroship/db` (query,
-// CRUD, aggregation, generated `env.db` typing, validation) — those live in the
-// monorepo package and are out of scope for the standalone migrate engine.
+// SCOPE: this is the exact subset `zero-migrate`'s `db-lexicon` bridge
+// (`colTypeFromDbField` / `fromDb`) depends on — the `FieldDef` schema-field shape
+// and the fluent `TypeBuilder` (`t.*` factories return one; `.toFieldDef()` reduces
+// it to a `FieldDef`). It was previously a separate workspace db package; it is
+// inlined here so the standalone migrate package carries no external db
+// dependency. It is NOT a full ORM surface (query, CRUD, aggregation, generated
+// typing, validation) — only the FK/column-type bridge inputs.
 //
 // It is a REAL implementation (not an empty placeholder): the `FieldDef` union
 // carries the exact `type` discriminants + facet fields (`encrypted`, `refTarget`,
-// `vectorDims`, `optional`, `unique`) the migrate bridge maps, and `TypeBuilder` is
+// `vectorDims`, `required`, `unique`) the migrate bridge maps, and `TypeBuilder` is
 // a genuine fluent class (`.required()`, `.optional()`, `.unique()`, `.toFieldDef()`)
 // so the bridge's `instanceof TypeBuilder` check, its `.toFieldDef()` reduce, and its
 // exhaustive `FieldDef["type"]` switch all type-check and run.
 
-/** The canonical `@zeroship/db` field type discriminant (`TypeName`). The migrate
- *  `db-lexicon` bridge enumerates every storage-backed member; the non-storage
- *  members (`object`/`union`/`literal`/`array`/`actor`/`calendarDate`) reduce to a
- *  hard `UnsupportedColTypeError` there. */
+/** The canonical db field type discriminant (`TypeName`). The migrate `db-lexicon`
+ *  bridge enumerates every storage-backed member; the non-storage members
+ *  (`object`/`union`/`literal`/`array`/`actor`/`calendarDate`) reduce to a hard
+ *  `UnsupportedColTypeError` there. */
 export type TypeName =
   | "string"
   | "number"
@@ -43,14 +45,14 @@ export type TypeName =
  *   - `encrypted` — an encryption facet wrapping the inner primitive `type`;
  *   - `refTarget` — the target table name for a `ref` (FK) field;
  *   - `vectorDims` — the declared dimensionality for a `vector` field;
- *   - `optional`/`unique` — nullability + uniqueness carried onto the migration column.
+ *   - `required`/`unique` — nullability + uniqueness carried onto the migration column.
  */
 export interface FieldDef {
   type: TypeName;
   /** Column is nullable (no `NOT NULL`). A `required()` field clears this. */
   optional?: boolean;
   /** Column is non-nullable — the migrate `fromDb` bridge reads this flag to carry
-   *  `@zeroship/db` `.required()` over to the migration column's `.notNull()`. */
+   *  `.required()` over to the migration column's `.notNull()`. */
   required?: boolean;
   /** Column carries a UNIQUE constraint. */
   unique?: boolean;
@@ -63,10 +65,10 @@ export interface FieldDef {
 }
 
 /**
- * The fluent column-type builder a `@zeroship/db` `t.*` factory returns. It carries
- * an in-progress {@link FieldDef} and reduces to it via {@link toFieldDef}. The
- * generic parameters mirror the full package's builder (state phantoms); only the
- * fluent facets + `toFieldDef()` are load-bearing for the migrate bridge.
+ * The fluent column-type builder a `t.*` factory returns. It carries an in-progress
+ * {@link FieldDef} and reduces to it via {@link toFieldDef}. The generic parameters
+ * are state phantoms; only the fluent facets + `toFieldDef()` are load-bearing for
+ * the migrate bridge.
  */
 export class TypeBuilder<
   _TS = unknown,
@@ -129,8 +131,7 @@ export const t = {
   ref: (target: string) => new TypeBuilder({ type: "ref", refTarget: target }),
   vector: (dims: number) => new TypeBuilder({ type: "vector", vectorDims: dims }),
   /** An encrypted wrapper over an inner primitive (default `string`). The bridge
-   *  keeps the wrapped primitive in `type` and carries the encryption facet, so it
-   *  reduces to `{ encrypted: { of: <inner> } }`. */
+   *  keeps the wrapped primitive in `type` and carries the encryption facet. */
   encrypted: (opts: EncryptedOptions = {}) => {
     const inner = (opts.wraps ?? t.string()).toFieldDef();
     return new TypeBuilder({ type: inner.type, encrypted: inner });
@@ -144,11 +145,3 @@ export const t = {
   actor: () => new TypeBuilder({ type: "actor" }),
   calendarDate: () => new TypeBuilder({ type: "calendarDate" }),
 } as const;
-
-/** Identity schema helper (the full package normalizes/validates; the standalone
- *  subset only needs the pass-through the migrate bridge references). */
-export function schema<T>(x: T): T {
-  return x;
-}
-
-export default { t, TypeBuilder, schema };

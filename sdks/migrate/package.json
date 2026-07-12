@@ -1,7 +1,7 @@
 {
-  "name": "@zeroship/migrate",
+  "name": "zero-migrate",
   "version": "0.0.0",
-  "description": "No-raw-SQL, fully-structured, named-ESM-import op builder for portable bi-dialect (Postgres + SQLite) zeroship migrations.",
+  "description": "No-raw-SQL, fully-structured, named-ESM-import op builder for portable bi-dialect (Postgres + SQLite) migrations.",
   "type": "module",
   "exports": {
     ".": {
@@ -31,9 +31,6 @@
     "check": "tsc --noEmit && tsc --noEmit -p tsconfig.types.json",
     "test": "NODE_ENV=test node --import tsx --test tests/*.test.ts",
     "test:host": "NODE_ENV=test node --import tsx --test tests/host/*.test.ts"
-  },
-  "dependencies": {
-    "@zeroship/db": "workspace:*"
   },
   "optionalDependencies": {
     "pg": "^8.13.0",

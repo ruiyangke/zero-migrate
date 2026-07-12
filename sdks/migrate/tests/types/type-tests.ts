@@ -10,21 +10,21 @@
 //   - the fluent op SHAPES (`table().…`), the `t.*` ColType builder, the
 //     fluent-expression node shapes, and insert-row VALUE shapes ARE structurally
 //     typed (a malformed shape / invalid ColType FAILS tsc);
-//   - table/column NAMES are plain `string`, NOT bound to the live `@zeroship/db`
+//   - table/column NAMES are plain `string`, NOT bound to the live `db`
 //     schema (a migration naming a non-existent table/column TYPE-CHECKS cleanly —
 //     existence is an apply-time check, the anti-rot guarantee).
 
-import { t as dbT } from "@zeroship/db";
 // @ts-expect-error — free boolean combinators are no longer exported from the public package.
-import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
+import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "zero-migrate";
 // @ts-expect-error — free policy helpers were deleted; use table(...).policy(name).create/drop().
-import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate";
+import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "zero-migrate";
 // @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
-import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate";
+import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "zero-migrate";
 
 import * as migrate from "../../src/index.js";
 import {
   colTypeFromDbField,
+  dbType as dbT,
   fromDb,
   t,
   table,
@@ -698,7 +698,7 @@ export function byteValueShapes(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 6. The shared `@zeroship/db` lexicon bridge (PR5 goal A) is typed.
+// 6. The shared `db` lexicon bridge (PR5 goal A) is typed.
 // ───────────────────────────────────────────────────────────────────────────
 
 export function lexiconBridgeShapes(): void {
@@ -709,7 +709,7 @@ export function lexiconBridgeShapes(): void {
   const _ct = colTypeFromDbField(dbT.json());
   void _ct;
 
-  // @ts-expect-error — `fromDb` takes a @zeroship/db field, not a bare string.
+  // @ts-expect-error — `fromDb` takes a db field, not a bare string.
   fromDb("text");
 }
 
@@ -738,7 +738,7 @@ export function immutableChainTypechecks(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 7. EXHAUSTIVENESS — the bridge handles EVERY `@zeroship/db` `FieldDef.type`.
+// 7. EXHAUSTIVENESS — the bridge handles EVERY `db` `FieldDef.type`.
 // ───────────────────────────────────────────────────────────────────────────
 
 export function dbFieldTypeExhaustiveness(token: DbFieldType): void {

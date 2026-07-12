@@ -1,5 +1,5 @@
 // Addon loader (design §D.3/§E) — resolve + load the prebuilt N-API `.node` from
-// `crates/zeroship-migrate-node` (Phase C) and type its exposed surface.
+// `crates/zero-migrate-node` (Phase C) and type its exposed surface.
 //
 // The addon is the V8-free Rust core (`host-pg` + bundled rusqlite, no compio, no
 // io_uring, cross-platform). It exposes:
@@ -16,7 +16,7 @@ import { createRequire } from "node:module";
  *  (§B.3). Shaped exactly by `driver-pg.ts`'s `HostDriver`. */
 export type AddonHostDriver = (args: [request: unknown, done: (err: unknown, reply: unknown) => void]) => void;
 
-/** The addon's exposed surface (mirrors `crates/zeroship-migrate-node/index.d.ts`
+/** The addon's exposed surface (mirrors `crates/zero-migrate-node/index.d.ts`
  *  plus the Phase-D `applyIr`). */
 export interface MigrateAddon {
   /** The IR-format version this addon was built against — the single source of
@@ -72,7 +72,7 @@ let cached: MigrateAddon | null = null;
  *  1. `ZEROSHIP_MIGRATE_NATIVE` env override (an explicit `.node` path — used by the
  *     oracle to point at the freshly-`napi build`'d artifact in the addon crate).
  *  2. the bundled `native/migrate.<platform>.node` shipped with this package.
- *  3. the sibling addon crate's `zeroship-migrate-node.<triple>.node` (dev, when
+ *  3. the sibling addon crate's `zero-migrate-node.<triple>.node` (dev, when
  *     this package's `native/` is not yet populated).
  *
  * @throws if no `.node` can be resolved/loaded (with the tried paths).
@@ -97,10 +97,10 @@ export function loadAddon(): MigrateAddon {
     }
   }
   throw new Error(
-    "@zeroship/migrate/host: could not load the native addon (.node). Tried:\n  " +
+    "zero-migrate/host: could not load the native addon (.node). Tried:\n  " +
       tried.join("\n  ") +
       "\nSet ZEROSHIP_MIGRATE_NATIVE to an explicit .node path, or run `napi build` in " +
-      "crates/zeroship-migrate-node and ship native/.",
+      "crates/zero-migrate-node and ship native/.",
   );
 }
 

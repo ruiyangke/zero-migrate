@@ -2,10 +2,10 @@
   "name": "zero-migrate-root",
   "version": "0.0.0",
   "private": true,
-  "description": "Workspace root for the standalone zero-migrate JS packages (@zeroship/migrate authoring/host + its decoupled @zeroship/db type-builder subset).",
+  "description": "Workspace root for the standalone zero-migrate JS packages (zero-migrate authoring/host + its inlined db type-builder subset).",
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter @zeroship/db build && pnpm --filter @zeroship/migrate build",
-    "test": "pnpm --filter @zeroship/migrate test"
+    "build": "pnpm --filter zero-migrate build",
+    "test": "pnpm --filter zero-migrate test"
   }
 }

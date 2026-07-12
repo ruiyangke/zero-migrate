@@ -1,7 +1,3 @@
-import '@zeroship/db';
-
-// src/ops.ts
-
 // src/ops.ts
 if (typeof globalThis !== "undefined") {
   if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {

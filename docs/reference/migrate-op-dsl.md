@@ -1,8 +1,8 @@
-# `@zeroship/migrate` — the op DSL
+# `zero-migrate` — the op DSL
 
-`@zeroship/migrate` is the no-raw-SQL, fully-structured authoring surface for
+`zero-migrate` is the no-raw-SQL, fully-structured authoring surface for
 zeroship database migrations. A migration is a `.ts` module that imports the
-helpers it needs from `@zeroship/migrate` and exports a single
+helpers it needs from `zero-migrate` and exports a single
 `default { name?, up, down? }` object. You
 describe schema changes (DDL) and data migrations (DML) once through the fluent
 `table()` handle; the engine lowers them per-dialect and applies
@@ -10,7 +10,7 @@ them faithfully. PostgreSQL is the first-class target; constructs with no native
 realization on another target fail closed unless the author supplies an explicit
 dialect leg.
 
-There is one import root: `@zeroship/migrate`. Core value exports include
+There is one import root: `zero-migrate`. Core value exports include
 `table`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
 `sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`,
 `raw`, `comment`, `t`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
@@ -33,7 +33,7 @@ transform the closed surface cannot express is a hard, structured error, not a
 back door to hand-written SQL.
 
 The TypeScript authoring surface lives in `sdks/migrate/src/` (the npm
-`@zeroship/migrate` package). Its engine-side twin — the recorder the Rust
+`zero-migrate` package). Its engine-side twin — the recorder the Rust
 runtime evaluates in V8 to turn a migration into the frozen IR wire shape —
 lives in `crates/zeroship-migrate/src/frontend/migrate_ops.js`. Both emit the
 identical dialect-neutral op objects; the canonical IR shape is the frozen
@@ -41,7 +41,7 @@ contract.
 
 ```ts
 // migrations/0007_split_name.ts
-import { table, t, now, genRandomUuid, concatWs } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid, concatWs } from "zero-migrate";
 
 export default {
   name: "split_name_column", // optional; defaults to the filename label
@@ -127,10 +127,10 @@ DML or lossy DDL — an author-supplied `down()` is itself a structured migratio
 ## Core Entry Points
 
 The portable authoring surface is reached through direct named exports from
-`@zeroship/migrate`. There is no flat op vocabulary and no `op.` prefix.
+`zero-migrate`. There is no flat op vocabulary and no `op.` prefix.
 
 ```ts
-import { table, view, enumType, comment, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, view, enumType, comment, t, now, genRandomUuid } from "zero-migrate";
 ```
 
 The complete exported vocabulary (`sdks/migrate/src/index.ts`):
@@ -143,7 +143,7 @@ The complete exported vocabulary (`sdks/migrate/src/index.ts`):
 | `comment` | standalone structured object comments |
 | `t` | the immutable column-type lexicon |
 | `dialect` | per-dialect value or whole-op escape hatch |
-| `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
+| `fromDb` | the db field (`dbType.*`) → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
 | `countStar` | receiver-less aggregate helper for `COUNT(*)`; receiver aggregates are `ExprChain` methods |
 
@@ -187,7 +187,7 @@ by the leg values:
   and no `default` leg skips the op entirely.
 
 ```ts
-import { dialect, table } from "@zeroship/migrate";
+import { dialect, table } from "zero-migrate";
 
 dialect({
   pg: () => table("docs").index("docs_embedding_hnsw_idx").add({
@@ -210,7 +210,7 @@ Spec-level dialectal fragments, such as wrapping one index element inside
 
 **Every table/column/name reference is a plain `string`.** There is no generic
 `S extends Schema` parameter, no `TableName<S>` / `keyof RowOf<S,T>` binding to
-the live `@zeroship/db` schema. `table`, `column`, `from`, `to`, `name`,
+the live db schema. `table`, `column`, `from`, `to`, `name`,
 `cursorColumn`, every `set` key, every `where`-referenced column, and every
 `col("…")` argument are strings whose existence is validated at **apply time
 against the real DB**, never at `tsc` time (the typing-stance prose lives in the
@@ -309,7 +309,7 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -361,7 +361,7 @@ on an encrypted column **overrides** the auto-mask). `kind` is **required**;
 | vector `metric` | `cosine \| l2 \| innerProduct` | engine default |
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -385,17 +385,17 @@ These facets are also what the migration set carries into the generated types:
 the typed-id `prefix`, the vector `metric`, and the `mask` brand survive the op
 fold into `env.db.ts` (see [Generating types from the migration set](#generating-types-from-the-migration-set-gen-types)).
 
-## Bridging a `@zeroship/db` field (`fromDb`)
+## Bridging a db field (`fromDb`)
 
-The migration DSL and the runtime `@zeroship/db` schema share **one** type
-lexicon. `fromDb(field)` lifts a live-schema `@zeroship/db` `t.*` field into a
-migration `ColumnDef` through the identical `ColType` path
-(`sdks/migrate/src/ops.ts` `fromDb`), so a `t.ref("users")` declared in your app
-schema lowers to the byte-identical neutral type a hand-written migration column
-produces. It carries the field's nullability (`.required()` → `.notNull()`) and
-uniqueness, and returns a chainable `ColumnDef` so you can still layer migration
-modifiers on top. Names are never bound — a bridged `ref` keeps its target as a
-plain string. A non-storage `@zeroship/db` field (a json `array`, a nested
+The migration DSL and the runtime db schema share **one** type lexicon.
+`fromDb(field)` lifts a live-schema db field (built with the inlined `dbType.*`
+lexicon) into a migration `ColumnDef` through the identical `ColType` path
+(`sdks/migrate/src/ops.ts` `fromDb`), so a `dbType.ref("users")` declared in your
+app schema lowers to the byte-identical neutral type a hand-written migration
+column produces. It carries the field's nullability (`.required()` → `.notNull()`)
+and uniqueness, and returns a chainable `ColumnDef` so you can still layer
+migration modifiers on top. Names are never bound — a bridged `ref` keeps its
+target as a plain string. A non-storage db field (a json `array`, a nested
 `object`, a `union`) has no portable column type and throws
 `UnsupportedColTypeError` (`sdks/migrate/src/db-lexicon.ts:51-61`) — a hard
 boundary, never a silent fallback.
@@ -520,7 +520,7 @@ live/folded schema and gates a UNIQUE-index drop as destructive (it silently
 removes a data-integrity guarantee).
 PostgreSQL-specific index options (`using`, `where`, `include`, `with`, `only`,
 `nullsNotDistinct`, per-element `opclass`/`collation`) are authored with
-`table(...).index(...)` from `@zeroship/migrate`.
+`table(...).index(...)` from `zero-migrate`.
 
 ### Table data — direct named DML
 
@@ -752,7 +752,7 @@ The check runs **at drain, not eagerly**, so a selector held in a variable and
 terminated on a later line is fine:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -774,7 +774,7 @@ Both authoring styles are first-class — pick per readability. Every terminal
 across statements with `{ schema }` set a single time:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -802,7 +802,7 @@ Because the `t.*` chain is **immutable** (every modifier returns a fresh
 `ColumnDef`), a hoisted type var is safe to reuse across columns:
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -822,7 +822,7 @@ setDefault | noAction`, and they are **actually rendered** (`ON DELETE CASCADE`,
 …). An action-free FK records byte-identically to before:
 
 ```ts
-import { table, now, genRandomUuid } from "@zeroship/migrate";
+import { table, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -842,7 +842,7 @@ has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added col
 records the column **plus** a follow-on constraint (it is not silently dropped):
 
 ```ts
-import { table, t, now, genRandomUuid } from "@zeroship/migrate";
+import { table, t, now, genRandomUuid } from "zero-migrate";
 
 export default {
   up() {
@@ -1132,7 +1132,7 @@ recorder in version order, folds the transient IR into a per-collection field ma
   content-addressed into the `.zship` artifact (a manifest `runtime_descriptor`
   blob) so the runtime can read the schema without re-evaluating a schema
   authoring module.
-- **`env.db.ts`** — a generated `@zeroship/db` schema **module** reconstructing
+- **`env.db.ts`** — a generated db schema **module** reconstructing
   `const schema = { … t.text() … } as const` of `t.*()` builder calls (the SDK type
   inference keys only off the builder-call value expressions, so the emitter emits
   builder calls, never a hand-rolled interface), wraps collections in
@@ -1156,8 +1156,7 @@ into the generated `env.db.ts`, so `env.db.users.email` reads back as
 `.ts` module (not a `.d.ts`), `tsc` type-checks it like any source file — a
 generated type that does not compile is a hard build failure.
 
-Include the generated module in the app's `tsconfig.json` and do not also add the
-retired `@zeroship/db/env` declared-schema alias:
+Include the generated module in the app's `tsconfig.json`:
 
 ```json
 {
@@ -1171,7 +1170,7 @@ the `--check` generated-artifact gate on a production build. See
 [vite-plugin.md → Migration-first type generation](./vite-plugin.md#migration-first-type-generation-gen-types)
 for the build/watch wiring.
 
-> **Implemented: Postgres vendor primitives.** `@zeroship/migrate` exposes direct
+> **Implemented: Postgres vendor primitives.** `zero-migrate` exposes direct
 > named exports and one PG-first `table()` handle, not a `pg` namespace object.
 > The current vendor value exports are `schema`, `extension`, `role`, `dropOwnedBy`,
 > `grant`, `revoke`, `createFunction`, `dropFunction`, `domain`, `sequence`, and
@@ -1295,7 +1294,7 @@ apply.
 
 **What the doc-example gates do and do not prove.** Two gates keep this doc
 honest. The TS leg (`sdks/migrate/tests/doc-examples.test.ts`) compiles every
-runnable typed snippet against the real `@zeroship/migrate` types (the
+runnable typed snippet against the real `zero-migrate` types (the
 signature-listing blocks, which use bare param names, are excepted), so a
 renamed op or a changed signature fails CI — but it only proves
 **type-correctness**; the
@@ -1319,5 +1318,5 @@ snippet would also survive record-time.
   portability boundary.
 - **SQLite divergences** — intentional Postgres↔SQLite differences in search,
   isolation, locking, and ordering: [sqlite-divergences.md](./sqlite-divergences.md).
-- **The schema SDK** — [db.md](./db.md): the `@zeroship/db` `t.*` lexicon the
-  migration lexicon mirrors and `fromDb` bridges.
+- **The db field lexicon** — the inlined `dbType.*` type builder (exported from
+  `zero-migrate`) the migration lexicon mirrors and `fromDb` bridges.
