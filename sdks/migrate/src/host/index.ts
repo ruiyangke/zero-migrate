@@ -19,7 +19,15 @@
 // return `DryRunError::ShadowUnsupported`. `plan` (the DB-free pre-check) IS
 // provided.
 
-import { loadAddon, currentIrVersion, type MigrateAddon } from "./addon.js";
+import {
+  loadAddon,
+  currentIrVersion,
+  type MigrateAddon,
+  type AddonHostDriver,
+  type ApplyReply,
+  type StatusReply,
+  type HistoryReply,
+} from "./addon.js";
 import { openPgSession, type HostDriver } from "./driver-pg.js";
 import { openMysqlSession } from "./driver-mysql2.js";
 import { buildEnvelope, type IrEnvelope, type MigrationModule } from "../host-recorder.js";
@@ -87,35 +95,31 @@ export interface HostApplyOptions {
   nameFallback?: string;
 }
 
-/** The parsed JSON `ApplyOutcome`. */
-export interface ApplyOutcome {
-  applied: string[];
-  skipped: string[];
-  recovered: string[];
-}
+/** The typed `applyIr` reply (§D.1) — re-exported from the generated addon DTOs. */
+export type ApplyOutcome = ApplyReply;
 
 /**
  * Author the envelope (pure JS) then drive the addon's host-authoring `applyIr`
- * over the chosen driver — the full §D.1/§D.3 apply. Resolves to the parsed
- * `ApplyOutcome`. The pinned session is always closed (success or throw).
+ * over the chosen driver — the full §D.1/§D.3 apply. Resolves to the typed
+ * `ApplyReply`. The pinned session is always closed (success or throw).
  */
 export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
   const addon = loadAddon();
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
   const { hostDriver, close } = await openSession(opts.driver);
   try {
-    const json = await addon.applyIr(
-      hostDriver as never,
-      opts.ownerApp,
-      opts.projectSchema,
-      opts.migratorRole ?? null,
-      dialectOf(opts.driver),
-      JSON.stringify(opts.registry ?? {}),
-      JSON.stringify(envelope),
-      opts.approved ?? false,
-      opts.appliedBy ?? "host",
-    );
-    return JSON.parse(json) as ApplyOutcome;
+    // The verb boundary is TYPED (redesign step 5a): pass an `ApplyRequest`, get an
+    // `ApplyReply` — no JSON stringify/parse. The `envelope` crosses as a JS value.
+    return await addon.applyIr(hostDriver as AddonHostDriver, {
+      ownerApp: opts.ownerApp,
+      projectSchema: opts.projectSchema,
+      migratorRole: opts.migratorRole,
+      dialect: dialectOf(opts.driver),
+      registry: opts.registry ?? {},
+      envelope,
+      approved: opts.approved ?? false,
+      appliedBy: opts.appliedBy ?? "host",
+    });
   } finally {
     await close();
   }
@@ -149,15 +153,21 @@ export interface PlanReport {
 export function plan(opts: HostPlanOptions): PlanReport {
   const addon = loadAddon();
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
-  const report = JSON.parse(
-    addon.loadVerify(
-      JSON.stringify(envelope),
-      opts.ownerApp,
-      opts.dialect ?? "postgres",
-      JSON.stringify(opts.registry ?? {}),
-    ),
-  ) as { ok: boolean; ir_version?: number; op_count?: number; error?: string };
-  return { ...report, envelope };
+  // Typed boundary (redesign step 5a): `loadVerify` takes the `.ir.json` bytes + a
+  // typed `Record<string,string>` registry and returns a typed `LoadVerifyReply`.
+  const report = addon.loadVerify(
+    JSON.stringify(envelope),
+    opts.ownerApp,
+    opts.dialect ?? "postgres",
+    opts.registry ?? {},
+  );
+  return {
+    ok: report.ok,
+    ir_version: report.irVersion,
+    op_count: report.opCount,
+    error: report.error,
+    envelope,
+  };
 }
 
 /** Options for {@link status}/{@link history}. */
@@ -175,44 +185,42 @@ export interface HostStatusOptions {
 
 /**
  * `status` (§C.5) — reconcile the supplied migrations against the live journal over
- * the host driver. Returns the parsed `MigrationStatus` JSON.
+ * the host driver. Returns the typed `StatusReply` (redesign step 5a — no JSON
+ * parse; `currentVersion` camelCase).
  *
- * NOTE: the Phase-C `status`/`history` addon entries take a pre-lowered
- * `Vec<Migration>` JSON; lowering an arbitrary module needs the addon's lower. For
- * v1 the facade supports the empty-journal / no-migrations status query (the
- * "pending" flow) by passing `[]`; lowering N modules to `Vec<Migration>` for a
- * populated status query reuses `applyIr`'s lower and is a small follow-up. The
- * oracle drives `status` with `[]` (empty journal) to prove the read path.
+ * NOTE: the addon `status` entry takes pre-lowered migrations (a typed
+ * `Vec<Migration>`); lowering an arbitrary module needs the addon's lower. For v1
+ * the facade supports the empty-journal / no-migrations status query (the "pending"
+ * flow) by passing `[]`; lowering N modules for a populated status query reuses
+ * `applyIr`'s lower and is a small follow-up. The oracle drives `status` with `[]`
+ * (empty journal) to prove the read path.
  */
-export async function status(
-  opts: HostStatusOptions,
-): Promise<{ current_version: string | null; applied: string[]; pending: string[]; rolled_back: string[] }> {
+export async function status(opts: HostStatusOptions): Promise<StatusReply> {
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
-    const migrationsJson = "[]"; // v1: the read path / empty-journal flow (see doc).
-    const json = await addon.status(
-      hostDriver as never,
-      opts.projectSchema,
-      opts.projectSchema,
-      migrationsJson,
-    );
-    return JSON.parse(json);
+    return await addon.status(hostDriver as AddonHostDriver, {
+      projectId: opts.projectSchema,
+      projectSchema: opts.projectSchema,
+      migrations: [], // v1: the read path / empty-journal flow (see doc).
+    });
   } finally {
     await close();
   }
 }
 
 /** `history` (§C.5) — the journal audit trail over the host driver. Returns the
- *  parsed `Vec<HistoryEvent>` JSON. */
+ *  typed `HistoryReply` (redesign step 5a — no JSON parse; `eventSeq` is a `bigint`). */
 export async function history(
   opts: Omit<HostStatusOptions, "migrations">,
-): Promise<Array<Record<string, unknown>>> {
+): Promise<HistoryReply> {
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
-    const json = await addon.history(hostDriver as never, opts.projectSchema, opts.projectSchema);
-    return JSON.parse(json);
+    return await addon.history(hostDriver as AddonHostDriver, {
+      projectId: opts.projectSchema,
+      projectSchema: opts.projectSchema,
+    });
   } finally {
     await close();
   }

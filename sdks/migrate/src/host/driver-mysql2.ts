@@ -13,36 +13,9 @@
 type Mysql2Module = typeof import("mysql2/promise");
 type Mysql2Connection = import("mysql2/promise").Connection;
 
-interface JsCell {
-  kind: "null" | "text" | "int" | "bool" | "textArray";
-  text?: string;
-  int?: number;
-  intStr?: string;
-  bool?: boolean;
-  textArray?: Array<string | null | undefined>;
-}
-
-interface JsRow {
-  columns: string[];
-  cells: JsCell[];
-}
-
-interface JsRequest {
-  kind: "batch" | "execute" | "executeTextParams" | "query" | "queryOne";
-  sql: string;
-  binds: JsCell[];
-  textParams: Array<string | null | undefined>;
-}
-
-interface JsReply {
-  rows: JsRow[];
-  rowCount?: number;
-}
-
-interface JsError {
-  message: string;
-  code?: string;
-}
+// The neutral cell DTOs come from the GENERATED addon `index.d.ts` (via `addon.ts`)
+// — the single source of truth (redesign step 5a). No hand-copied interfaces.
+import type { JsCell, JsRow, JsRequest, JsReply, JsError } from "./addon.js";
 
 export type MysqlHostDriver = (
   args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void],

@@ -30,38 +30,9 @@
 type PgModule = typeof import("pg");
 type PgClient = import("pg").Client;
 
-// The neutral cell shape the addon marshals (mirrors `JsCell` in the addon's
-// index.d.ts). `kind` selects the arm; the payload field carries the value.
-interface JsCell {
-  kind: "null" | "text" | "int" | "bool" | "textArray";
-  text?: string;
-  int?: number;
-  intStr?: string;
-  bool?: boolean;
-  textArray?: Array<string | null | undefined>;
-}
-
-interface JsRow {
-  columns: string[];
-  cells: JsCell[];
-}
-
-interface JsRequest {
-  kind: "batch" | "execute" | "executeTextParams" | "query" | "queryOne";
-  sql: string;
-  binds: JsCell[];
-  textParams: Array<string | null | undefined>;
-}
-
-interface JsReply {
-  rows: JsRow[];
-  rowCount?: number;
-}
-
-interface JsError {
-  message: string;
-  code?: string;
-}
+// The neutral cell DTOs come from the GENERATED addon `index.d.ts` (via `addon.ts`)
+// — the single source of truth (redesign step 5a). No hand-copied interfaces.
+import type { JsCell, JsRow, JsRequest, JsReply, JsError } from "./addon.js";
 
 /** The addon's host-driver callback contract: `hostDriver([request, done]) => void`
  *  — napi delivers `(request, done)` as a SINGLE array arg (§B.3). */

@@ -300,10 +300,16 @@ async function main() {
       projectSchema: freshSchema,
       driver: { kind: "postgres", url: PG_URL },
     });
-    const stOk = st.current_version === null && Array.isArray(st.applied) && st.applied.length === 0;
+    // Typed reply (redesign step 5a): `currentVersion` camelCase; `undefined` when
+    // nothing is applied.
+    const stOk =
+      (st.currentVersion === null || st.currentVersion === undefined) &&
+      Array.isArray(st.applied) &&
+      st.applied.length === 0;
     record("oracle-3 status() over host driver (empty journal)", stOk, JSON.stringify(st));
 
-    // history on the host-applied schema — the audit trail.
+    // history on the host-applied schema — the audit trail (typed `HistoryReply`;
+    // `events` with a `bigint` `eventSeq`).
     const hist = await history({
       ownerApp: OWNER_APP,
       projectSchema: hostSchema,
@@ -311,8 +317,8 @@ async function main() {
     });
     record(
       "oracle-3 history() over host driver (applied schema)",
-      Array.isArray(hist) && hist.length >= 1,
-      `${hist.length} history events`,
+      Array.isArray(hist.events) && hist.events.length >= 1,
+      `${hist.events.length} history events`,
     );
     await adm.query(`DROP SCHEMA "${freshSchema}" CASCADE`).catch(() => {});
   } catch (e) {
