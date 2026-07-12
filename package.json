@@ -2,10 +2,10 @@
   "name": "zero-migrate-root",
   "version": "0.0.0",
   "private": true,
-  "description": "Workspace root for the standalone zero-migrate JS packages (zero-migrate authoring/host + its inlined db type-builder subset).",
+  "description": "Workspace root for the standalone zero-migrate JS packages: `zero-migrate` (the authoring DSL) + `zero-migrate-engine` (the host runtime over the native addon).",
   "type": "module",
   "scripts": {
-    "build": "pnpm --filter zero-migrate build",
+    "build": "pnpm --filter zero-migrate build && pnpm --filter zero-migrate-engine build",
     "test": "pnpm --filter zero-migrate test"
   }
 }

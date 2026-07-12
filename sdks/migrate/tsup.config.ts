@@ -13,16 +13,15 @@ const shared = {
 export default defineConfig([
   {
     ...shared,
-    // The public DSL entry (`.`) + the HOST facade (`./host`, §D.3) + the pure-JS
-    // host recorder (`./host-recorder`, §D.1). `pg`/`mysql2` are optionalDependencies
-    // resolved at runtime — external so the bundle never inlines them; the addon is
-    // loaded via `createRequire` at runtime (a `.node`), never bundled.
+    // The public DSL entry (`.`) + the framework-internal pure-JS recorder
+    // (`./internal/recorder`, §D.1) exposed to the `zero-migrate-engine` host
+    // package via a documented subpath export. This package carries ZERO native
+    // code and ZERO runtime deps; the host/addon/drivers live in the separate
+    // `zero-migrate-engine` package.
     entry: {
       index: "src/index.ts",
-      host: "src/host/index.ts",
-      "host-recorder": "src/host-recorder.ts",
+      "internal/recorder": "src/internal/recorder.ts",
     },
-    external: ["pg", "mysql2", "mysql2/promise"],
     clean: true,
   },
   // The recorder artifact (DSL redesign S0.5): ONE self-contained ESM file

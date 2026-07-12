@@ -28,11 +28,11 @@ exotic syntax.
 - **Node-native, V8-FREE by construction.** The engine ships **no embedded V8**.
   The guard / IR / render / SQLite apply / journal core builds with zero
   heavyweight dependencies. Authoring, MySQL, and Postgres all execute in the
-  **Node process** (the `zero-migrate` host-recorder evals the DSL into an
-  op-IR envelope; the `zero-migrate-node` napi addon LOWERs it in Rust — stamping
-  `owner_app` and folding the authoritative checksum — then applies it over the
-  `pg` / `mysql2` npm drivers). There is no `v8` crate anywhere in the build graph
-  or dev-dependencies.
+  **Node process** (the `zero-migrate` recorder evals the DSL into an op-IR
+  envelope; the `zero-migrate-engine` host loads the `zero-migrate-node` napi
+  addon, which LOWERs it in Rust — stamping `owner_app` and folding the
+  authoritative checksum — then applies it over the `pg` / `mysql2` npm drivers).
+  There is no `v8` crate anywhere in the build graph or dev-dependencies.
 
 ## Workspace layout
 
@@ -49,12 +49,18 @@ crates/
 └── zero-migrate-node/    Node/Bun N-API addon: host-driven pg/mysql2 apply over
                           the driver-neutral session seam. Its own workspace.
 sdks/
-└── migrate/              The `zero-migrate` npm package: the `op.*` authoring DSL +
-                          the Node host facade (`zero-migrate/host`: host-recorder →
-                          napi apply). Carries the inlined minimal db type-builder
-                          (`src/db-types.ts` — `TypeBuilder` + `FieldDef`, exported
-                          as `dbType`) the `db-lexicon` bridge consumes, so it has no
-                          external db dependency.
+├── migrate/              The `zero-migrate` npm package: the `op.*` authoring DSL —
+│                         builders, types, and the pure-JS recorder (exposed to the
+│                         engine via the `./internal/recorder` subpath). ZERO native
+│                         code, ZERO runtime deps. Carries the inlined minimal db
+│                         type-builder (`src/db-types.ts` — `TypeBuilder` + `FieldDef`,
+│                         exported as `dbType`) the `db-lexicon` bridge consumes, so
+│                         it has no external db dependency.
+└── engine/               The `zero-migrate-engine` npm package: the Node host runtime
+                          (recorder → napi apply). Loads the `zero-migrate-node` addon,
+                          ships the `pg` / `mysql2` driver adapters as
+                          optionalDependencies, and exposes `apply` / `plan` / `status`
+                          / `history` / `validate`. Depends on `zero-migrate`.
 docs/
 └── reference/            Reference documentation.
 ```
@@ -106,10 +112,10 @@ pnpm --filter zero-migrate test:host         # authoring → apply over the napi
 ## Node-native authoring path
 
 Authoring, MySQL, and Postgres execution all run in the Node process — there is no
-embedded V8. The flow (`zero-migrate/host`):
+embedded V8. The flow (`zero-migrate-engine`):
 
-1. the pure-JS **host recorder** (`src/host-recorder.ts`) evals a migration's
-   `up()` (the `table()` / `t.*` DSL) and drains it into a
+1. the pure-JS **recorder** (`zero-migrate/internal/recorder`, from the DSL package)
+   evals a migration's `up()` (the `table()` / `t.*` DSL) and drains it into a
    `{ ir_version, name, ops }` op-IR envelope. It computes NO checksum and stamps
    NO `owner_app` — those are Rust-owned provenance/integrity fields;
 2. the **`zero-migrate-node` napi addon** `applyIr` LOWERs the envelope in Rust
@@ -117,9 +123,9 @@ embedded V8. The flow (`zero-migrate/host`):
    system-column shape), then drives the engine's `executor::apply` over the host
    `pg` / `mysql2` npm driver via the `hostDriver` session seam.
 
-`plan()` (DB-free structural + confinement pre-check via the addon's `loadVerify`)
-and `status()` / `history()` (journal reads over the host driver) round out the
-facade.
+`plan()` / `validate()` (DB-free structural + confinement pre-check via the addon's
+`loadVerify`) and `status()` / `history()` (journal reads over the host driver) round
+out the `zero-migrate-engine` facade.
 
 ## The inlined db type-builder (`fromDb` bridge)
 

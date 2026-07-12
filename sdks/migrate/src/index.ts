@@ -6,7 +6,10 @@
 // `default { up, down? }` object whose parameterless `up()`/`down()` author
 // against the ambient per-migration recorder via `table()`. Names are plain
 // strings (NOT live-schema-bound). Every expression is the fluent `(c) => Expr`
-// builder; there is no raw escape and no `Raw` type (property A).
+// builder — there is no ad-hoc raw *expression* escape and no `Raw` expr type
+// (property A). The one deliberate escape hatch is the top-level `raw({ sql,
+// reason })` DDL op (a trust-gated, reason-required whole-statement emitter for
+// vendor DDL the structured surface cannot yet express) — exported below.
 //
 //   import { table, t } from "zero-migrate";
 //

@@ -26,8 +26,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { buildEnvelope } from "zero-migrate/host-recorder";
-import { currentIrVersion, apply } from "zero-migrate/host";
+import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { currentIrVersion, apply } from "zero-migrate-engine";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 

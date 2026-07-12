@@ -35,8 +35,8 @@ import pg from "pg";
 // Portable "this dir" across Bun (`HERE`) and Node (derive from URL).
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-import { apply, status, history, currentIrVersion } from "zero-migrate/host";
-import { buildEnvelope } from "zero-migrate/host-recorder";
+import { apply, status, history, currentIrVersion } from "zero-migrate-engine";
+import { buildEnvelope } from "zero-migrate/internal/recorder";
 
 // The migration module. Under Bun we import the `.ts` directly; under plain Node
 // (which can't import `.ts`) we import the `bun build`-transpiled `.mjs` sibling.
@@ -328,7 +328,7 @@ async function main() {
   }
 
   // ---- ShadowUnsupported honesty: no dryRun verb in the facade ----
-  const facade = await import("zero-migrate/host");
+  const facade = await import("zero-migrate-engine");
   record(
     "shadow-deferred honesty: the host facade exposes NO `dryRun` verb (host shadow §F deferred)",
     !("dryRun" in facade),

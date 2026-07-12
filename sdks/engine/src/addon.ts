@@ -31,7 +31,7 @@ import type {
   StatusReply,
   HistoryReply,
   LoadVerifyReply,
-} from "../../../../crates/zero-migrate-node/index.js";
+} from "../../../crates/zero-migrate-node/index.js";
 
 export type {
   ApplyRequest,
@@ -90,11 +90,13 @@ let cached: MigrateAddon | null = null;
 
 /**
  * Load the prebuilt `.node`. Resolution order (§E — napi-rs prebuild convention):
- *  1. `ZERO_MIGRATE_ADDON_PATH` env override (an explicit `.node` path — used by the
- *     oracle to point at the freshly-`napi build`'d artifact in the addon crate).
+ *  1. `ZERO_MIGRATE_ADDON_PATH` env override (an explicit `.node` path — used in dev
+ *     / by the oracle to point at the freshly-`napi build`'d artifact).
  *  2. the bundled `native/migrate.<platform>.node` shipped with this package.
- *  3. the sibling addon crate's `zero-migrate-node.<triple>.node` (dev, when
- *     this package's `native/` is not yet populated).
+ *
+ * There is deliberately NO hard-coded sibling-crate fallback: this is a standalone
+ * npm package with no monorepo-relative build layout to assume. In dev, point
+ * `ZERO_MIGRATE_ADDON_PATH` at the `napi build` output.
  *
  * @throws if no `.node` can be resolved/loaded (with the tried paths).
  */
@@ -118,7 +120,7 @@ export function loadAddon(): MigrateAddon {
     }
   }
   throw new Error(
-    "zero-migrate/host: could not load the native addon (.node). Tried:\n  " +
+    "zero-migrate-engine: could not load the native addon (.node). Tried:\n  " +
       tried.join("\n  ") +
       "\nSet ZERO_MIGRATE_ADDON_PATH to an explicit .node path, or run `napi build` in " +
       "crates/zero-migrate-node and ship native/.",
@@ -135,21 +137,10 @@ function addonCandidates(): string[] {
   const abi = platform === "linux" ? "-gnu" : "";
   const triple = `${platform}-${arch}${abi}`;
   // Bundled with the package (populated by the prebuild step). `import.meta.url` is
-  // the compiled `dist/host.js`, so the package root is `../` and `native/` sits
+  // the compiled `dist/index.js`, so the package root is `../` and `native/` sits
   // beside `dist/`.
   out.push(new URL(`../native/migrate.${triple}.node`, import.meta.url).pathname);
   out.push(new URL(`../native/index.node`, import.meta.url).pathname);
-  // Dev fallback: the sibling addon crate's build output. From `sdks/migrate/dist/`
-  // the worktree root is `../../../`.
-  out.push(
-    new URL(
-      `../../../crates/zero-migrate-node/zero-migrate-node.${triple}.node`,
-      import.meta.url,
-    ).pathname,
-  );
-  out.push(
-    new URL(`../../../crates/zero-migrate-node/index.node`, import.meta.url).pathname,
-  );
   return out;
 }
 

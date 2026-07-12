@@ -26,11 +26,13 @@
 // (`index.ts`), which deliberately omits recorder internals (the public-surface
 // test enforces `__begin` stays out of the root `.d.ts`). tsup's code-SPLITTING
 // (`splitting: true`) hoists `ops.ts` into ONE shared chunk that both `index.js`
-// (the migration's `table()`/`t.*`) and this `host-recorder.js` import — so they
+// (the migration's `table()`/`t.*`) and this recorder module import — so they
 // resolve to the SAME ambient recorder singleton, which is the load-bearing
 // requirement (a duplicated module would drain an empty op list). This is the
-// pure-JS peer of the in-V8 `op_recorder.js` seam.
-import { __begin, __drain } from "./ops.js";
+// pure-JS peer of the in-V8 `op_recorder.js` seam. It is exposed to the
+// `zero-migrate-engine` host package via the documented `./internal/recorder`
+// subpath export (the ONE sanctioned consumer) — NOT part of the public `.` API.
+import { __begin, __drain } from "../ops.js";
 
 /** The pure-JS `.ir.json` envelope the addon lowers (§D.1). Note: NO `owner_app`,
  *  NO `checksum` — both are Rust-owned provenance/integrity fields. */
