@@ -21,6 +21,14 @@ export default defineConfig([
     // (imported here, also external).
     entry: {
       index: "src/index.ts",
+      // The CLI (redesign step 5c): the arg-parser (`cli.ts`) + the executable entry
+      // (`cli-bin.ts`, mapped to the `zero-migrate` bin). `cli-bin.ts` carries a
+      // leading `#!/usr/bin/env node` shebang which esbuild preserves on the entry
+      // chunk, so the emitted `dist/cli-bin.js` is directly executable. `zero-migrate`
+      // (the DSL) is external so a migration's `import { table } from "zero-migrate"`
+      // resolves to the ONE recorder instance this package shares (not a duplicate).
+      cli: "src/cli.ts",
+      "cli-bin": "src/cli-bin.ts",
     },
     external: ["pg", "mysql2", "mysql2/promise", "zero-migrate"],
     clean: true,

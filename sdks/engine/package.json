@@ -12,6 +12,9 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "zero-migrate": "./dist/cli-bin.js"
+  },
   "files": ["dist", "src", "native"],
   "scripts": {
     "build": "tsup",
