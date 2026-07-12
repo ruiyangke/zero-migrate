@@ -535,7 +535,7 @@ export function checkExpressionSurfaceTypechecks(): void {
 
 export function vendorExprSurfaceBoundaryTypechecks(): void {
   table("app_secrets").policy("tenant_only").create({
-    using: (col) => col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "uuid" })),
+    using: (col) => col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "uuid" })),
     withCheck: (col) => col("owner").eq(currentUser()),
   });
 
@@ -548,7 +548,7 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
   table("exprs").update({ set: { x: (col) => col("x").columnSize() } });
 
   // @ts-expect-error — currentSetting is a top-level import, not a chain member.
-  table("exprs").update({ set: { x: (col) => col("x")["currentSetting"]("zeroship.tenant_app", true) } });
+  table("exprs").update({ set: { x: (col) => col("x")["currentSetting"]("zero_migrate.tenant_app", true) } });
 
   // @ts-expect-error — currentUser is a top-level import, not a chain member.
   table("exprs").update({ set: { x: (col) => col("x")["currentUser"]() } });

@@ -247,58 +247,58 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
   const ops = record(() => {
     extension("citext").create({ ifNotExists: true });
     extension("citext").drop({ ifExists: true });
-    schema("zeroship").create({ ifNotExists: true });
-    schema("zeroship").drop({ ifExists: true, cascade: true });
+    schema("zero_migrate").create({ ifNotExists: true });
+    schema("zero_migrate").drop({ ifExists: true, cascade: true });
 
-    role("zeroship_auth").create({
+    role("zero_migrate_auth").create({
       login: true,
-      password: "zeroship_auth",
+      password: "zero_migrate_auth",
       bypassRls: true,
-      setSearchPath: ["zeroship", "public"],
+      setSearchPath: ["zero_migrate", "public"],
       ifNotExists: true,
     });
-    role("zeroship_auth").setOptions({ setSearchPath: ["zeroship", "public"] });
-    role("zeroship_auth").drop({ ifExists: true });
-    dropOwnedBy({ roles: ["zeroship_auth"] });
+    role("zero_migrate_auth").setOptions({ setSearchPath: ["zero_migrate", "public"] });
+    role("zero_migrate_auth").drop({ ifExists: true });
+    dropOwnedBy({ roles: ["zero_migrate_auth"] });
 
     grant({
       privileges: ["select", "insert", "update", "delete"],
-      on: { kind: "table", names: ["users"], schema: "zeroship" },
-      to: ["zeroship_auth"],
+      on: { kind: "table", names: ["users"], schema: "zero_migrate" },
+      to: ["zero_migrate_auth"],
     });
     revoke({
       privileges: ["update", "delete", "truncate"],
-      on: { kind: "table", names: ["audit_events"], schema: "zeroship" },
+      on: { kind: "table", names: ["audit_events"], schema: "zero_migrate" },
       from: ["public"],
     });
 
-    table("events", { schema: "zeroship" }).partition("events_2026_11").attach({
+    table("events", { schema: "zero_migrate" }).partition("events_2026_11").attach({
       from: ["2026-11-01T00:00:00Z"],
       to: ["2026-12-01T00:00:00Z"],
     });
 
-    const secrets = table("app_secrets", { schema: "zeroship" });
+    const secrets = table("app_secrets", { schema: "zero_migrate" });
     secrets.setRls({ enabled: true, forced: true });
     secrets.policy("tenant_isolation").create({
       for: "all",
       using: (col) =>
-        col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+        col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "text" })),
       withCheck: (col) =>
-        col("app_id").eq(currentSetting("zeroship.tenant_app", { missingOk: true }).cast({ to: "text" })),
+        col("app_id").eq(currentSetting("zero_migrate.tenant_app", { missingOk: true }).cast({ to: "text" })),
     });
     secrets.policy("tenant_isolation").drop({ ifExists: true });
     secrets.setRls({ enabled: false, forced: false });
 
     createFunction({
       name: "audit_events_block_tamper",
-      schema: "zeroship",
+      schema: "zero_migrate",
       returns: "trigger",
       language: "plpgsql",
       replace: true,
       body: "BEGIN RAISE EXCEPTION 'audit_events is append-only'; END;",
     });
 
-    const audit = table("audit_events", { schema: "zeroship" });
+    const audit = table("audit_events", { schema: "zero_migrate" });
     audit.trigger("audit_events_block_update").create({
       timing: "before",
       events: ["update", "delete"],
@@ -316,12 +316,12 @@ test("pg_vendor typed pg surface records ops equal the committed golden", async 
 
     dropFunction({
       name: "audit_events_block_tamper",
-      schema: "zeroship",
+      schema: "zero_migrate",
       ifExists: true,
     });
 
     raw({
-      sql: "SELECT set_config('zeroship.tenant_app', 'app_demo', false)",
+      sql: "SELECT set_config('zero_migrate.tenant_app', 'app_demo', false)",
       reason: "set tenant app GUC for pg vendor fixture",
     });
   });

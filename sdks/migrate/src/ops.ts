@@ -237,9 +237,9 @@ const nativeCryptoRandomUUID =
   typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function"
     ? globalThis.crypto.randomUUID
     : undefined;
-const NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
-const DECIMAL_VALUE_BRAND = Symbol.for("zeroship.migrate.decimal/v1");
-const BYTES_VALUE_BRAND = Symbol.for("zeroship.migrate.bytes/v1");
+const NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
+const DECIMAL_VALUE_BRAND = Symbol.for("zero-migrate.decimal/v1");
+const BYTES_VALUE_BRAND = Symbol.for("zero-migrate.bytes/v1");
 const DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
 const BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
 const DECIMAL_VALUE_ERROR =
@@ -800,7 +800,7 @@ class ColumnDefImpl implements ColumnDefType {
   }
 
   /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
-   *  the field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask`
+   *  the field reads back as `MaskedValue<T>` and the op lower emits the `zero-migrate:mask`
    *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
    *  `classification` is optional and DEFAULTS to `"pii"` (closed
    *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector({ dimensions, metric })`:
@@ -2483,7 +2483,7 @@ function stringArray(values: unknown, what: string): string[] {
   return [...values];
 }
 
-const PARTITION_BOUND_SENTINEL = "__zeroshipPartitionBound";
+const PARTITION_BOUND_SENTINEL = "__zeroMigratePartitionBound";
 
 export const minValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "minValue" }) as PartitionBoundSentinel;
 export const maxValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "maxValue" }) as PartitionBoundSentinel;

@@ -50,7 +50,7 @@ const migMod = IS_BUN
 const HOST = "localhost";
 const PORT = 5440;
 const USER = "postgres";
-const PASSWORD = "zeroship";
+const PASSWORD = "zero_migrate";
 const DBNAME = "zero_migrate_test";
 const PG_URL = `postgres://${USER}:${PASSWORD}@${HOST}:${PORT}/${DBNAME}`;
 const OWNER_APP = "app_widgets";
@@ -58,10 +58,10 @@ const OWNER_APP = "app_widgets";
 // (`tests/host/native-ref`) that applies the SAME `.ir.json` via `apply_standalone`
 // over compio-postgres, so Oracle 1 is host == native-pg, not host == self.
 const NATIVE_REF_BIN =
-  process.env.ZEROSHIP_MIGRATE_NATIVE_REF ??
+  process.env.ZERO_MIGRATE_ADDON_PATH_REF ??
   join(HERE, "native-ref/target/debug/migrate-native-ref");
 const NATIVE_JS_BIN =
-  process.env.ZEROSHIP_MIGRATE_JS_BIN ??
+  process.env.ZERO_MIGRATE_JS_BIN ??
   join(HERE, "../../../../target/debug/zero-migrate-js");
 const MIG_TS = join(HERE, "mig/20260711000001_create_widgets.ts");
 

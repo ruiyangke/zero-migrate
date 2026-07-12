@@ -22,9 +22,9 @@ if (typeof globalThis !== "undefined") {
 var nativeDateNow = typeof Date !== "undefined" ? Date.now : void 0;
 var nativeMathRandom = typeof Math !== "undefined" ? Math.random : void 0;
 var nativeCryptoRandomUUID = typeof globalThis.crypto !== "undefined" && typeof globalThis.crypto.randomUUID === "function" ? globalThis.crypto.randomUUID : void 0;
-var NEXTVAL_DEFAULT_MARKER = "__zeroshipMigrateNextvalDefault";
-var DECIMAL_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zeroship.migrate.decimal/v1");
-var BYTES_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zeroship.migrate.bytes/v1");
+var NEXTVAL_DEFAULT_MARKER = "__zeroMigrateNextvalDefault";
+var DECIMAL_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.decimal/v1");
+var BYTES_VALUE_BRAND = /* @__PURE__ */ Symbol.for("zero-migrate.bytes/v1");
 var DECIMAL_STRING_RE = /^-?\d+(?:\.\d+)?$/;
 var BASE64_STRING_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}(?:==)?|[A-Za-z0-9+/]{3}=?)?$/;
 var DECIMAL_VALUE_ERROR = 'decimal(value) requires a well-formed decimal string; use decimal("<n>") or decimal("0.00")';
@@ -426,7 +426,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
     return this.with({ unique: true });
   }
   /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
-   *  the field reads back as `MaskedValue<T>` and the op lower emits the `__zsmask`
+   *  the field reads back as `MaskedValue<T>` and the op lower emits the `zero-migrate:mask`
    *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
    *  `classification` is optional and DEFAULTS to `"pii"` (closed
    *  `MASK_CLASSIFICATIONS`). The closed-set checks mirror `t.vector({ dimensions, metric })`:
@@ -1865,7 +1865,7 @@ function stringArray(values, what) {
   for (const v of values) requireString(v, what);
   return [...values];
 }
-var PARTITION_BOUND_SENTINEL = "__zeroshipPartitionBound";
+var PARTITION_BOUND_SENTINEL = "__zeroMigratePartitionBound";
 var minValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "minValue" });
 var maxValue = Object.freeze({ [PARTITION_BOUND_SENTINEL]: "maxValue" });
 function partitionSpecToIr(spec, what) {

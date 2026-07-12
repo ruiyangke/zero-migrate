@@ -18,7 +18,7 @@
 // columns exist. This proves author -> IR -> lower(Rust checksum/fold) -> apply over
 // the real `pg` driver.
 //
-// The addon `.node` is resolved via `ZEROSHIP_MIGRATE_NATIVE` (set below to the
+// The addon `.node` is resolved via `ZERO_MIGRATE_ADDON_PATH` (set below to the
 // sibling crate's build output) or the addon loader's dev-fallback.
 
 import { test } from "node:test";
@@ -34,10 +34,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // Point the addon loader at the sibling crate's prebuilt `.node` unless the caller
 // already set an explicit path. The napi default triple spelling on Linux is
 // `<platform>-<arch>-gnu`.
-if (!process.env.ZEROSHIP_MIGRATE_NATIVE) {
+if (!process.env.ZERO_MIGRATE_ADDON_PATH) {
   const { platform, arch } = process;
   const abi = platform === "linux" ? "-gnu" : "";
-  process.env.ZEROSHIP_MIGRATE_NATIVE = join(
+  process.env.ZERO_MIGRATE_ADDON_PATH = join(
     HERE,
     `../../../../crates/zero-migrate-node/zero-migrate-node.${platform}-${arch}${abi}.node`,
   );
@@ -45,7 +45,7 @@ if (!process.env.ZEROSHIP_MIGRATE_NATIVE) {
 
 const PG_URL =
   process.env.ZERO_MIGRATE_TEST_PG_URL ??
-  "postgres://postgres:zeroship@localhost:5440/zero_migrate_test";
+  "postgres://postgres:zero_migrate@localhost:5440/zero_migrate_test";
 
 /** Import the sample migration (`.ts`) — resolves `zero-migrate` to this
  *  package's dist (one shared recorder singleton). Runs under `node --import tsx`. */

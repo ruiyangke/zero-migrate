@@ -69,7 +69,7 @@ let cached: MigrateAddon | null = null;
 
 /**
  * Load the prebuilt `.node`. Resolution order (§E — napi-rs prebuild convention):
- *  1. `ZEROSHIP_MIGRATE_NATIVE` env override (an explicit `.node` path — used by the
+ *  1. `ZERO_MIGRATE_ADDON_PATH` env override (an explicit `.node` path — used by the
  *     oracle to point at the freshly-`napi build`'d artifact in the addon crate).
  *  2. the bundled `native/migrate.<platform>.node` shipped with this package.
  *  3. the sibling addon crate's `zero-migrate-node.<triple>.node` (dev, when
@@ -99,7 +99,7 @@ export function loadAddon(): MigrateAddon {
   throw new Error(
     "zero-migrate/host: could not load the native addon (.node). Tried:\n  " +
       tried.join("\n  ") +
-      "\nSet ZEROSHIP_MIGRATE_NATIVE to an explicit .node path, or run `napi build` in " +
+      "\nSet ZERO_MIGRATE_ADDON_PATH to an explicit .node path, or run `napi build` in " +
       "crates/zero-migrate-node and ship native/.",
   );
 }
@@ -107,7 +107,7 @@ export function loadAddon(): MigrateAddon {
 /** The ordered `.node` candidate paths (see {@link loadAddon}). */
 function addonCandidates(): string[] {
   const out: string[] = [];
-  const override = process.env.ZEROSHIP_MIGRATE_NATIVE;
+  const override = process.env.ZERO_MIGRATE_ADDON_PATH;
   if (override) out.push(override);
   const { platform, arch } = process;
   // The napi-rs default triple spelling (linux-x64-gnu, darwin-arm64, win32-x64, …).
