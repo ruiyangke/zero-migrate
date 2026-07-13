@@ -86,7 +86,7 @@ Here is a complete, compiling migration that creates a `users` table and adds an
 index on `email`:
 
 ```ts
-import { table, t } from "zero-migrate";
+import { table, t, now } from "zero-migrate";
 
 export const name = "create_users";
 
@@ -124,8 +124,8 @@ The pieces:
 - **`table("users").index("users_email_idx").add({ on: [...] })`** — records an
   index; `unique: true` makes it a unique index.
 
-`now()` is a portable function expression exported from `zero-migrate`; import it
-alongside `table` and `t`:
+`now()` is a portable function expression exported from `zero-migrate`, imported
+alongside `table` and `t` (as in the example above):
 
 ```ts
 import { table, t, now } from "zero-migrate";
@@ -199,7 +199,7 @@ zero-migrate apply \
   --database-url postgres://user:pass@localhost:5432/mydb \
   --schema app \
   --owner-app app_myproject
-# apply create_users: {"applied":true,...}
+# apply create_users: {"applied":["mig_..."],"skipped":[],"recovered":[]}
 ```
 
 Flags:
