@@ -14,7 +14,7 @@
 //
 // These types are ERGONOMICS for an advanced caller; the golden IR-envelope corpus
 // + the `Checksum::of_ir` round-trip (in `crates/zero-migrate/tests`)
-// remain the contract source of truth (§4.3 / PR3). Regenerate with:
+// remain the contract source of truth. Regenerate with:
 //
 //   pnpm --filter zero-migrate gen:ir-types
 //
@@ -30,7 +30,7 @@ const schemaPath = resolve(here, "../../../crates/zero-migrate/ir-envelope.schem
 // The output path defaults to the committed enums.ts, but the freshness CI gate
 // (`tests/ir-types-drift.test.ts`) overrides it via `GEN_IR_OUT` to regenerate
 // into a temp file and byte-compare against the committed copy — the "regenerate
-// + diff" gate (PR10 review F4) without a shell `git diff`.
+// + diff" gate without a shell `git diff`.
 const outPath = process.env.GEN_IR_OUT
   ? resolve(process.env.GEN_IR_OUT)
   : resolve(here, "../src/generated/enums.ts");
@@ -55,7 +55,7 @@ const ENUM_DEFS = [
   "CmpOp",
   "OnUnmet",
   "OnlinePhase",
-  // **PR10** — the closed 2-token existence-guard modifier (`ifNotExists`/
+  // The closed 2-token existence-guard modifier (`ifNotExists`/
   // `ifExists`). A closed string-enum like the others, so it is generated here and
   // consumed by the hand-authored `ir.ts` `Op` variants.
   "ExistenceGuard",
@@ -90,7 +90,7 @@ const banner = `/* eslint-disable */
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
 // (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden IR-envelope corpus is
-// the contract (§4.3 / PR3).
+// the contract.
 `;
 
 const raw = await readFile(schemaPath, "utf8");

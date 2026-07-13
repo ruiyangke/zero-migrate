@@ -5,7 +5,7 @@
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
 // (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden IR-envelope corpus is
-// the contract (§4.3 / PR3).
+// the contract.
 
 /**
  * A binary operator admitted in the closed AST (method↔node table).
