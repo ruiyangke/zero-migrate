@@ -1,4 +1,4 @@
-# REFERENCE binary for the Phase-D differential oracle (design §7 Phase D / §F.5).
+# REFERENCE binary for the differential oracle.
 # This is NOT part of the shipped addon — it is a dev-only reference apply of an
 # `.ir.json` on PG over the driver-neutral seam, so the oracle can assert the host
 # apply's journal == a reference apply's journal (Oracle 1), not host==self.

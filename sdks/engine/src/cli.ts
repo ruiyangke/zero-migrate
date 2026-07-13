@@ -1,12 +1,10 @@
-// `zero-migrate` — the command-line surface for the host runtime (redesign step 5c).
+// `zero-migrate` — the command-line surface for the host runtime.
 //
-// The Rust `[[bin]] zero-migrate` (a `#[compio::main]` clap tool) was retired in
-// redesign step 5c; this TS CLI is its replacement. It is a THIN arg-parser over the
-// host verbs this package already exports (`apply`/`plan`/`status`/`validate`) plus
-// pure-JS `new` scaffolding — the engine facade does the real work over the native
-// addon and the `pg`/`mysql2` driver seam. NO Rust bin, NO compio, NO clap.
+// A THIN arg-parser over the host verbs this package already exports
+// (`apply`/`plan`/`status`/`validate`) plus pure-JS `new` scaffolding — the engine
+// facade does the real work over the native addon and the `pg`/`mysql2` driver seam.
 //
-// Commands (design §D.3):
+// Commands:
 //   new <name>          Scaffold a fresh `<14-digit-ts>_<name>.ts` op-DSL migration
 //                       (imports `{ table, t } from "zero-migrate"`). OFFLINE.
 //   plan   [dir]        DB-free load + structural/confinement/ownership VERIFY of every
@@ -37,7 +35,7 @@ import {
 
 /** The default migration directory (dbmate/Flyway convention). */
 const DEFAULT_DIR = "./migrations";
-/** The default confined project schema the lower pins ops to (§2.7). */
+/** The default confined project schema the lower pins ops to. */
 const DEFAULT_SCHEMA = "public";
 /** The default deploying app id when none is given. */
 const DEFAULT_OWNER_APP = "app_cli";
@@ -112,7 +110,7 @@ function parseArgs(argv: string[]): Args {
   }
   if (!args.command) args.command = positionals.shift() ?? "";
   args.positional = positionals.shift();
-  // `DATABASE_URL` fallback (empty-is-unset, like the retired CLI's MED-1 rule).
+  // `DATABASE_URL` fallback (empty-is-unset).
   if (!args.databaseUrl) {
     const env = process.env.DATABASE_URL;
     if (env && env.length > 0) args.databaseUrl = env;
@@ -200,9 +198,7 @@ async function runNew(args: Args): Promise<number> {
   return 0;
 }
 
-/** The op-DSL migration scaffold body (redesign step 5c — replaces the Rust
- *  `scaffold.rs` that emitted `@zeroship/migrate`; now the standalone `zero-migrate`
- *  DSL, per the naming table). */
+/** The op-DSL migration scaffold body — emits a `zero-migrate` DSL module. */
 function scaffold(name: string): string {
   return `import { table, t } from "zero-migrate";
 

@@ -34,7 +34,7 @@ function variantTags(def: any, tagField: string): string[] {
 }
 
 /** Map an `Op` variant tag → the set of property NAMES the schema declares for
- *  that variant. Drives the per-op field-presence drift gate (PR10 review F4: the
+ *  that variant. Drives the per-op field-presence drift gate (the
  *  hand-authored `ir.ts` lost `schema`/`existenceGuard` and kept a removed
  *  `ifExists` — a tag-only gate would not have caught it). */
 function opFieldsByTag(def: any, tagField: string): Record<string, string[]> {
@@ -110,9 +110,9 @@ const TS = {
   PartitionBoundValue: ["int", "maxValue", "minValue", "string"].sort(),
   ExclusionMethod: ["gist", "spgist", "btree"].sort(),
   ExclusionOperator: ["&&", "=", "<>", "<", ">", "<=", ">="].sort(),
-  // **PR10** — the closed existence-guard token set (`ir.ts` `ExistenceGuard`).
+  // The closed existence-guard token set (`ir.ts` `ExistenceGuard`).
   ExistenceGuard: ["ifNotExists", "ifExists"].sort(),
-  // **C1** — the closed FK referential-action token set (`ir.ts` `RefAction`).
+  // The closed FK referential-action token set (`ir.ts` `RefAction`).
   RefAction: ["cascade", "restrict", "setNull", "setDefault", "noAction"].sort(),
   TriggerTiming: ["before", "after", "insteadOf"].sort(),
   TriggerEvent: ["insert", "update", "delete", "truncate"].sort(),
@@ -131,7 +131,7 @@ const TS = {
   TableStrictness: ["strict", "lenient", "off"].sort(),
 };
 
-// **PR10 review F4** — the per-`Op` FIELD-presence map the hand-authored `ir.ts`
+// The per-`Op` FIELD-presence map the hand-authored `ir.ts`
 // declares, pinned against the schema's per-variant `properties` (minus the `op`
 // tag). This is what catches the field-level drift a tag-only gate misses: the
 // removed native `ifExists`, and the added `schema?` / `existenceGuard?`. If the
@@ -145,7 +145,7 @@ const TS_OP_FIELDS: Record<string, string[]> = {
   dropPartition: ["cascade", "existenceGuard", "name", "parent", "schema"].sort(),
   dropTable: ["cascade", "existenceGuard", "schema", "table"].sort(),
   renameTable: ["existenceGuard", "schema", "table", "to"].sort(),
-  // #173/#174 + generated/identity — addColumn carries the column facets that are
+  // column facets + generated/identity — addColumn carries the column facets that are
   // sound on an added column (NOT `idPrefix`: an added column is never the system PK).
   addColumn: ["caseSensitive", "column", "default", "existenceGuard", "generated", "identity", "mask", "nullable", "schema", "table", "type", "vectorMetric"].sort(),
   dropColumn: ["column", "existenceGuard", "schema", "table"].sort(),
@@ -242,7 +242,7 @@ test("partition type tags match the schema", () => {
   assert.deepEqual(variantTags(schema.$defs.PartitionBoundValue, "kind"), TS.PartitionBoundValue);
 });
 
-// **#180** — the migration flags-override FIELD set. `IrFlagsOverride` in `ir.ts`
+// The migration flags-override FIELD set. `IrFlagsOverride` in `ir.ts`
 // is a flat struct (no `op` tag), so the per-`Op` field gate below does not cover
 // it — that is exactly how `lock_timeout_ms` was added to the engine schema but
 // silently never transcribed into `ir.ts`. Pin its property set against the schema
@@ -319,7 +319,7 @@ test("RefAction tokens match the schema (C1 FK actions)", () => {
   assert.deepEqual(enumTokens(schema.$defs.RefAction), TS.RefAction);
 });
 
-// **PR10 review F4** — the per-op FIELD-presence drift gate. This is the gate the
+// The per-op FIELD-presence drift gate. This is the gate the
 // stale-`ir.ts` review asked for: had it existed, the un-regenerated `ir.ts` (a
 // removed `ifExists`, a missing `schema`/`existenceGuard`) would have FAILED CI
 // here, never shipping a wrong public wire type.
@@ -343,7 +343,7 @@ test("createTable primaryKey is present in the schema and hand-authored ir.ts", 
   assert.match(irTs, /primaryKey:\s*string\[\]\s*\|\s*null/);
 });
 
-// **PR10** — explicit assertion that the removed native `ifExists` is GONE from
+// Explicit assertion that the removed native `ifExists` is GONE from
 // the schema (the intentional wire break), so a future re-introduction is caught.
 test("legacy guardable Op variants do not carry the removed native ifExists field", () => {
   const schemaFields = opFieldsByTag(schema.$defs.Op, "op");
@@ -369,7 +369,7 @@ test("legacy guardable Op variants do not carry the removed native ifExists fiel
   }
 });
 
-// **PR10 review F4** — the "regenerate + diff" freshness gate. Re-run the codegen
+// The "regenerate + diff" freshness gate. Re-run the codegen
 // (`gen-ir-types.mjs`) into a temp file and assert byte-equality with the committed
 // `src/generated/enums.ts`. A schema change that alters a generated enum (e.g. a new
 // `ExistenceGuard` token) without re-running the codegen FAILS here — the committed

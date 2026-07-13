@@ -1,7 +1,7 @@
 // `zero-migrate` — the SHARED column-type lexicon bridge from the db type-builder
-// surface (`./db-types.js`) (§3.2 / §3.3 / PR5).
+// surface (`./db-types.js`).
 //
-// PR5 goal (A): the migration DSL and the runtime schema share ONE type lexicon.
+// The migration DSL and the runtime schema share ONE type lexicon.
 // A `t.text()` written in a migration is the same dialect-neutral `ColType` the
 // db schema reduces to, so a `t.ref("users")` FK declared in a live db schema
 // lowers to the IDENTICAL `{ ref: { references: "users" } }` `ColType` an
@@ -15,7 +15,7 @@
 // exactly one mapping, defined once here.
 //
 // NOTE: this is NOT the inverse of the engine's Rust `col_type_to_token`
-// (`crates/zero-migrate/src/ir_author.rs`). That function emits engine-internal
+// (`crates/zero-migrate/src/render/lower.rs`). That function emits engine-internal
 // masked-sibling descriptor tokens (`"int"` for `Int|BigInt`, `"number"` for
 // `Float|Decimal`, `"string"` for `Uuid|Text`, …) — a different, overlapping
 // token set from the db `FieldDef` discriminants this bridge consumes (the db
@@ -25,7 +25,7 @@
 // a migrate `t.ref("users")` reduce to the byte-identical
 // `{ ref: { references: "users" } }` ColType.
 //
-// BINDING (§3.3): this bridge converts a column's TYPE only. It never binds
+// BINDING: this bridge converts a column's TYPE only. It never binds
 // table/column NAMES to the live schema — a `t.ref(target)` carries the target
 // table as a plain string (existence validated at apply time), exactly as the
 // migration DSL's own `t.ref` does.
@@ -122,7 +122,7 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
     case "id":
       return "uuid";
     // A foreign-key column: the neutral `ref` arm carries the target table as a
-    // PLAIN STRING (§3.3 — never live-schema-bound). `refTarget` is required on a
+    // PLAIN STRING (never live-schema-bound). `refTarget` is required on a
     // well-formed `t.ref(...)` FieldDef.
     case "ref": {
       const references = def.refTarget;

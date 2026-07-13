@@ -1,25 +1,20 @@
-// Host recorder (design §D.1) — the pure-JS half of authoring a `.ir.json`.
+// Host recorder — the pure-JS half of authoring a `.ir.json`.
 //
-// The in-Rust V8 recorder (`crates/zero-migrate/src/frontend/op_recorder.js`)
-// imports a creator migration + `{ __begin, __drain }` from `zero-migrate`,
+// It imports a creator migration + `{ __begin, __drain }` from `zero-migrate`,
 // runs `up()` under a fresh ambient recorder, drains the op list, and emits the
-// `{ ir_version, name, ops }` ENVELOPE for the Rust host to read back. The in-V8
-// isolate was only ever a *sandbox* for untrusted `up()`, never an authoring
-// requirement (§D.1) — the recorder is ordinary ESM, so Node/Bun can drain the SAME
-// op list purely in JS.
+// `{ ir_version, name, ops }` ENVELOPE for the Rust host to read back. The recorder
+// is ordinary ESM, so Node/Bun can drain the op list purely in JS.
 //
-// This module is the SDK-exported equivalent of that Rust-side glue: it takes an
-// already-imported migration module (the facade / a bundler resolves the `.ts`),
-// runs the recorder, and returns the envelope. It deliberately DOES NOT compute the
-// checksum (§D.1 point 2) and DOES NOT set `owner_app` (a provenance field the
-// builder must not influence, §D.1 / the in-V8 recorder's PR4a HIGH #1): the addon
-// stamps `owner_app` and folds the single authoritative `Checksum::of_ir` in Rust.
+// It takes an already-imported migration module (the facade / a bundler resolves
+// the `.ts`), runs the recorder, and returns the envelope. It deliberately DOES NOT
+// compute the checksum and DOES NOT set `owner_app` (a provenance field the
+// builder must not influence): the addon stamps `owner_app` and folds the single
+// authoritative `Checksum::of_ir` in Rust.
 //
-// `CURRENT_IR_VERSION` is a SINGLE SOURCE OF TRUTH across the boundary (§D.1 point
-// 2): the addon's `irVersion()` is the floor the Rust core validates against; this
-// module reads it from the addon at envelope-build time rather than hardcoding `6`
-// (which both `op_recorder.js` and `model/ir.rs` did). A host that authors without a
-// loaded addon may pass the version explicitly.
+// `CURRENT_IR_VERSION` is a SINGLE SOURCE OF TRUTH across the boundary: the addon's
+// `irVersion()` is the floor the Rust core validates against; this module reads it
+// from the addon at envelope-build time rather than hardcoding a version. A host
+// that authors without a loaded addon may pass the version explicitly.
 
 // FRAMEWORK-INTERNAL recorder seam: import `__begin`/`__drain` DIRECTLY from the
 // recorder module (`./ops.js`) — NOT re-exported through the public `.` entry
@@ -28,16 +23,15 @@
 // (`splitting: true`) hoists `ops.ts` into ONE shared chunk that both `index.js`
 // (the migration's `table()`/`t.*`) and this recorder module import — so they
 // resolve to the SAME ambient recorder singleton, which is the load-bearing
-// requirement (a duplicated module would drain an empty op list). This is the
-// pure-JS peer of the in-V8 `op_recorder.js` seam. It is exposed to the
-// `zero-migrate-engine` host package via the documented `./internal/recorder`
+// requirement (a duplicated module would drain an empty op list). It is exposed to
+// the `zero-migrate-engine` host package via the documented `./internal/recorder`
 // subpath export (the ONE sanctioned consumer) — NOT part of the public `.` API.
 import { __begin, __drain } from "../ops.js";
 
-/** The pure-JS `.ir.json` envelope the addon lowers (§D.1). Note: NO `owner_app`,
+/** The pure-JS `.ir.json` envelope the addon lowers. Note: NO `owner_app`,
  *  NO `checksum` — both are Rust-owned provenance/integrity fields. */
 export interface IrEnvelope {
-  /** The IR-format version, sourced from the addon's `irVersion()` (§D.1). */
+  /** The IR-format version, sourced from the addon's `irVersion()`. */
   ir_version: number;
   /** The migration name: explicit `name` export → `default.name` → the supplied
    *  fallback label. */
@@ -47,7 +41,7 @@ export interface IrEnvelope {
 }
 
 /** The two accepted migration-module shapes (mirrors the deploy contract's
- *  discovery order, exactly as the in-V8 `resolveMigration` does). */
+ *  discovery order). */
 export interface MigrationModule {
   up?: () => void;
   down?: () => void;
@@ -57,8 +51,7 @@ export interface MigrationModule {
 
 /**
  * Resolve the migration's `up()` (mandatory) from either
- * `export function up()` or `export default { up }` (mirrors `op_recorder.js`
- * `resolveMigration`).
+ * `export function up()` or `export default { up }`.
  */
 function resolveUp(mod: MigrationModule): () => void {
   const def = mod && mod.default;
@@ -77,8 +70,7 @@ function resolveUp(mod: MigrationModule): () => void {
 
 /**
  * Resolve the migration name: explicit `name` export → `default.name` → the
- * caller-supplied fallback (typically a filename-derived label), mirroring
- * `op_recorder.js` `resolveName`.
+ * caller-supplied fallback (typically a filename-derived label).
  */
 function resolveName(mod: MigrationModule, fallback: string): string {
   if (typeof mod.name === "string" && mod.name.length > 0) return mod.name;
@@ -91,7 +83,7 @@ function resolveName(mod: MigrationModule, fallback: string): string {
  * Record one phase's op list: install a FRESH ambient recorder (`__begin`), call
  * the phase so the op-functions record into it, then `__drain`. Installing the
  * recorder per-phase is what makes an op-function called OUTSIDE a phase a
- * structured `OP_OUTSIDE_RECORDER` error rather than a silently-lost op (§D.1).
+ * structured `OP_OUTSIDE_RECORDER` error rather than a silently-lost op.
  *
  * IMPORTANT: `__begin`/`__drain` and the migration's `table()`/`t.*` calls MUST
  * resolve to the SAME `zero-migrate` module instance (one ambient recorder
@@ -107,7 +99,7 @@ function recordUp(up: () => void): unknown[] {
 /** Options for {@link buildEnvelope}. */
 export interface BuildEnvelopeOptions {
   /** The IR-format version. Pass the addon's `irVersion()` (the single source of
-   *  truth, §D.1). Required so this module never re-hardcodes `6`. */
+   *  truth). Required so this module never re-hardcodes a version. */
   irVersion: number;
   /** The filename-derived fallback name when the module declares none. */
   nameFallback?: string;
@@ -115,7 +107,7 @@ export interface BuildEnvelopeOptions {
 
 /**
  * Build the `.ir.json` ENVELOPE from an already-imported migration module — the
- * pure-JS §D.1 authoring path. Runs `up()` under a fresh recorder, drains the ops,
+ * pure-JS authoring path. Runs `up()` under a fresh recorder, drains the ops,
  * and stamps the caller-supplied `irVersion` (from the addon). Does NOT set
  * `owner_app` or fold a checksum — the addon does both in Rust.
  *

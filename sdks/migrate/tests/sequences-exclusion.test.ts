@@ -9,8 +9,8 @@ import {
   table as pubTable,
 } from "../src/ops.js";
 // Artifact-identity oracle: the engine-embedded recorder is now the COMPILED
-// `dist/embedded-recorder.js` (the same build output the `zero-migrate` crate
-// `include_str!`s), not the deleted `migrate_ops.js` twin.
+// `dist/embedded-recorder.js` (the same build output the engine host consumes),
+// not the deleted `migrate_ops.js` twin.
 import {
   __begin as engBegin,
   __drain as engDrain,

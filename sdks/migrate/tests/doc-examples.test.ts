@@ -1,4 +1,4 @@
-// CI DOC-EXAMPLE GATE (PR8) — the typed `zero-migrate` examples in
+// CI DOC-EXAMPLE GATE — the typed `zero-migrate` examples in
 // `docs/reference/migrate-op-dsl.md` must TYPECHECK against the REAL package
 // types, so a future API change that rots a documented snippet FAILS CI.
 //

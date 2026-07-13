@@ -1,7 +1,7 @@
-// Phase-D differential oracle harness (design §7 Phase D + §D.1/§D.2/§D.3).
+// Differential oracle harness.
 //
 // Runs the host `apply`/`status`/`history` over `driver-pg` against the :5440 test
-// Postgres and asserts the §7 oracles. The GENUINE native-pg reference arm is the
+// Postgres and asserts the oracles. The GENUINE native-pg reference arm is the
 // dev-only `tests/host/native-ref` binary (compio + `apply_standalone`) applying
 // the SAME `.ir.json` on a sibling schema — so the journal-identity claim
 // (Oracle 1) is host==native-pg, not host==self.
@@ -104,7 +104,7 @@ async function readJournal(
 async function main() {
   const irVersion = currentIrVersion();
 
-  // ---- Author the host envelope (pure JS §D.1) + the native recorder's canonical
+  // ---- Author the host envelope (pure JS) + the native recorder's canonical
   //      .ir.json for the native reference arm. ----
   // The host recorder drains ONLY the author-declared columns (PRE system-shape
   // fold); the native recorder folds the confined system shape into its output
@@ -300,7 +300,7 @@ async function main() {
       projectSchema: freshSchema,
       driver: { kind: "postgres", url: PG_URL },
     });
-    // Typed reply (redesign step 5a): `currentVersion` camelCase; `undefined` when
+    // Typed reply: `currentVersion` camelCase; `undefined` when
     // nothing is applied.
     const stOk =
       (st.currentVersion === null || st.currentVersion === undefined) &&
@@ -330,7 +330,7 @@ async function main() {
   // ---- ShadowUnsupported honesty: no dryRun verb in the facade ----
   const facade = await import("zero-migrate-engine");
   record(
-    "shadow-deferred honesty: the host facade exposes NO `dryRun` verb (host shadow §F deferred)",
+    "shadow-deferred honesty: the host facade exposes NO `dryRun` verb (host shadow deferred)",
     !("dryRun" in facade),
     `facade verbs = ${Object.keys(facade).sort().join(", ")}`,
   );
@@ -344,7 +344,7 @@ async function main() {
   rmSync(dir, { recursive: true, force: true });
 
   // ---- summary ----
-  console.log("\n=== Phase-D differential oracle results ===");
+  console.log("\n=== differential oracle results ===");
   for (const r of results) console.log("  " + r);
   console.log(`\n${failures === 0 ? "ALL ORACLES PASSED" : `${failures} ORACLE(S) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);

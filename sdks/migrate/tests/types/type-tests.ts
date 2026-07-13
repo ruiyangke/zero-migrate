@@ -1,4 +1,4 @@
-// STRUCTURAL type-safety, names-stay-strings (BINDING, §1/§3) — fluent-only.
+// STRUCTURAL type-safety, names-stay-strings (BINDING) — fluent-only.
 //
 // This file is a TYPE-LEVEL test: checked by `tsc --noEmit` via
 // `tsconfig.types.json` (the `typecheck:types` script). It compiles cleanly IFF
@@ -54,7 +54,7 @@ import { MASK_CLASSIFICATIONS, MASK_KINDS, VECTOR_METRICS } from "../../src/ops.
 import type { Classification, MaskKind, VectorMetric } from "../../src/generated/ir.js";
 
 // ───────────────────────────────────────────────────────────────────────────
-// 1. NAMES STAY STRINGS — the anti-rot guarantee (§1/§3).
+// 1. NAMES STAY STRINGS — the anti-rot guarantee.
 // ───────────────────────────────────────────────────────────────────────────
 
 export function antiRotMigration(): void {
@@ -243,7 +243,7 @@ export function partitionGrammar(): void {
   table("events").partition("events_default").create({ default: true });
   table("events").partition("events_2026").drop({ ifExists: true, cascade: true });
 
-  // @ts-expect-error - whenUnsupported is an explicit P12 affirmation and only accepts "collapse".
+  // @ts-expect-error - whenUnsupported is an explicit affirmation and only accepts "collapse".
   table("bad").create({ columns: { created_at: t.timestamp() }, partitionBy: { range: ["created_at"], whenUnsupported: "skip" } });
 
   // @ts-expect-error - null list bounds are outside the closed partition-bound value type.
@@ -420,7 +420,7 @@ export function badColTypes(): void {
   // @ts-expect-error — `t.vector({ dimensions })` requires a numeric dimension.
   t.vector({ dimensions: "not a number" });
 
-  // @ts-expect-error — the removed `{ notNull }` options-bag overload (§7).
+  // @ts-expect-error — the removed `{ notNull }` options-bag overload.
   t.text({ notNull: true });
 }
 
@@ -505,7 +505,7 @@ export function checkExpressionSurfaceTypechecks(): void {
 
   table("oauth_authorization_codes").check("no_now").add({ expr: () => now().isNotNull() });
 
-  // P0: `regex` is a first-class chain operator on the CORE check builder
+  // `regex` is a first-class chain operator on the CORE check builder
   // (PostgreSQL-first; fails closed off-PG at validate-time, not tsc).
   table("oauth_authorization_codes").check("core_regex").add({ expr: (col) => col("user_id").regex("^usr_") });
 
@@ -539,12 +539,12 @@ export function vendorExprSurfaceBoundaryTypechecks(): void {
     withCheck: (col) => col("owner").eq(currentUser()),
   });
 
-  // P0: `regex` is a first-class chain operator (PG-first). It typechecks.
+  // `regex` is a first-class chain operator (PG-first). It typechecks.
   table("exprs").update({ set: { x: (col) => col("x").regex("^a$") } });
-  // @ts-expect-error — `matches` was renamed to `regex` (S1); the old name is gone.
+  // @ts-expect-error — `matches` was renamed to `regex`; the old name is gone.
   table("exprs").update({ set: { x: (col) => col("x")["matches"]("^a$") } });
 
-  // P0: `columnSize` is a first-class chain operator (PG-first). It typechecks.
+  // `columnSize` is a first-class chain operator (PG-first). It typechecks.
   table("exprs").update({ set: { x: (col) => col("x").columnSize() } });
 
   // @ts-expect-error — currentSetting is a top-level import, not a chain member.
@@ -596,7 +596,7 @@ export function domainValueCheckSurfaceTypechecks(): void {
 
 // ───────────────────────────────────────────────────────────────────────────
 // 5. Insert-row VALUE shapes are typed (scalar kinds); the optional row generic
-//    is CALLER-supplied, never auto-derived from the live schema (§1).
+//    is CALLER-supplied, never auto-derived from the live schema.
 // ───────────────────────────────────────────────────────────────────────────
 
 type MyRow = {
@@ -698,7 +698,7 @@ export function byteValueShapes(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 6. The shared `db` lexicon bridge (PR5 goal A) is typed.
+// 6. The shared `db` lexicon bridge is typed.
 // ───────────────────────────────────────────────────────────────────────────
 
 export function lexiconBridgeShapes(): void {
@@ -714,7 +714,7 @@ export function lexiconBridgeShapes(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 6b. EXISTENCE GUARDS — plain `boolean` (op.* PR10 Part B). These lines are
+// 6b. EXISTENCE GUARDS — plain `boolean` (op.*). These lines are
 //     well-typed and the file fails tsc if any stops compiling.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -727,7 +727,7 @@ export function existenceGuardsTypecheck(): void {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// 6c. The IMMUTABLE t.* chain (§4) — every modifier returns a fresh ColumnDef.
+// 6c. The IMMUTABLE t.* chain — every modifier returns a fresh ColumnDef.
 // ───────────────────────────────────────────────────────────────────────────
 
 export function immutableChainTypechecks(): void {

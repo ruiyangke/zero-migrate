@@ -1,4 +1,4 @@
-//! Native-pg reference apply for the Phase-D differential oracle.
+//! Native-pg reference apply for the differential oracle.
 //!
 //! Usage: `migrate-native-ref <DSN> <PROJECT_SCHEMA> <OWNER_APP> <MIGRATIONS_DIR>`
 //!

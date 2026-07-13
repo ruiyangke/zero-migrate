@@ -1,5 +1,4 @@
-// Cross-language e2e parity oracle over the REAL addon + real `pg` driver vs live PG
-// (redesign step 6b).
+// Cross-language e2e parity oracle over the REAL addon + real `pg` driver vs live PG.
 //
 // The SAME multi-op golden migration (`mig/20260712000001_create_gadgets.ts`:
 // createTable + addColumn + createIndex) runs THROUGH the shipped host path — the
@@ -7,13 +6,13 @@
 // fold + confined system-shape fold) → `executor::apply` over the real `pg` npm
 // driver seam — and we assert the applied SCHEMA and the JOURNAL match the engine's
 // expectation. This is the Node-side peer of the in-crate live-PG regression suite
-// (step 6a): both drive the identical shipped PostgresBackend-over-seam apply, one
+// both drive the identical shipped PostgresBackend-over-seam apply, one
 // via the dev-only Rust `SqlSession`, one via the production napi/`pg` bridge.
 //
-// The typed napi verbs exercised (redesign step 5a): `apply` (ApplyReply),
+// The typed napi verbs exercised: `apply` (ApplyReply),
 // `status` (StatusReply), `history` (HistoryReply) — no JSON-string plumbing.
 //
-// Coverage (design §7 oracles, adapted to the shipped seam):
+// Coverage (oracles, adapted to the shipped seam):
 //   - multi-op apply: createTable + addColumn + createIndex all land (schema oracle);
 //   - journal rows + ordering: every step is journaled, in strict `event_seq` order,
 //     under one shared `Checksum::of_ir` anchor;

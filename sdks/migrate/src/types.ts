@@ -1,15 +1,14 @@
-// `zero-migrate` — the authoring-surface TS types (fluent-only redesign,
-// design `2026-06-25-op-dsl-fluent-redesign.md`).
+// `zero-migrate` — the authoring-surface TS types (fluent-only).
 //
 // These are MANUAL types that codegen cannot express: the fluent `table()`
 // handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
 // `ColumnDef` (`t.*`), the `(col) => Expr` `ExprBuilder`, default-expression
 // `DefaultBuilder`, immutable index/generated expression builders, and the all-strings
-// typing stance (§3 — names are plain `string`, NOT live-schema-bound). The
+// typing stance (names are plain `string`, NOT live-schema-bound). The
 // dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
 // GENERATED from the engine's `op-ir.schema.json` (`json-schema-to-typescript`)
 // and re-exported from `./generated/ir` AS ERGONOMICS — the goldens remain the
-// contract source of truth (§6). This module imports the generated wire types
+// contract source of truth. This module imports the generated wire types
 // where a manual type wants to reference the exact serde shape.
 
 import type {
@@ -179,13 +178,13 @@ export interface NextvalDefault {
 // ── The fluent column-type lexicon (`t.*`) → a chainable ColumnDef ──
 
 /**
- * A chainable column definition produced by the fluent `t.*` lexicon (§4).
+ * A chainable column definition produced by the fluent `t.*` lexicon.
  * NULLABLE BY DEFAULT; `.notNull()`/`.default(x)`/`.primaryKey()`/`.unique()`
  * opt in. ONE column-type representation — every column-type
  * position (`create.columns`/`.column().add()`/`.column().rename()`/
  * `.column().setType()`) takes a `ColumnDef`.
  *
- * **IMMUTABLE (§4):** every modifier returns a FRESH `ColumnDef` — it does NOT
+ * **IMMUTABLE:** every modifier returns a FRESH `ColumnDef` — it does NOT
  * mutate the receiver — so a hoisted type var (`const t1 = t.text().notNull()`)
  * is safe to reuse across multiple columns without aliasing (`t1.unique()` leaves
  * `t1` untouched). This is the contract behind the var-assign authoring style.
@@ -225,7 +224,7 @@ export interface ColumnDef {
 
 /** The fluent `t.*` column-type lexicon (shared in shape with `db`).
  *  Canonical names only — the `string`/`int` aliases and the `{notNull,default}`
- *  options-bag overload are REMOVED (§7). */
+ *  options-bag overload are REMOVED. */
 export interface TypeLexicon {
   /** A conventional id: a non-null UUID PK defaulting to `gen_random_uuid()`.
    *  `t.id({ prefix })` records the typed-id prefix on `IrColumn.idPrefix` so the
@@ -256,7 +255,7 @@ export interface TypeLexicon {
   geoPoint(): ColumnDef;
   /** 16-bit signed integer. */
   smallInt(): ColumnDef;
-  /** 32-bit signed integer (canonical; `t.integer` is deleted, P10). */
+  /** 32-bit signed integer (canonical; `t.integer` is deleted). */
   int(): ColumnDef;
   bigInt(): ColumnDef;
   /** Single-precision float (float4). */
@@ -455,7 +454,7 @@ export interface BytesValue {
 export type Scalar = string | number | boolean | null;
 
 /** A typed scalar value an `insert` row / default / `onConflict.doUpdate` may
- *  carry (§3.5 numeric / bytes domain). The builder normalizes a branded
+ *  carry (numeric / bytes domain). The builder normalizes a branded
  *  `decimal(...)` into the `{ decimal }` IR carrier, a branded `byteValue(...)`
  *  into the `{ bytes }` carrier, and a `Uint8Array` into the `{ bytes: base64 }`
  *  carrier before recording. */
@@ -541,10 +540,10 @@ export declare function concatWs(sep: unknown, ...parts: unknown[]): ExprChain;
 export declare function countStar(): ExprChain;
 
 /** A loose insert row — a `Record<string, DmlValue>`. NEVER auto-bound to the
- *  live schema (§3.5); a caller MAY supply a generic for editor convenience. */
+ *  live schema; a caller MAY supply a generic for editor convenience. */
 export type Row = Record<string, DmlValue>;
 
-// ── The fluent expression builder (§3.6 / `(col) => Expr`) ──
+// ── The fluent expression builder (`(col) => Expr`) ──
 
 /** The chainable expression value `col("…")` / every built sub-expression carries.
  *  Each method builds one closed-AST node; bare JS values auto-wrap to `Literal`. */
@@ -574,7 +573,7 @@ export interface ExprChain {
   isFalse(): ExprChain;
   // cast (the closed scalar ColType target set only)
   cast(args: { to: CastTarget }): ExprChain;
-  // portable predicates (§3.4): `between`/`like` render identical syntax on all
+  // portable predicates: `between`/`like` render identical syntax on all
   // three dialects; `in`/`notIn` are portably named but keep PG's pg_dump-faithful
   // `ANY/ALL ARRAY[...]` render for homogeneous scalar lists; `distinctFrom` is
   // portably named but per-dialect rendered (PG/SQLite `IS DISTINCT FROM` vs
@@ -584,7 +583,7 @@ export interface ExprChain {
   "in"(values: readonly Scalar[]): ExprChain;
   notIn(values: readonly Scalar[]): ExprChain;
   distinctFrom(x: unknown): ExprChain;
-  // PostgreSQL-first chain operators (P0). First-class on the core surface — no
+  // PostgreSQL-first chain operators. First-class on the core surface — no
   // `/pg` import, no `col.pg.` cast. The Rust validator fails closed on targets
   // that lack a native form (`regex`: `~` on PG, `REGEXP` on MySQL, error on
   // SQLite; `columnSize`: `pg_column_size` on PG, error elsewhere); use
@@ -615,9 +614,9 @@ export interface ExprChain {
   replace(from: unknown, to: unknown): ExprChain;
   /** Date/time part extraction. PG-only fields record pgExtract and validate fail-closed off-PG. */
   extract(field: ExtractField | PgExtractField): ExprChain;
-  /** The engine-synthesized portable split helper (§9), in-envelope-only. */
+  /** The engine-synthesized portable split helper, in-envelope-only. */
   splitPart(delim: string, n: number): ExprChain;
-  // aggregate nodes (§3.4): receiver-first authoring for COUNT(expr),
+  // aggregate nodes: receiver-first authoring for COUNT(expr),
   // SUM/AVG/MIN/MAX plus PG-first stringAgg/arrayAgg/boolAnd/boolOr.
   // Receiver-less COUNT(*) is the top-level countStar() import.
   count(opts?: { distinct?: boolean }): ExprChain;
@@ -675,7 +674,7 @@ export type CheckExprFn = (col: CheckBuilder) => ExprChain | Expr;
 
 /** The single injected builder handle: a column-accessor function `col("name")`
  *  carrying only `case`. A two-arg form
- *  `col("table", "col")` produces a qualified colRef (§3.4, the join-ON fix). */
+ *  `col("table", "col")` produces a qualified colRef (the join-ON fix). */
 export interface ExprBuilder {
   (name: string): ExprChain;
   (table: string, name: string): ExprChain;
@@ -703,10 +702,10 @@ export interface DomainValueBuilder extends ExprChain {
 
 export type DomainCheckFn = (v: DomainValueBuilder) => ExprChain | Expr;
 
-// ── Shared op-arg fragments (§3) ──
+// ── Shared op-arg fragments ──
 
-/** A FK's `ON DELETE`/`ON UPDATE` referential action (§3.3). Renamed from the old
- *  `FkAction` — these ARE rendered now (C1). */
+/** A FK's `ON DELETE`/`ON UPDATE` referential action. Renamed from the old
+ *  `FkAction` — these ARE rendered now. */
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 export type IndexMethod = "btree" | "hash" | "gin" | "gist" | "spgist" | "brin" | "ivfflat" | "hnsw" | "fts5";
@@ -771,27 +770,27 @@ export interface InsertArgs<R extends Row = Row> {
   rows: R | R[];
   /**
    * **PG-ONLY** upsert. A live, intended feature — rejected as a hard build
-   * error only on a SQLite target (`dialect_scope = PgOnly`, §9). There is no
+   * error only on a SQLite target (`dialect_scope = PgOnly`). There is no
    * portable SQLite upsert and no raw route (property A); a SQLite-targeted
    * `onConflict` surfaces at build with the structured envelope, never at
    * runtime.
    */
   onConflict?: { columns: string[]; doUpdate?: Partial<R> };
-  /** The schema qualifier (§3); overrides the handle default. */
+  /** The schema qualifier; overrides the handle default. */
   schema?: string;
 }
 
 export interface UpdateArgs {
   set: Record<string, DmlSetValue>;
   where?: ExprFn | ExprChain | Expr;
-  /** The schema qualifier (§3); overrides the handle default. */
+  /** The schema qualifier; overrides the handle default. */
   schema?: string;
 }
 
 export interface DelArgs {
   where: ExprFn | ExprChain | Expr;
   limit?: number;
-  /** The schema qualifier (§3); overrides the handle default. */
+  /** The schema qualifier; overrides the handle default. */
   schema?: string;
 }
 
@@ -803,7 +802,7 @@ export interface BackfillArgs {
   /** Defaults to the engine's chosen batch size. */
   batchSize?: number;
   name?: string;
-  /** The schema qualifier (§3); overrides the handle default. */
+  /** The schema qualifier; overrides the handle default. */
   schema?: string;
 }
 
@@ -885,7 +884,7 @@ export interface PolicyRef {
   drop(args?: PolicyDropArgs): TableHandle;
 }
 
-// ── `view()` entry + the closed SelectAst builder (§A1/§3.1) ──
+// ── `view()` entry + the closed SelectAst builder ──
 
 /** The options bag `view(name, opts?)` accepts. Carries the default
  *  `{ schema, columns }` every op the returned {@link ViewHandle} records is
@@ -934,14 +933,14 @@ export interface ViewHandle {
   comment(text: string | null, args?: { schema?: string }): ViewHandle;
 }
 
-// ── `table()` entry + the fluent handle (§3) ──
+// ── `table()` entry + the fluent handle ──
 
 /** The options bag `table(name, opts?)` accepts. Carries the default `{ schema }`
  *  every op the returned {@link TableHandle} records is stamped with (a per-op
  *  `schema` override wins; see {@link TableHandle}). An extensible object so a
  *  future per-table default can be added without a signature break. */
 export interface TableOptions {
-  /** The default schema qualifier propagated to every op the handle records (§3).
+  /** The default schema qualifier propagated to every op the handle records.
    *  Names-are-strings (no live-schema binding); a per-op `schema` on an
    *  individual call overrides it. */
   schema?: string;
@@ -1007,9 +1006,9 @@ export interface TableRuntimeOptions {
   strictness?: TableStrictness;
 }
 
-/** The all-object `create({...})` payload (§3.1). Table-level constraints/indexes
+/** The all-object `create({...})` payload. Table-level constraints/indexes
  *  are FIELDS (no `build` callback — "no exceptions"); each carries a required
- *  `name` (name-first, §3.4).
+ *  `name` (name-first).
  *
  *  Apply-level lowering (what reaches the live DDL):
  *  - `uniques`, `foreignKeys`, `indexes` LOWER to DDL on Postgres (a named UNIQUE
@@ -1071,11 +1070,11 @@ export interface CreateTableArgs {
   schema?: string;
 }
 
-/** The `.column(name)` selector sub-handle (§3.2). Each terminal records eagerly
+/** The `.column(name)` selector sub-handle. Each terminal records eagerly
  *  and returns the parent {@link TableHandle} (so chaining + var-reuse work). */
 export interface ColumnRef {
-  /** Add the column. Honors ALL modifiers on `type` — including `.unique()` (C2,
-   *  emits a follow-on unique constraint) and `.primaryKey()` (emits a follow-on
+  /** Add the column. Honors ALL modifiers on `type` — including `.unique()`
+   *  (emits a follow-on unique constraint) and `.primaryKey()` (emits a follow-on
    *  pk). When BOTH are set, the redundant UNIQUE is suppressed (a PRIMARY KEY
    *  already implies uniqueness) — only the pk add is recorded. */
   add(args: { type: ColumnDef; ifNotExists?: boolean; schema?: string }): TableHandle;
@@ -1090,7 +1089,7 @@ export interface ColumnRef {
   comment(text: string | null, args?: { schema?: string }): TableHandle;
 }
 
-/** The `.foreignKey(name)` selector sub-handle (§3.3). */
+/** The `.foreignKey(name)` selector sub-handle. */
 export interface ForeignKeyRef {
   add(args: {
     columns: string[];
@@ -1107,12 +1106,12 @@ export interface ForeignKeyRef {
   }): TableHandle;
 }
 
-/** The `.unique(name)` selector sub-handle (§3.3). */
+/** The `.unique(name)` selector sub-handle. */
 export interface UniqueRef {
   add(args: { columns: string[]; ifNotExists?: boolean; schema?: string }): TableHandle;
 }
 
-/** The `.check(name)` selector sub-handle (§3.3). */
+/** The `.check(name)` selector sub-handle. */
 export interface CheckRef {
   add(args: {
     expr: CheckExprFn;
@@ -1124,13 +1123,13 @@ export interface CheckRef {
   }): TableHandle;
 }
 
-/** The `.exclusion(name)` selector sub-handle (§3.3). PostgreSQL renders native
+/** The `.exclusion(name)` selector sub-handle. PostgreSQL renders native
  *  `EXCLUDE`; SQLite/MySQL fail closed. */
 export interface ExclusionRef {
   add(args: ExclusionAddArgs): TableHandle;
 }
 
-/** The `.constraint(name)` selector sub-handle (§3.3) — kind-agnostic operations
+/** The `.constraint(name)` selector sub-handle — kind-agnostic operations
  *  on an existing named constraint. */
 export interface ConstraintRef {
   drop(args?: { ifExists?: boolean; schema?: string }): TableHandle;
@@ -1140,7 +1139,7 @@ export interface ConstraintRef {
   validate(args?: { ifExists?: boolean; schema?: string }): TableHandle;
 }
 
-/** The `.index(name)` selector sub-handle (§3.4). */
+/** The `.index(name)` selector sub-handle. */
 export interface IndexAddArgs {
   on: IndexElementArg[];
   unique?: boolean;
@@ -1174,18 +1173,18 @@ export interface IndexRef {
  * The recorder-bound handle `table(name, opts?)` returns. It is a REUSABLE value
  * carrying only `{ name, schemaDefault }`; every terminal records EAGERLY onto the
  * ambient recorder and returns the handle, so it is valid for unlimited chaining
- * + var-reuse (§4). The
+ * + var-reuse. The
  * `{ schema }` from `table()` is the DEFAULT injected into every recorded op; a
  * per-op `schema` overrides it (by key presence — an absent/`undefined` per-op
  * schema keeps the table default).
  *
- * Direct methods exist for the table itself + its data (§3.1/§3.5); selector
+ * Direct methods exist for the table itself + its data; selector
  * sub-handles (`.column`/`.foreignKey`/`.unique`/`.check`/`.constraint`/`.index`)
- * exist for the table's named sub-objects (§3.2/§3.3/§3.4). A selector that is
- * never terminated is a hard `SELECTOR_NOT_TERMINATED` build error at drain (§5).
+ * exist for the table's named sub-objects. A selector that is
+ * never terminated is a hard `SELECTOR_NOT_TERMINATED` build error at drain.
  */
 export interface TableHandle {
-  // §3.1 — the table itself (all-object terminals).
+  // The table itself (all-object terminals).
   create(args: CreateTableArgs): TableHandle;
   drop(args?: { ifExists?: boolean; cascade?: boolean; schema?: string }): TableHandle;
   /** Rename the whole table to `to` (a fast `ALTER TABLE … RENAME TO …` — NOT the
@@ -1196,9 +1195,9 @@ export interface TableHandle {
   comment(text: string | null, args?: { schema?: string }): TableHandle;
   partition(name: string): PartitionRef;
 
-  // §3.2/§3.3/§3.4 — selectors for named sub-objects
+  // Selectors for named sub-objects
   column(name: string): ColumnRef;
-  // §3.2 (P1: one grammar, one spelling) — the selector form is THE grammar for
+  // One grammar, one spelling — the selector form is THE grammar for
   // named constraints. The `addForeignKey`/`addCheck` verb twins are DELETED;
   // `foreignKey(name).add(...)`/`check(name).add(...)` are the sole spelling
   // (and the sole public writers of the `addConstraint` fk/check payload).
@@ -1211,13 +1210,13 @@ export interface TableHandle {
   setRls(args: { enabled?: boolean; forced?: boolean }): TableHandle;
   policy(name: string): PolicyRef;
 
-  // §3.5 — table data (direct named DML; no existence guard — DML is unguardable)
+  // Table data (direct named DML; no existence guard — DML is unguardable)
   insert<R extends Row = Row>(args: InsertArgs<R>): TableHandle;
   update(args: UpdateArgs): TableHandle;
   delete(args: DelArgs): TableHandle;
   backfill(args: BackfillArgs): TableHandle;
 
-  // §A2 — cross-dialect core triggers.
+  // Cross-dialect core triggers.
   trigger(name: string): TriggerRef;
 }
 
@@ -1229,7 +1228,7 @@ export interface DeterminismFinding {
   reason: string;
 }
 
-/** The migration module shape (§2): `export default { name?, up, down? }`. */
+/** The migration module shape: `export default { name?, up, down? }`. */
 export interface Migration {
   name?: string;
   up(): void;

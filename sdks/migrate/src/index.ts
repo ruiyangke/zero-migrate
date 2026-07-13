@@ -56,7 +56,7 @@ export {
   raw,
   // the immutable fluent column-type lexicon
   t,
-  // the shared `db` lexicon bridge (PR5 goal A): lift a live-schema
+  // the shared `db` lexicon bridge: lift a live-schema
   // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
   fromDb,
   // the determinism lint (best-effort source scan)
@@ -72,7 +72,7 @@ export type {
   RevokeArgs,
 } from "./ops.js";
 
-// The single-source db field → migration `ColType` reduction (PR5 goal A) + its
+// The single-source db field → migration `ColType` reduction + its
 // structured boundary error. The JS inverse of the engine's Rust
 // `col_type_to_token`; the proof the migration DSL and the runtime schema share
 // ONE type lexicon.

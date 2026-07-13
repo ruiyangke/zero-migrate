@@ -1,11 +1,10 @@
-// The fluent-only `table()` surface — behavioral suite (design
-// `2026-06-25-op-dsl-fluent-redesign.md`). The byte-identity oracle lives in
-// golden-parity.test.ts; this suite pins the surface BEHAVIOR the redesign adds:
+// The fluent-only `table()` surface — behavioral suite. The byte-identity oracle
+// lives in golden-parity.test.ts; this suite pins the surface BEHAVIOR:
 //
-//   - chaining + var-assign reuse (§4): terminals return the handle.
-//   - the immutable `t.*` chain (§4): a hoisted type var does not alias.
-//   - the SELECTOR_NOT_TERMINATED / SELECTOR_ALREADY_TERMINATED guard (§5).
-//   - schema propagation + per-op override precedence (§3).
+//   - chaining + var-assign reuse: terminals return the handle.
+//   - the immutable `t.*` chain: a hoisted type var does not alias.
+//   - the SELECTOR_NOT_TERMINATED / SELECTOR_ALREADY_TERMINATED guard.
+//   - schema propagation + per-op override precedence.
 //   - guard pass-through (ifNotExists / ifExists → existenceGuard).
 //   - EAGER recording (the terminal IS the recording).
 
@@ -21,7 +20,7 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-// ── §4 — chaining + var-assign reuse ──
+// ── chaining + var-assign reuse ──
 
 test("CHAIN: terminals return the handle, so calls chain", () => {
   const ops = record(() => {
@@ -58,7 +57,7 @@ test("B7 (L10): rename() rebinds the handle — chained ops target the NEW name"
   assert.equal(ops[1].column, "x");
 });
 
-// ── §4 — the IMMUTABLE t.* chain ──
+// ── the IMMUTABLE t.* chain ──
 
 test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
   const ops = record(() => {
@@ -67,7 +66,7 @@ test("IMMUTABLE: a hoisted t.* type var does not alias across columns", () => {
       .column("a").add({ type: base.unique() }) // a is unique
       .column("b").add({ type: base }); // b is NOT unique (base untouched)
   });
-  // a: addColumn + a follow-on unique constraint (C2).
+  // a: addColumn + a follow-on unique constraint.
   assert.equal(ops[0].op, "addColumn");
   assert.equal(ops[0].column, "a");
   assert.equal(ops[1].op, "addConstraint");
@@ -93,7 +92,7 @@ test("IMMUTABLE: each modifier returns a fresh ColumnDef (no receiver mutation)"
   assert.deepEqual(c.default, { literal: { value: 0 } });
 });
 
-// ── §5 — the SELECTOR_NOT_TERMINATED guard ──
+// ── the SELECTOR_NOT_TERMINATED guard ──
 
 test("SELECTOR: a forgotten terminal throws SELECTOR_NOT_TERMINATED at drain", () => {
   assert.throws(
@@ -227,7 +226,7 @@ test("COLUMN ALTER: per-intent terminals replace the old alter bag", () => {
   });
 });
 
-// ── §3 — schema propagation + precedence ──
+// ── schema propagation + precedence ──
 
 test("SCHEMA: the table() default propagates onto every recorded op", () => {
   const ops = record(() => {

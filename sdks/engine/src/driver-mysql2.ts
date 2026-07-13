@@ -1,27 +1,26 @@
-// Host MySQL driver (design §D.2) — the existing `JsDriverBackend` protocol minus
-// the in-Rust V8: TLS-pin + net-allowlist + timeout logic move HOST-side (the host
-// now owns the socket). Uses the host's `mysql2/promise`.
+// Host MySQL driver — TLS-pin + net-allowlist + timeout logic live HOST-side (the
+// host owns the socket). Uses the host's `mysql2/promise`.
 //
 // Same `hostDriver([request, done]) => void` contract as `driver-pg.ts`. ONE pinned
-// connection per session (the addon is strictly one-verb-at-a-time, §B.6). Exact
+// connection per session (the addon is strictly one-verb-at-a-time). Exact
 // integers: mysql2 returns BIGINT as a JS string when `supportBigNumbers` +
-// `bigNumberStrings` are set, so `event_seq`/`version` cross exactly (§D.2).
+// `bigNumberStrings` are set, so `event_seq`/`version` cross exactly.
 //
-// `mysql2` is an optionalDependency (§D.3/§E) — imported lazily so a PG/SQLite-only
+// `mysql2` is an optionalDependency — imported lazily so a PG/SQLite-only
 // host never needs it installed.
 
 type Mysql2Module = typeof import("mysql2/promise");
 type Mysql2Connection = import("mysql2/promise").Connection;
 
 // The neutral cell DTOs come from the GENERATED addon `index.d.ts` (via `addon.ts`)
-// — the single source of truth (redesign step 5a). No hand-copied interfaces.
+// — the single source of truth. No hand-copied interfaces.
 import type { JsCell, JsRow, JsRequest, JsReply, JsError } from "./addon.js";
 
 export type MysqlHostDriver = (
   args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void],
 ) => void;
 
-/** TLS + allowlist options the host enforces (moved out of the in-Rust V8, §D.2). */
+/** TLS + allowlist options the host enforces (the host owns the socket). */
 export interface MysqlSessionOptions {
   /** A CA bundle to pin (TLS). When set, `mysql2` verifies the server cert. */
   tlsCa?: string;
@@ -35,7 +34,7 @@ export interface MysqlSessionOptions {
 
 /**
  * Open a pinned host MySQL session and return the `hostDriver` callback + `close()`.
- * BIGINT crosses as a string (exact-integer domain, §D.2).
+ * BIGINT crosses as a string (exact-integer domain).
  */
 export async function openMysqlSession(
   url: string,
@@ -43,7 +42,7 @@ export async function openMysqlSession(
 ): Promise<{ hostDriver: MysqlHostDriver; connection: Mysql2Connection; close: () => Promise<void> }> {
   const mysql = (await import("mysql2/promise")) as unknown as Mysql2Module;
 
-  // Host-side net-allowlist (§D.2): refuse a host not in the allowlist BEFORE connect.
+  // Host-side net-allowlist: refuse a host not in the allowlist BEFORE connect.
   if (opts.hostAllowlist && opts.hostAllowlist.length > 0) {
     const parsed = new URL(url);
     if (!opts.hostAllowlist.includes(parsed.hostname)) {
@@ -55,7 +54,7 @@ export async function openMysqlSession(
 
   const connection = await mysql.createConnection({
     uri: url,
-    // Exact-integer domain: BIGINT / DECIMAL cross as strings (§D.2).
+    // Exact-integer domain: BIGINT / DECIMAL cross as strings.
     supportBigNumbers: true,
     bigNumberStrings: true,
     decimalNumbers: false,

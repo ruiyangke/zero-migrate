@@ -1,4 +1,4 @@
-// PR5 goal (A) — the migration DSL and the runtime `db` schema share
+// The migration DSL and the runtime `db` schema share
 // ONE column-type lexicon. These tests pin the single-source bridge
 // (`colTypeFromDbField` / `fromDb`): a `db` `t.*` field reduces to the
 // IDENTICAL dialect-neutral `ColType` the migration DSL's own `t.*` produces, so
@@ -27,7 +27,7 @@ function migrateColType(def: unknown): unknown {
 test("ONE lexicon: a db field reduces to the same ColType the migration t.* produces", () => {
   // `dbT.string()` reduces to the neutral `"string"` ColType (the migration
   // lexicon's canonical text type is `t.text()`→`"text"`; the `string` token is a
-  // distinct wire variant only the db bridge still produces, §7 alias removal).
+  // distinct wire variant only the db bridge still produces, alias removal).
   assert.deepEqual(colTypeFromDbField(dbT.string()), "string");
   assert.deepEqual(colTypeFromDbField(dbT.boolean()), migrateColType(t.boolean()));
   assert.deepEqual(colTypeFromDbField(dbT.timestamp()), migrateColType(t.timestamp()));
