@@ -46,7 +46,7 @@ indexmap = { version = "2", features = ["serde"] }
 # `--database-url` / `DATABASE_URL` fallback.
 clap = { version = "4", features = ["derive", "env"] }
 
-# JSON Schema generation for the `op.*` migration IR contract (op-ir.schema.json).
+# JSON Schema generation for the `op.*` migration IR contract (ir-envelope.schema.json).
 schemars = "1"
 
 # Crypto / hashing

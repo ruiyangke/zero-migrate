@@ -12,7 +12,7 @@
 //   };
 //
 // It emits the dialect-neutral op objects the closed Rust `Op` enum /
-// `op-ir.schema.json` deserialize — the `.ir.json` wire shape is frozen, and the
+// `ir-envelope.schema.json` deserialize — the IR envelope wire shape is frozen, and the
 // golden corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
 // contract.
 //

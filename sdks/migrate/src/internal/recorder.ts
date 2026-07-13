@@ -1,4 +1,4 @@
-// Host recorder — the pure-JS half of authoring a `.ir.json`.
+// Host recorder — the pure-JS half of authoring an IR envelope.
 //
 // It imports a creator migration + `{ __begin, __drain }` from `zero-migrate`,
 // runs `up()` under a fresh ambient recorder, drains the op list, and emits the
@@ -28,7 +28,7 @@
 // subpath export (the ONE sanctioned consumer) — NOT part of the public `.` API.
 import { __begin, __drain } from "../ops.js";
 
-/** The pure-JS `.ir.json` envelope the addon lowers. Note: NO `owner_app`,
+/** The pure-JS IR envelope the addon lowers. Note: NO `owner_app`,
  *  NO `checksum` — both are Rust-owned provenance/integrity fields. */
 export interface IrEnvelope {
   /** The IR-format version, sourced from the addon's `irVersion()`. */
@@ -106,7 +106,7 @@ export interface BuildEnvelopeOptions {
 }
 
 /**
- * Build the `.ir.json` ENVELOPE from an already-imported migration module — the
+ * Build the IR envelope from an already-imported migration module — the
  * pure-JS authoring path. Runs `up()` under a fresh recorder, drains the ops,
  * and stamps the caller-supplied `irVersion` (from the addon). Does NOT set
  * `owner_app` or fold a checksum — the addon does both in Rust.

@@ -1,6 +1,6 @@
 # REFERENCE binary for the differential oracle.
 # This is NOT part of the shipped addon — it is a dev-only reference apply of an
-# `.ir.json` on PG over the driver-neutral seam, so the oracle can assert the host
+# IR envelope on PG over the driver-neutral seam, so the oracle can assert the host
 # apply's journal == a reference apply's journal (Oracle 1), not host==self.
 #
 # Standalone workspace (own [workspace] table) so it does not perturb the addon's
@@ -18,8 +18,8 @@ name = "migrate-native-ref"
 path = "src/main.rs"
 
 [dependencies]
-# The engine core + the standalone `.ir.json` PG apply entry. `standalone-cli`
-# exposes `apply_standalone` (the public `.ir.json` PG apply entry) over the
+# The engine core + the standalone IR envelope PG apply entry. `standalone-cli`
+# exposes `apply_standalone` (the public IR envelope PG apply entry) over the
 # driver-neutral seam; kept OUT of the shipped addon as a dev-only oracle fixture.
 zero-migrate = { path = "../../../../../crates/zero-migrate", default-features = false, features = ["host-pg", "standalone-cli"] }
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }

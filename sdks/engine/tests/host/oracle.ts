@@ -3,7 +3,7 @@
 // Runs the host `apply`/`status`/`history` over `driver-pg` against the :5440 test
 // Postgres and asserts the oracles. The GENUINE native-pg reference arm is the
 // dev-only `tests/host/native-ref` binary (compio + `apply_standalone`) applying
-// the SAME `.ir.json` on a sibling schema — so the journal-identity claim
+// the SAME IR envelope on a sibling schema — so the journal-identity claim
 // (Oracle 1) is host==native-pg, not host==self.
 //
 // Runs under BOTH `bun run tests/host/oracle.ts` (imports the `.ts` migration) and
@@ -55,7 +55,7 @@ const DBNAME = "zero_migrate_test";
 const PG_URL = `postgres://${USER}:${PASSWORD}@${HOST}:${PORT}/${DBNAME}`;
 const OWNER_APP = "app_widgets";
 // The GENUINE native-pg (compio) reference apply — a dev-only fixture binary
-// (`tests/host/native-ref`) that applies the SAME `.ir.json` via `apply_standalone`
+// (`tests/host/native-ref`) that applies the SAME IR envelope via `apply_standalone`
 // over compio-postgres, so Oracle 1 is host == native-pg, not host == self.
 const NATIVE_REF_BIN =
   process.env.ZERO_MIGRATE_ADDON_PATH_REF ??
@@ -105,7 +105,7 @@ async function main() {
   const irVersion = currentIrVersion();
 
   // ---- Author the host envelope (pure JS) + the native recorder's canonical
-  //      .ir.json for the native reference arm. ----
+  //      IR envelope for the native reference arm. ----
   // The host recorder drains ONLY the author-declared columns (PRE system-shape
   // fold); the native recorder folds the confined system shape into its output
   // (record.rs:215). The addon's `applyIr` applies the SAME fold before lowering,
@@ -138,7 +138,7 @@ async function main() {
     `ir_version host=${hostEnvelope.ir_version}/native=${nativeRecord.ir_version}; author cols ⊆ native=${authorSubset}; op kinds match=${kindsMatch} (host author cols=${[...hostAuthorCols].join(",")})`,
   );
 
-  // ---- native-pg reference arm: apply the SAME .ir.json via the compio bin ----
+  // ---- native-pg reference arm: apply the SAME IR envelope via the compio bin ----
   const nativeSchema = uniqueSchema("native_oracle");
   const hostSchema = uniqueSchema("host_oracle");
   const adm = admin();
@@ -146,7 +146,7 @@ async function main() {
   await adm.query(`CREATE SCHEMA "${nativeSchema}"`);
   await adm.query(`CREATE SCHEMA "${hostSchema}"`);
 
-  // Write the (native-recorded, canonical) .ir.json into a dir for the native bin.
+  // Write the (native-recorded, canonical) IR envelope into a dir for the native bin.
   const dir = mkdtempSync(join(tmpdir(), "zsmig-oracle-"));
   writeFileSync(join(dir, "20260711000001_create_widgets.ir.json"), nativeRecordJson);
 
@@ -154,7 +154,7 @@ async function main() {
   let nativeApplyOk = true;
   let nativeApplyErr = "";
   try {
-    // The native-ref applies the SAME native-recorded `.ir.json` via compio-postgres
+    // The native-ref applies the SAME native-recorded IR envelope via compio-postgres
     // `apply_standalone`, journaling into `<nativeSchema>_migrations` (the same meta
     // default the host arm uses) — a REAL native-pg apply.
     execFileSync(
@@ -257,7 +257,7 @@ async function main() {
     // Oracle 7 (checksum-identity, the DRIFT ANCHOR): the journal `checksum` is the
     // dialect-neutral `Checksum::of_ir` anchor, folded IN RUST on both arms. It must
     // be byte-identical host vs native (same op list ⇒ same anchor), and — per the
-    // engine's anchor-stamping — the SAME value across every DDL step of one .ir.json.
+    // engine's anchor-stamping — the SAME value across every DDL step of one IR envelope.
     const hostChecksums = new Set(hostJournal.map((r) => r.checksum));
     const nativeChecksums = new Set(nativeJournal.map((r) => r.checksum));
     const anchorMatches =

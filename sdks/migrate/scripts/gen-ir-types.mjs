@@ -1,5 +1,5 @@
 // Generate the dialect-neutral IR *enum* token types from the engine's
-// single-source-of-truth schema `crates/zero-migrate/op-ir.schema.json` via
+// single-source-of-truth schema `crates/zero-migrate/ir-envelope.schema.json` via
 // `json-schema-to-typescript`.
 //
 // SCOPE — codegen covers the CLOSED STRING-ENUM defs only (BinaryOp, UnaryOp,
@@ -12,7 +12,7 @@
 // (`tests/ir-types-drift.test.ts`) pins both the generated enums AND the manual
 // structural tokens against the schema, so the manual file cannot silently drift.
 //
-// These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
+// These types are ERGONOMICS for an advanced caller; the golden IR-envelope corpus
 // + the `Checksum::of_ir` round-trip (in `crates/zero-migrate/tests`)
 // remain the contract source of truth (§4.3 / PR3). Regenerate with:
 //
@@ -26,7 +26,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const schemaPath = resolve(here, "../../../crates/zero-migrate/op-ir.schema.json");
+const schemaPath = resolve(here, "../../../crates/zero-migrate/ir-envelope.schema.json");
 // The output path defaults to the committed enums.ts, but the freshness CI gate
 // (`tests/ir-types-drift.test.ts`) overrides it via `GEN_IR_OUT` to regenerate
 // into a temp file and byte-compare against the committed copy — the "regenerate
@@ -85,11 +85,11 @@ const ENUM_DEFS = [
 
 const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zero-migrate/op-ir.schema.json (the engine's single-source-of-
+// Source: crates/zero-migrate/ir-envelope.schema.json (the engine's single-source-of-
 // truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
-// (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden .ir.json corpus is
+// (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden IR-envelope corpus is
 // the contract (§4.3 / PR3).
 `;
 

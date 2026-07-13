@@ -64,17 +64,17 @@ export interface MigrateAddon {
    *  truth across the boundary. */
   irVersion(): number;
 
-  /** Sync, DB-free load + verify of an `.ir.json` document. Returns a typed
+  /** Sync, DB-free load + verify of an IR envelope document. Returns a typed
    *  `LoadVerifyReply` (`registry` crosses typed, not a JSON string). */
   loadVerify(
-    irJson: string,
+    envelopeJson: string,
     deployingApp: string,
     dialect: string,
     registry: Record<string, string>,
   ): LoadVerifyReply;
 
-  /** HOST-AUTHORING apply: take a typed `ApplyRequest` (the `.ir.json`
-   *  envelope as a JS value), LOWER it in Rust (stamp `owner_app` + fold
+  /** HOST-AUTHORING apply: take a typed `ApplyRequest` (the IR envelope
+   *  as a JS value), LOWER it in Rust (stamp `owner_app` + fold
    *  `Checksum::of_ir`), then drive `executor::apply` over the host driver. Resolves
    *  to a typed `ApplyReply`. */
   applyIr(hostDriver: AddonHostDriver, req: ApplyRequest): Promise<ApplyReply>;

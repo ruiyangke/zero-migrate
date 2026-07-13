@@ -163,7 +163,7 @@ export interface PlanReport {
 export function validate(opts: HostPlanOptions): LoadVerifyReply {
   const addon = loadAddon();
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
-  // Typed boundary: `loadVerify` takes the `.ir.json` bytes + a
+  // Typed boundary: `loadVerify` takes the IR envelope bytes + a
   // typed `Record<string,string>` registry and returns a typed `LoadVerifyReply`.
   return addon.loadVerify(
     JSON.stringify(envelope),

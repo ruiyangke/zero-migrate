@@ -6,7 +6,7 @@
 // `DefaultBuilder`, immutable index/generated expression builders, and the all-strings
 // typing stance (names are plain `string`, NOT live-schema-bound). The
 // dialect-neutral IR wire types (`Op`, `Expr`, `ColType`, `IrConstraint`, …) are
-// GENERATED from the engine's `op-ir.schema.json` (`json-schema-to-typescript`)
+// GENERATED from the engine's `ir-envelope.schema.json` (`json-schema-to-typescript`)
 // and re-exported from `./generated/ir` AS ERGONOMICS — the goldens remain the
 // contract source of truth. This module imports the generated wire types
 // where a manual type wants to reference the exact serde shape.

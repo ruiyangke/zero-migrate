@@ -2,7 +2,7 @@
 //!
 //! Usage: `migrate-native-ref <DSN> <PROJECT_SCHEMA> <OWNER_APP> <MIGRATIONS_DIR>`
 //!
-//! Applies the `.ir.json` artifacts in `MIGRATIONS_DIR` on the given Postgres via
+//! Applies the IR envelope artifacts in `MIGRATIONS_DIR` on the given Postgres via
 //! the GENUINE `native-pg` (compio-postgres) path (`apply_standalone`), into
 //! `PROJECT_SCHEMA` with the meta journal at `<PROJECT_SCHEMA>_migrations`
 //! (matching `ExecutorConfig::new`). Prints the `ApplyOutcome` (applied versions)

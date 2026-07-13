@@ -1,6 +1,6 @@
 // The dialect-neutral IR STRUCTURAL types (`MigrationIr`, `Op`, `Expr`,
 // `ColType`, `IrConstraint`, …), HAND-AUTHORED as a faithful transcription of the
-// engine's single-source-of-truth schema `crates/zero-migrate/op-ir.schema.json`.
+// engine's single-source-of-truth schema `crates/zero-migrate/ir-envelope.schema.json`.
 //
 // WHY HAND-AUTHORED (not generated): these defs form a self-recursive `oneOf` AST
 // (`Expr` → `BinOp.lhs: Expr`; `ColType` → `encrypted.of: ColType`; `Op` carries
@@ -14,7 +14,7 @@
 // variant tag, and every `Expr` node tag in THIS file against the schema, so the
 // manual transcription cannot silently drift from the engine contract.
 //
-// These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
+// These types are ERGONOMICS for an advanced caller; the golden IR envelope corpus
 // + the `Checksum::of_ir` round-trip are the contract source of truth.
 
 import type {
@@ -639,7 +639,7 @@ export interface PreconditionCheck {
   on_unmet?: OnUnmet;
 }
 
-/** The portable migration IR document (`.ir.json`). */
+/** The portable migration IR document (IR envelope). */
 export interface MigrationIr {
   ir_version: number;
   name: string;

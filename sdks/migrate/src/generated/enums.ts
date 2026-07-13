@@ -1,11 +1,11 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
-// Source: crates/zero-migrate/op-ir.schema.json (the engine's single-source-of-
+// Source: crates/zero-migrate/ir-envelope.schema.json (the engine's single-source-of-
 // truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
-// (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden .ir.json corpus is
-// the contract.
+// (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden IR-envelope corpus is
+// the contract (§4.3 / PR3).
 
 /**
  * A binary operator admitted in the closed AST (method↔node table).
@@ -49,8 +49,8 @@ export type ScalarFn =
 /**
  * The engine-SYNTHESIZED helpers (`FnSynth`) whose per-dialect lowering the
  * engine pins. CLOSED. `splitPart` is admitted only within its pinned
- * single-ASCII-delimiter + positive-literal-`n` envelope (validated
- * structurally); `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`
+ * single-ASCII-delimiter + positive-literal-`n` envelope (validated structurally);
+ * `concatWs` is the NULL-skipping join; `now`/`genRandomUuid`
  * are apply-time DB-evaluated scalars (the structured replacement for a frozen
  * `Date.now()` / UUID literal).
  */
@@ -117,12 +117,11 @@ export type AggFunc = "count" | "sum" | "avg" | "min" | "max" | "stringAgg" | "a
 export type IndexSortOrder = "asc" | "desc";
 
 /**
- * The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum —
- * serde rejects any out-of-set token at DESERIALIZE, so a hand-crafted `.ir.json`
- * cannot smuggle an arbitrary / injection-shaped method string into an unvalidated
- * position that would reach the render seam.
+ * The CLOSED index-method lexicon (`createIndex` `using` union). A CLOSED enum — serde rejects any out-of-set token at DESERIALIZE,
+ * so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
+ * method string into an unvalidated position that would reach the render seam.
  * `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
- * the SQLite FTS5 virtual-table path (lowered per-dialect at render).
+ * the SQLite FTS5 virtual-table path (per-dialect lowering is the render seam's job).
  * Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
  */
 export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
@@ -159,7 +158,7 @@ export type OnUnmet = "Halt" | "Skip";
 export type OnlinePhase = "Expand" | "Contract";
 
 /**
- * The uniform existence-guard modifier. Carried on a guarded
+ * the uniform existence-guard modifier. Carried on a guarded
  * DDL op as `existence_guard: Option<ExistenceGuard>` (omitted-when-absent on
  * the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE
  * (decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native
@@ -177,7 +176,7 @@ export type ExistenceGuard = "ifNotExists" | "ifExists";
  * The CLOSED referential-action lexicon for a FOREIGN KEY's `ON DELETE` /
  * `ON UPDATE` clause. A CLOSED enum so the schema enumerates
  * exactly the supported actions and serde REJECTS any out-of-set token at
- * DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an arbitrary /
+ * DESERIALIZE — a hand-crafted IR envelope cannot smuggle an arbitrary /
  * injection-shaped action string into the FK render seam. Camel-cased on the
  * wire (`"cascade"`, `"setNull"`, `"noAction"`, …); the per-dialect SQL spelling
  * (`SET NULL`, `NO ACTION`, …) is the render seam's job via
@@ -233,7 +232,7 @@ export type OrderDir = "asc" | "desc";
 /**
  * **VENDOR (`zero-migrate/pg`)** — the CLOSED privilege lexicon for
  * `Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an
- * out-of-set token at DESERIALIZE — a hand-crafted `.ir.json` cannot smuggle an
+ * out-of-set token at DESERIALIZE — a hand-crafted IR envelope cannot smuggle an
  * injection-shaped privilege string into the GRANT render seam (the
  * `RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest
  * render their SQL keyword. Camel/lower-cased on the wire.
