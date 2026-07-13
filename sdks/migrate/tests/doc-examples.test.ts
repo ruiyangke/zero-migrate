@@ -32,7 +32,9 @@ import { test } from "node:test";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
-const DOC = resolve(PKG_ROOT, "../../docs/op-dsl.md");
+const DOCS_DIR = resolve(PKG_ROOT, "../../docs");
+const OP_DSL_DOC = resolve(DOCS_DIR, "op-dsl.md");
+const GETTING_STARTED_DOC = resolve(DOCS_DIR, "getting-started.md");
 
 // The full documented import vocabulary the fragment harness exposes. The
 // fluent-only redesign exports just the documented core vocabulary; an op
@@ -64,6 +66,10 @@ function extractTsBlocks(md: string): string[] {
   while ((m = re.exec(md)) !== null) {
     const block = m[1];
     if (/\/\/\s*(ops|types)\.ts:/.test(block)) continue; // skip signature listings
+    // A block importing `zero-migrate-engine` (the host package) is gated in the
+    // engine package's own doc-typecheck, not here — this DSL package cannot
+    // resolve the host package. Skip those blocks in the `zero-migrate` gate.
+    if (/from\s+["']zero-migrate-engine["']/.test(block)) continue;
     blocks.push(block);
   }
   return blocks;
@@ -89,6 +95,10 @@ function assembleHarness(blocks: string[]): string {
       // local so multiple modules coexist. `export interface`/`export type`
       // become plain declarations.
       let body = b.replace(/^\s*import[^\n]*from\s+["']zero-migrate["'];?\s*$/gm, "");
+      // A migration module's `export const name = "…"` is a cosmetic label
+      // re-export, orthogonal to DSL typechecking, and would collide across the
+      // several module examples (each named `name`). Drop those lines.
+      body = body.replace(/^\s*export\s+const\s+name\s*=[^\n]*$/gm, "");
       body = body.replace(/^\s*export\s+default\s+/m, `const _mod_${moduleBlocks.length}: import("zero-migrate").Migration = `);
       body = body.replace(/^\s*export\s+(interface|type|const|function)\s+/m, "$1 ");
       moduleBlocks.push(body);
@@ -144,7 +154,7 @@ function typecheck(harnessSource: string): string | null {
 }
 
 test("doc-gate: every typed example in op-dsl.md typechecks against the real package", () => {
-  const md = readFileSync(DOC, "utf8");
+  const md = readFileSync(OP_DSL_DOC, "utf8");
   const blocks = extractTsBlocks(md);
   assert.ok(blocks.length >= 6, `expected the doc to carry several runnable ts examples; found ${blocks.length}`);
   const harness = assembleHarness(blocks);
@@ -153,6 +163,24 @@ test("doc-gate: every typed example in op-dsl.md typechecks against the real pac
     diagnostics,
     null,
     `a typed example in docs/op-dsl.md no longer compiles against zero-migrate.\n` +
+      `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
+  );
+});
+
+test("doc-gate: every DSL example in getting-started.md typechecks against the real package", () => {
+  // The step-by-step guide's `zero-migrate` (DSL) examples ride the SAME
+  // harness as op-dsl.md. Its `zero-migrate-engine` (host) snippet is excluded
+  // here — `extractTsBlocks` skips engine-import blocks — and is gated instead
+  // by the engine package's own doc-typecheck.
+  const md = readFileSync(GETTING_STARTED_DOC, "utf8");
+  const blocks = extractTsBlocks(md);
+  assert.ok(blocks.length >= 3, `expected getting-started.md to carry several runnable DSL examples; found ${blocks.length}`);
+  const harness = assembleHarness(blocks);
+  const diagnostics = typecheck(harness);
+  assert.equal(
+    diagnostics,
+    null,
+    `a DSL example in docs/getting-started.md no longer compiles against zero-migrate.\n` +
       `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
   );
 });
