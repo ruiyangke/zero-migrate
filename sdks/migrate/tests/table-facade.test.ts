@@ -104,7 +104,7 @@ test("SELECTOR: a forgotten terminal throws SELECTOR_NOT_TERMINATED at drain", (
   );
 });
 
-test("SELECTOR: a var-held selector terminated on a LATER line does NOT trip the guard (§5)", () => {
+test("SELECTOR: a var-held selector terminated on a LATER line does NOT trip the guard", () => {
   const ops = record(() => {
     const sel = table("u").column("email");
     table("u").insert({ rows: [{ x: 1 }] }); // an intervening op

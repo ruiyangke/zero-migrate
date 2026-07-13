@@ -311,7 +311,7 @@ test("closed string-enum tokens match the schema", () => {
   }
 });
 
-test("ExistenceGuard tokens match the schema (PR10)", () => {
+test("ExistenceGuard tokens match the schema", () => {
   assert.deepEqual(enumTokens(schema.$defs.ExistenceGuard), TS.ExistenceGuard);
 });
 
