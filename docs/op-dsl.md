@@ -608,14 +608,14 @@ a single agreed contract in that schema.
 A migration records into dialect-neutral IR — the frozen wire contract the
 engine loads. You never hand-write it; the recorder produces it from your `.ts`.
 The envelope carries the current wire-format version, `ir_version`, which is
-`CURRENT_IR_VERSION` (`6`, `crates/zero-migrate-ir/src/ir.rs`); the loader rejects
+`CURRENT_IR_VERSION` (`1`, `crates/zero-migrate-ir/src/ir.rs`); the loader rejects
 an unknown *future* version fail-closed. For reference, the hero split-name
 migration records (a nullable added column carries `"nullable": true` on the
 wire) as:
 
 ```json
 {
-  "ir_version": 6,
+  "ir_version": 1,
   "name": "split_name",
   "ops": [
     { "op": "addColumn", "table": "users", "column": "first_name", "type": "text", "nullable": true },
@@ -643,7 +643,7 @@ The `op`/`node` tags, the closed `Op` enum, the `Expr` AST, `SelectAst`,
 `zero-migrate` (`import type { ir } from "zero-migrate"`). The golden
 `*.golden.json` corpus under `crates/zero-migrate/tests/op_fixtures/` is the
 source of truth for the wire shape — every committed envelope carries
-`ir_version: 6`.
+`ir_version: 1`.
 
 ---
 
