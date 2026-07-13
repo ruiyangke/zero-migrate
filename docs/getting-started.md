@@ -152,7 +152,7 @@ it, so you can see exactly what the addon will lower and apply:
 
 ```bash
 zero-migrate preview --dir ./migrations
-# preview create_users: ir_version=6 ops=2
+# preview create_users: ir_version=1 ops=2
 # [ { "op": "createTable", ... }, { "op": "createIndex", ... } ]
 ```
 
