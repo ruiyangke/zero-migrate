@@ -97,6 +97,86 @@ pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
 
 # ---------------------------------------------------------------------------
+# Curated allows for the opinionated / stylistic pedantic + nursery lints (and a
+# few `clippy::all` style lints) that fire in volume across the workspace and are
+# noise-not-bugs here. Each carries its rationale below. They live in the shared
+# workspace lints table (priority 0 > the group's -1, and applied to every target
+# incl. integration tests) so the allow set is uniform across all four crates.
+#
+# The correctness/perf lints stay ENABLED and are fixed in code — e.g.
+# `redundant_clone`, `or_fun_call`, `useless_conversion`, `needless_borrow`,
+# `large_enum_variant`, `redundant_static_lifetimes`, `manual_div_ceil`,
+# `iter_kv_map`, `derivable_impls`.
+# ---------------------------------------------------------------------------
+
+# Doc-prose style: backtick-every-identifier + paragraph/list-wrapping opinions on
+# hand-written narrative module docs — rendering taste, not code correctness.
+doc_markdown = "allow"
+doc_lazy_continuation = "allow"
+too_long_first_doc_paragraph = "allow"
+doc_link_code = "allow"
+# Missing-doc-section mandates: the surface is documented narratively, not with
+# mandatory `# Errors` / `# Panics` / `#[must_use]` boilerplate.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+# Single-thread engine: the driver/apply futures are `!Send` by construction
+# (compio-free, single-isolate host), so flagging them as non-`Send` is noise.
+future_not_send = "allow"
+# Stylistic structure / idiom opinions with no behavioural weight here.
+use_self = "allow"
+missing_const_for_fn = "allow"
+match_same_arms = "allow"
+redundant_pub_crate = "allow"
+redundant_closure_for_method_calls = "allow"
+option_if_let_else = "allow"
+default_trait_access = "allow"
+ref_option = "allow"
+map_unwrap_or = "allow"
+items_after_statements = "allow"
+option_option = "allow"
+unnested_or_patterns = "allow"
+unused_self = "allow"
+trivially_copy_pass_by_ref = "allow"
+single_match_else = "allow"
+if_not_else = "allow"
+struct_excessive_bools = "allow"
+unnecessary_wraps = "allow"
+iter_on_single_items = "allow"
+needless_raw_string_hashes = "allow"
+inconsistent_struct_constructor = "allow"
+ignored_unit_patterns = "allow"
+used_underscore_binding = "allow"
+implicit_clone = "allow"
+manual_string_new = "allow"
+significant_drop_tightening = "allow"
+needless_pass_by_value = "allow"
+similar_names = "allow"
+module_name_repetitions = "allow"
+format_push_string = "allow"
+assigning_clones = "allow"
+needless_collect = "allow"
+derive_partial_eq_without_eq = "allow"
+debug_assert_with_mut_call = "allow"
+# The napi-boundary + host-registry entrypoints take concrete
+# `HashMap<String, String>` (the JS-object marshalling type); they cannot be made
+# generic over the hasher `S`, so `implicit_hasher` does not apply.
+implicit_hasher = "allow"
+# Size / length opinions on internal plumbing — intentional shapes.
+too_many_lines = "allow"
+too_many_arguments = "allow"
+# `IrLowerError` is a shared by-value error returned across the whole render/apply
+# surface; boxing it to satisfy a marginal 128-byte threshold would ripple through
+# dozens of signatures for no behavioural gain.
+result_large_err = "allow"
+# Numeric casts that are intentional / range-bounded in the IR + rendering paths.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+
+# ---------------------------------------------------------------------------
 # Release profile — LTO + symbol strip for the shipped `zero-migrate-node` `.node`
 # artifact. Profile tables in a non-root workspace member are ignored by cargo, so
 # these must live at the workspace root (they apply to every member's release build).

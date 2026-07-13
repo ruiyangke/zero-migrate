@@ -72,7 +72,7 @@ export type CastTarget = "text" | "int" | "real" | "boolean" | "bytes" | "uuid";
  * CLOSED portable field set for SQL `EXTRACT(<field> FROM <expr>)`.
  *
  * Each admitted field has a live three-dialect proof and a faithful renderer on
- * PostgreSQL, SQLite, and MySQL. Fields with PostgreSQL-only semantics live in
+ * `PostgreSQL`, `SQLite`, and `MySQL`. Fields with PostgreSQL-only semantics live in
  * [`PgExtractField`] instead.
  */
 export type ExtractField = "year" | "month" | "day" | "hour" | "minute" | "dow";
@@ -103,8 +103,8 @@ export type PgExtractField =
 /**
  * The CLOSED set of PORTABLE aggregate functions (`c.agg.*`).
  *
- * `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on PostgreSQL,
- * SQLite, and MySQL (only the surrounding identifier quoting differs), so there
+ * `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` are byte-identical standard SQL on `PostgreSQL`,
+ * `SQLite`, and `MySQL` (only the surrounding identifier quoting differs), so there
  * is NO dialect gate — an [`Expr::Agg`] validates and renders on all three.
  */
 export type AggFunc = "count" | "sum" | "avg" | "min" | "max" | "stringAgg" | "arrayAgg" | "boolAnd" | "boolOr";
@@ -121,7 +121,7 @@ export type IndexSortOrder = "asc" | "desc";
  * so a hand-crafted IR envelope cannot smuggle an arbitrary / injection-shaped
  * method string into an unvalidated position that would reach the render seam.
  * `gin`/`gist`/`ivfflat`/`hnsw` are Postgres-only logical hints; `fts5` maps to
- * the SQLite FTS5 virtual-table path (per-dialect lowering is the render seam's job).
+ * the `SQLite` FTS5 virtual-table path (per-dialect lowering is the render seam's job).
  * Camel/lower-cased on the wire (`"btree"`, `"ivfflat"`, …).
  */
 export type IndexMethod = "btree" | "brin" | "gin" | "gist" | "ivfflat" | "hnsw" | "fts5";
@@ -163,8 +163,8 @@ export type OnlinePhase = "Expand" | "Contract";
  * the wire). The engine SYNTHESIZES the guard via an executor-side CATALOG PROBE
  * (decide-in-Rust: probe → run-or-skip), NEVER by lowering to a native
  * `IF [NOT] EXISTS` clause — native support is patchy and asymmetric across PG /
- * SQLite (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
- * SQLite has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
+ * `SQLite` (PG has no `ADD CONSTRAINT IF NOT EXISTS` / none on alter/rename;
+ * `SQLite` has no `ADD COLUMN IF NOT EXISTS` / none on drop-column/rename). A
  * CLOSED 2-variant enum so serde rejects any other token at deserialize and the
  * validate-time legal-direction check (`ifNotExists` on create* /add*; `ifExists`
  * on drop* /rename/alter) is a total match. Camel-cased on the wire
@@ -185,7 +185,7 @@ export type ExistenceGuard = "ifNotExists" | "ifExists";
 export type RefAction = "cascade" | "restrict" | "setNull" | "setDefault" | "noAction";
 
 /**
- * CLOSED exclusion access-method set. PostgreSQL supports more methods, but the
+ * CLOSED exclusion access-method set. `PostgreSQL` supports more methods, but the
  * IR only admits the audited methods below.
  */
 export type ExclusionMethod = "gist" | "spgist" | "btree";
@@ -204,13 +204,13 @@ export type TriggerTiming = "before" | "after" | "insteadOf";
 /**
  * The CLOSED trigger-event lexicon (`INSERT`/`UPDATE`/`DELETE`/`TRUNCATE`),
  * joined by `OR` in `CREATE TRIGGER … BEFORE UPDATE OR DELETE`. `TRUNCATE`
- * renders on Postgres and is refused on SQLite as a per-facet unsupported shape.
+ * renders on Postgres and is refused on `SQLite` as a per-facet unsupported shape.
  */
 export type TriggerEvent = "insert" | "update" | "delete" | "truncate";
 
 /**
  * The CLOSED trigger `FOR EACH {ROW|STATEMENT}` lexicon. `STATEMENT` renders on
- * Postgres and is refused on SQLite as a per-facet unsupported shape.
+ * Postgres and is refused on `SQLite` as a per-facet unsupported shape.
  */
 export type ForEach = "row" | "statement";
 
