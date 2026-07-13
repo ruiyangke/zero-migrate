@@ -80,10 +80,10 @@ const TS = {
   ].sort(),
   // IrConstraintKind tags.
   IrConstraintKind: ["fk", "unique", "check", "exclusion"].sort(),
-  // §A2 — trigger action/body tags.
+  // Trigger action/body tags.
   TriggerAction: ["executeFunction", "body"].sort(),
   TriggerStmt: ["insert", "update", "delete", "select", "raise"].sort(),
-  // §A1 — structured view body tags.
+  // Structured view body tags.
   ViewQuery: ["structured", "raw"].sort(),
   SelectItem: ["colRef", "expr"].sort(),
   OrderItem: ["colRef", "expr"].sort(),

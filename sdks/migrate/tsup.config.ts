@@ -14,7 +14,7 @@ export default defineConfig([
   {
     ...shared,
     // The public DSL entry (`.`) + the framework-internal pure-JS recorder
-    // (`./internal/recorder`, §D.1) exposed to the `zero-migrate-engine` host
+    // (`./internal/recorder`) exposed to the `zero-migrate-engine` host
     // package via a documented subpath export. This package carries ZERO native
     // code and ZERO runtime deps; the host/addon/drivers live in the separate
     // `zero-migrate-engine` package.
