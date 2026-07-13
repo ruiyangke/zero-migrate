@@ -18,12 +18,14 @@ env:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Rust: fmt + clippy + build + the full test suite against LIVE Postgres and
-  # MySQL service containers, so the env-gated live-DB tests actually RUN in CI
-  # (rather than skipping as they do in a DB-free checkout).
+  # Rust: fmt + clippy + build + the full workspace test suite against a LIVE
+  # Postgres service container, so the env-gated live-PG tests actually RUN in CI
+  # (rather than skipping as they do in a DB-free checkout). No MySQL service here:
+  # no in-crate Rust test reads ZERO_MIGRATE_MYSQL_URL (the live-MySQL e2e lives in
+  # the engine host suite — see the `host` job below).
   # ---------------------------------------------------------------------------
   rust:
-    name: rust (fmt/clippy/build/test + PG & MySQL)
+    name: rust (fmt/clippy/build/test + live PG)
     runs-on: ubuntu-latest
 
     services:
@@ -42,30 +44,11 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
-      # Live MySQL for the env-gated live-MySQL path (ZERO_MIGRATE_MYSQL_URL). No
-      # in-crate Rust test reads it today (the live-MySQL e2e lives in the engine
-      # host suite), but it is exported here per the pipeline contract so any Rust
-      # live-MySQL test added later runs without a workflow change.
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: zero_migrate
-          MYSQL_DATABASE: zero_migrate_test
-        ports:
-          - 3306:3306
-        # `mysqladmin ping` returns success once the server answers the handshake.
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pzero_migrate --silent"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-
     env:
-      # The env-gated live-DB tests read these; set here (job scope) so every step
-      # in this job sees them. `127.0.0.1` (not `localhost`) forces TCP — the mapped
-      # service ports are only reachable over TCP from the runner host.
+      # The env-gated live-PG tests read this; set at job scope so every step sees
+      # it. `127.0.0.1` (not `localhost`) forces TCP — the mapped service port is
+      # only reachable over TCP from the runner host.
       ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
-      ZERO_MIGRATE_MYSQL_URL: mysql://root:zero_migrate@127.0.0.1:3306/zero_migrate_test
 
     steps:
       - uses: actions/checkout@v4
@@ -140,7 +123,7 @@ jobs:
           cache: pnpm
 
       - name: pnpm install
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
       - name: pnpm -w build
         run: pnpm -w build
@@ -172,6 +155,91 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The addon build uses npm (bundled with Node), not pnpm — the napi crate is
+      # not a pnpm workspace member, so no pnpm setup / pnpm cache is needed here.
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-napi-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-napi-${{ runner.os }}-
+
+      # The napi crate is NOT a pnpm workspace member (pnpm-workspace.yaml only
+      # globs `sdks/*`); it carries its own `@napi-rs/cli` devDep, installed with
+      # npm inside the crate dir. `napi build --platform --release` (the crate's
+      # `build` script) then emits the loadable `zero-migrate-node.linux-x64-gnu.node`
+      # for the runner's linux-x64 triple, proving the shipped addon compiles +
+      # links under the release profile (workspace-root lto + strip).
+      - name: build release addon
+        working-directory: crates/zero-migrate-node
+        run: |
+          npm install
+          npm run build
+
+  # ---------------------------------------------------------------------------
+  # host: the engine host e2e suite (`test:host`), which drives the REAL napi
+  # addon over the pg + mysql2 driver adapters against LIVE Postgres AND MySQL
+  # service containers. This is the job that runs the env-gated live-MySQL e2e
+  # (`tests/host/mysql-authoring.test.ts`, gated on ZERO_MIGRATE_MYSQL_URL) plus
+  # the live-PG host tests (`authoring` + `e2e-pg`, gated on ZERO_MIGRATE_TEST_PG_URL).
+  # It builds the release addon first (the host tests load
+  # `zero-migrate-node.linux-x64-gnu.node` via ZERO_MIGRATE_ADDON_PATH).
+  # ---------------------------------------------------------------------------
+  host:
+    name: host (engine e2e — live PG + MySQL over the napi addon)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: zero_migrate
+          POSTGRES_DB: zero_migrate_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: zero_migrate
+          MYSQL_DATABASE: zero_migrate_test
+        ports:
+          - 3306:3306
+        # `mysqladmin ping` succeeds once the server answers the handshake.
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pzero_migrate --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # The host suite reads both — live-PG host tests read the PG URL, the
+      # live-MySQL host test reads the MySQL URL. `127.0.0.1` forces TCP to the
+      # mapped service ports. The MySQL test creates fresh throwaway databases per
+      # run (root can CREATE DATABASE), so the URL's db only needs to exist to log in.
+      ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
+      ZERO_MIGRATE_MYSQL_URL: mysql://root:zero_migrate@127.0.0.1:3306/zero_migrate_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -190,15 +258,28 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-napi-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-host-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-napi-${{ runner.os }}-
+            cargo-host-${{ runner.os }}-
 
       - name: pnpm install
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
 
-      # `napi build --platform --release` (the crate's `build` script) emits the
-      # loadable index.node for the runner's linux-x64 triple, proving the shipped
-      # addon compiles + links under the release profile.
+      # The host tests load the built addon via ZERO_MIGRATE_ADDON_PATH (default:
+      # crates/zero-migrate-node/zero-migrate-node.linux-x64-gnu.node), so build it
+      # first. The napi crate is not a pnpm workspace member — it carries its own
+      # `@napi-rs/cli` devDep, installed with npm inside the crate dir.
       - name: build release addon
-        run: pnpm --filter zero-migrate-node build
+        working-directory: crates/zero-migrate-node
+        run: |
+          npm install
+          npm run build
+
+      # Build the SDK dist (zero-migrate DSL + engine host) the host tests import.
+      - name: pnpm -w build
+        run: pnpm -w build
+
+      # Runs tests/host/*.test.ts: the live-PG `authoring` + `e2e-pg` suites AND the
+      # live-MySQL `mysql-authoring` suite, all against the service containers above.
+      - name: zero-migrate-engine test:host (live PG + MySQL)
+        run: pnpm --filter zero-migrate-engine test:host

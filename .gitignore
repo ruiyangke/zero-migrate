@@ -6,8 +6,9 @@
 node_modules/
 *.node
 dist-node/
-pnpm-lock.yaml
 crates/zero-migrate-node/package-lock.json
+# NOTE: pnpm-lock.yaml is intentionally TRACKED (not ignored) so CI's
+# `actions/setup-node` pnpm cache + `pnpm install --frozen-lockfile` work.
 
 # Derived TS build output (tsup/tsc). The ONLY tracked dist artifact is the
 # engine-embedded recorder (`include_str!`'d by the crate); everything else under
