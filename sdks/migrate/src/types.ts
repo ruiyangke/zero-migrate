@@ -86,7 +86,7 @@ export type {
 
 // Existence guards (`ifNotExists` / `ifExists`) are inline boolean options on the
 // relevant op specs. The executor honors them via catalog probes under lock; see
-// `docs/reference/migrate-op-dsl.md` (existence-guard section).
+// `docs/op-dsl.md` (existence-guard section).
 
 // ── Sensitive-data column facets (#173/#174) ──
 //

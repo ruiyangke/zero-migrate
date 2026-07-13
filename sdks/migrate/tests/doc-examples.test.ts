@@ -1,5 +1,5 @@
 // CI DOC-EXAMPLE GATE — the typed `zero-migrate` examples in
-// `docs/reference/migrate-op-dsl.md` must TYPECHECK against the REAL package
+// `docs/op-dsl.md` must TYPECHECK against the REAL package
 // types, so a future API change that rots a documented snippet FAILS CI.
 //
 // HOW IT WORKS. The test extracts every fenced ```ts block from the reference
@@ -32,7 +32,7 @@ import { test } from "node:test";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
-const DOC = resolve(PKG_ROOT, "../../docs/reference/migrate-op-dsl.md");
+const DOC = resolve(PKG_ROOT, "../../docs/op-dsl.md");
 
 // The full documented import vocabulary the fragment harness exposes. The
 // fluent-only redesign exports just the documented core vocabulary; an op
@@ -143,7 +143,7 @@ function typecheck(harnessSource: string): string | null {
   }
 }
 
-test("doc-gate: every typed example in migrate-op-dsl.md typechecks against the real package", () => {
+test("doc-gate: every typed example in op-dsl.md typechecks against the real package", () => {
   const md = readFileSync(DOC, "utf8");
   const blocks = extractTsBlocks(md);
   assert.ok(blocks.length >= 6, `expected the doc to carry several runnable ts examples; found ${blocks.length}`);
@@ -152,7 +152,7 @@ test("doc-gate: every typed example in migrate-op-dsl.md typechecks against the 
   assert.equal(
     diagnostics,
     null,
-    `a typed example in docs/reference/migrate-op-dsl.md no longer compiles against zero-migrate.\n` +
+    `a typed example in docs/op-dsl.md no longer compiles against zero-migrate.\n` +
       `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
   );
 });
