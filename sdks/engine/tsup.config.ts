@@ -21,7 +21,7 @@ export default defineConfig([
     // (imported here, also external).
     entry: {
       index: "src/index.ts",
-      // The CLI (redesign step 5c): the arg-parser (`cli.ts`) + the executable entry
+      // The CLI: the arg-parser (`cli.ts`) + the executable entry
       // (`cli-bin.ts`, mapped to the `zero-migrate` bin). `cli-bin.ts` carries a
       // leading `#!/usr/bin/env node` shebang which esbuild preserves on the entry
       // chunk, so the emitted `dist/cli-bin.js` is directly executable. `zero-migrate`

@@ -1,5 +1,4 @@
-// `zero-migrate` — the fluent-only op-builder DSL implementation
-// (design `2026-06-25-op-dsl-fluent-redesign.md`).
+// `zero-migrate` — the fluent-only op-builder DSL implementation.
 //
 // This is the TS authoring surface a creator imports:
 //   import { table, t } from "zero-migrate";
@@ -12,13 +11,9 @@
 //     },
 //   };
 //
-// It is the typed peer of the engine-embedded recorder
-// (`crates/zero-migrate/src/frontend/migrate_ops.js`, which the Rust runtime
-// `include_str!`s into V8 at build/record time). Both emit the IDENTICAL
-// dialect-neutral op objects the closed Rust `Op` enum / `op-ir.schema.json`
-// deserialize — the `.ir.json` wire shape is frozen (byte-identical to the
-// pre-redesign flat surface except the C1 FK-actions delta), and the golden
-// corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
+// It emits the dialect-neutral op objects the closed Rust `Op` enum /
+// `ir-envelope.schema.json` deserialize — the IR envelope wire shape is frozen, and the
+// golden corpus (`tests/op_fixtures`) + the `Checksum::of_ir` round-trip are the
 // contract.
 //
 // `table()` is the reusable table DDL/DML entry. The flat op-functions are GONE
@@ -195,7 +190,7 @@ export interface PgRawArgs {
   reason: string;
 }
 
-// ── The ambient recorder (§3.1 / §5) ──
+// ── The ambient recorder ──
 
 // Capture the native nondeterministic function symbols before a migration module
 // can mutate globals. A bare symbol (`crypto.randomUUID` without parens) is an
@@ -206,9 +201,7 @@ export interface PgRawArgs {
 // stub so the symbol resolves (its `randomUUID` throws if CALLED — the symbol form
 // is record-time-only). GUARDED by `if absent`: in Node / browsers, where real Web
 // Crypto exists, both guards skip and this is a pure no-op (the real
-// `crypto.randomUUID` is captured). This ran at the top of the former
-// `migrate_ops.js` twin; it moves here so the one compiled recorder artifact keeps
-// the identical engine behavior. MUST precede the capture below.
+// `crypto.randomUUID` is captured). MUST precede the capture below.
 if (typeof globalThis !== "undefined") {
   if (typeof globalThis.crypto === "undefined" || globalThis.crypto === null) {
     Object.defineProperty(globalThis, "crypto", {
@@ -306,7 +299,7 @@ function rejectFunctionValue(value: unknown): void {
   }
 }
 
-/** A handed-out, not-yet-terminated selector the recorder tracks (§5). */
+/** A handed-out, not-yet-terminated selector the recorder tracks. */
 interface PendingSelector {
   selector: string;
   name: string;
@@ -343,7 +336,7 @@ export function __begin(phase: RecorderPhase = "up"): void {
 
 /**
  * Drain + return the recorded op list, clearing the active recorder. At DRAIN
- * (not eagerly — so a var-held selector terminated on a later line is fine, §5),
+ * (not eagerly — so a var-held selector terminated on a later line is fine),
  * any selector that was handed out but never terminated is a hard structured
  * `SELECTOR_NOT_TERMINATED` error.
  */
@@ -407,10 +400,8 @@ export function __pgPush(op: Node): Node {
 // behaviour-preserving: it records `compact({ op: kind, ...payload })` —
 // byte-identical to the prior in-line `push(compact({ op: kind, … }))`. Each mint
 // APPENDS to `tier1Producers`, so the producer registry (op-kind → producer(s)) is
-// DERIVED from the mints, never self-reported. A later slice's census asserts
-// one-producer-per-op-kind over this data (which is why the multi-producer kind
-// `addConstraint` mints several distinct producers here). Mirrored 1:1
-// in the engine twin `migrate_ops.js`.
+// DERIVED from the mints, never self-reported (which is why the multi-producer kind
+// `addConstraint` mints several distinct producers here).
 
 /** One tier-1 op-emission producer, DERIVED from a `defineOp` mint call. */
 export interface OpProducer {
@@ -518,7 +509,7 @@ function registerSelector(selector: string, name: string): number {
   return id;
 }
 
-/** Mark a selector terminated; double-terminate is a structured error (§5). */
+/** Mark a selector terminated; double-terminate is a structured error. */
 function terminateSelector(id: number): void {
   const rec = recorder();
   const sel = rec.pending.get(id);
@@ -667,11 +658,11 @@ function requireSequenceBounds(min: number | null | undefined, max: number | nul
   }
 }
 
-// ── (B) The IMMUTABLE chainable `t.*` lexicon (§4) ──
+// ── (B) The IMMUTABLE chainable `t.*` lexicon ──
 
-/** The CLOSED pgvector distance-metric token set (P2a §4) — the camelCase wire
+/** The CLOSED pgvector distance-metric token set — the camelCase wire
  *  spelling of the engine's `VectorMetric` enum. Mirrored here (lock-step with
- *  `migrate_ops.js`) so `t.vector({ dimensions, metric })` rejects an out-of-set metric
+ *  the engine enum) so `t.vector({ dimensions, metric })` rejects an out-of-set metric
  *  with a friendly client-side OP_INVALID; the engine's closed enum stays
  *  authoritative. */
 export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerProduct"];
@@ -679,10 +670,10 @@ export const VECTOR_METRICS: readonly VectorMetric[] = ["cosine", "l2", "innerPr
 // only `integer` / `bigint`; everything else fails late at lower as UnsupportedOp).
 export const SEQUENCE_AS_TYPES: readonly ColType[] = ["int", "bigInt"];
 
-/** The CLOSED column-mask token sets (#174) — the SDK/IR WIRE spelling of the
+/** The CLOSED column-mask token sets — the SDK/IR WIRE spelling of the
  *  engine's `IrMaskKind` / `IrClassification` enums. The two date kinds are KEBAB
  *  (`date-year`/`date-decade`); the rest are single camelCase words. Mirrored here
- *  (lock-step with `migrate_ops.js`) so `.mask({ kind, classification })` rejects an
+ *  (lock-step with the engine enums) so `.mask({ kind, classification })` rejects an
  *  out-of-set token with a friendly client-side OP_INVALID; the engine's closed
  *  enums stay authoritative. */
 export const MASK_KINDS: readonly MaskKind[] = [
@@ -710,9 +701,9 @@ class ColumnDefImpl implements ColumnDefType {
   readonly _default: unknown;
   readonly _primaryKey: boolean;
   readonly _unique: boolean;
-  // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
+  // Declared-only facets carried on the IrColumn:
   // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector({ dimensions, metric })`). #174: a standalone column mask (`.mask({…})`).
+  // (`t.vector({ dimensions, metric })`), plus a standalone column mask (`.mask({…})`).
   // Absent ⇒ omitted on the wire.
   readonly _idPrefix: string | undefined;
   readonly _vectorMetric: string | undefined;
@@ -749,7 +740,7 @@ class ColumnDefImpl implements ColumnDefType {
     this._identity = fields?.identity;
   }
 
-  /** Clone with the named fields overridden — the basis of immutability (§4). */
+  /** Clone with the named fields overridden — the basis of immutability. */
   private with(over: {
     type?: ColType;
     nullable?: boolean;
@@ -799,7 +790,7 @@ class ColumnDefImpl implements ColumnDefType {
     return this.with({ unique: true });
   }
 
-  /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
+  /** `.mask({ kind, classification? })` — declare a STANDALONE column mask so
    *  the field reads back as `MaskedValue<T>` and the op lower emits the `zero-migrate:mask`
    *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
    *  `classification` is optional and DEFAULTS to `"pii"` (closed
@@ -866,16 +857,15 @@ class ColumnDefImpl implements ColumnDefType {
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      // C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
+      // A PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
       // `.unique()` and `.primaryKey()` would otherwise carry a redundant
       // column-level UNIQUE (an extra index/constraint) on top of the table's pk
       // constraint. Suppress it (lock-step with the addColumn path + the differ,
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : undefined,
-      // P2a/#174 — carry the declared-only facets onto the wire IrColumn (camelCase
-      // keys `idPrefix`/`vectorMetric`/`mask`, lock-step with `migrate_ops.js`).
-      // Absent ⇒ omitted (compact), so a plain column is byte-identical to the
-      // pre-facet image (checksum-neutral).
+      // Carry the declared-only facets onto the wire IrColumn (camelCase
+      // keys `idPrefix`/`vectorMetric`/`mask`). Absent ⇒ omitted (compact), so a
+      // plain column is byte-identical to the pre-facet image (checksum-neutral).
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
@@ -885,11 +875,10 @@ class ColumnDefImpl implements ColumnDefType {
     });
   }
   __toAddColumnTail(): Node {
-    // #173: a typed-id prefix on an ADDED column is meaningless (an added column is
+    // A typed-id prefix on an ADDED column is meaningless (an added column is
     // never the system PK) — `Op::AddColumn` has no `idPrefix` slot. Carrying it
     // would SILENTLY drop the prefix on the wire (the one outcome the closed-contract
-    // discipline forbids); REFUSE it with a structured OP_INVALID, lock-step with
-    // `migrate_ops.js`.
+    // discipline forbids); REFUSE it with a structured OP_INVALID.
     if (this._idPrefix !== undefined) {
       throw structuredError(
         "OP_INVALID",
@@ -902,7 +891,7 @@ class ColumnDefImpl implements ColumnDefType {
       type: this._type,
       nullable: this._nullable === false ? false : undefined,
       default: this._default,
-      // #173: carry the vector metric + standalone mask onto the addColumn op tail
+      // Carry the vector metric + standalone mask onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : undefined,
@@ -985,7 +974,7 @@ function rejectNestedFunctionValues(value: unknown): void {
 
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
- * shape is exactly what Rust's `IrScalar` deserializer accepts (§3.5):
+ * shape is exactly what Rust's `IrScalar` deserializer accepts:
  *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
  *  - a branded `byteValue(...)` value → `{ bytes: "<base64>" }`;
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
@@ -1364,7 +1353,7 @@ export const t: TypeLexicon = {
     let col = new ColumnDefImpl({ vector: { vector: n } } as ColType);
     if (opts.metric !== undefined) {
       requireString(opts.metric, "t.vector({ metric })");
-      // LOW-1: a closed-set check on the metric token gives a friendly OP_INVALID at
+      // A closed-set check on the metric token gives a friendly OP_INVALID at
       // authoring time instead of a cryptic serde "unknown variant" at the Rust
       // deserialize seam (the engine's closed `VectorMetric` enum stays authoritative).
       if (!VECTOR_METRICS.includes(opts.metric)) {
@@ -1644,13 +1633,13 @@ export function raw(args: PgRawArgs): Node {
   });
 }
 
-// ── (A) The shared `db` lexicon bridge (PR5) ──
+// ── (A) The shared `db` lexicon bridge ──
 
 /**
  * Lift a `db` schema field (a `t.*` `TypeBuilder` or its `FieldDef`)
  * into a migration `ColumnDef`, so a column declared in the live `db`
  * schema lowers through the IDENTICAL `ColType` path a hand-written migration
- * column does (PR5 goal A — one shared lexicon). The TYPE is bridged via the
+ * column does (one shared lexicon). The TYPE is bridged via the
  * single-source {@link colTypeFromDbField} reduction; the column's NULLABILITY is
  * carried over (`db` `.required()` → migration `.notNull()`). Table/
  * column NAMES are NEVER bound to the live schema. Returns a chainable
@@ -1668,7 +1657,7 @@ export function fromDb(field: DbSchemaField): ColumnDefType {
   return def;
 }
 
-// ── (B) The fluent `(col) => Expr` builder (§3.6) ──
+// ── (B) The fluent `(col) => Expr` builder ──
 
 function chain(node: Node): ExprChainImpl {
   return new ExprChainImpl(node);
@@ -1881,7 +1870,7 @@ class ExprChainImpl implements ExprChainType {
   cast(args: { to: CastTarget }) {
     return chain({ node: "cast", operand: this.__node, target: castTarget(args) });
   }
-  // Portable predicate nodes (§3.4). `between`/`like` render identical syntax on
+  // Portable predicate nodes. `between`/`like` render identical syntax on
   // all three dialects; `distinctFrom` is portably named but per-dialect rendered
   // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
   between(low: unknown, high: unknown) {
@@ -1909,7 +1898,7 @@ class ExprChainImpl implements ExprChainType {
   distinctFrom(x: unknown) {
     return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
   }
-  // PG-first chain operators (P0). Same IR nodes as the old vendor helpers;
+  // PG-first chain operators. Same IR nodes as the old vendor helpers;
   // the dialect gate lives in the Rust validator (fail-closed off-target).
   regex(pattern: string) {
     return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
@@ -2030,7 +2019,7 @@ export function countStar(): ExprChainType {
 }
 
 /**
- * The one Layer-2 portability escape (design §3.4): either a per-dialect VALUE
+ * The one Layer-2 portability escape: either a per-dialect VALUE
  * divergence in an expression position, or a per-dialect OP sequence in statement
  * position. Expression legs are values (a `(col) => Expr` chain node, another
  * combinator, or a bare scalar), and the engine renders the leg matching the
@@ -2048,9 +2037,7 @@ export function countStar(): ExprChainType {
  * At least one leg (`default`/`pg`/`sqlite`/`mysql`) must be present; the legs
  * record in full in the checksummed IR in canonical order.
  * The engine's validate applies the per-TARGET scope math: a target with no own
- * expression leg and no `default` is refused (`EXPR_NOT_PORTABLE`). RATCHET
- * (P11): each leg is a ratcheted budget counter — the budget mechanism is a
- * later phase.
+ * expression leg and no `default` is refused (`EXPR_NOT_PORTABLE`).
  */
 export function dialect(legs: DialectOpLegs): void;
 export function dialect(legs: DialectExprLegs): ExprChainType;
@@ -2115,7 +2102,7 @@ type AggFuncToken =
   | "boolAnd"
   | "boolOr";
 
-// Aggregate nodes (§3.4/§3.6). Receiver chain methods record
+// Aggregate nodes. Receiver chain methods record
 // `<func>(<receiver>)`; countStar() records `count(*)`; stringAgg records its
 // delimiter as the aggregate's second argument. The optional `{ distinct: true }`
 // sets the `distinct` flag (skipped on the wire when false). count/sum/avg/min/max
@@ -2173,7 +2160,7 @@ function caseExpr(args: CaseExprArgs): ExprChainType {
 function makeColumnAccessor(): (first: string, second?: string) => ExprChainType {
   // One-arg `col("col")` → unqualified colRef (byte-identical to the pre-
   // qualification wire shape). Two-arg `col("table", "col")` → qualified colRef
-  // (§3.4, the join-ON fix): the wire `colRef` node gains an optional `table`.
+  // (the join-ON fix): the wire `colRef` node gains an optional `table`.
   return ((first: string, second?: string) => {
     if (second === undefined) {
       requireString(first, 'col("name")');
@@ -2834,9 +2821,8 @@ function commentTargetToIr(target: CommentTargetArg): Node {
 
 // ── (D) The internal op-construction helpers (the single source of truth) ──
 //
-// These build + push the EXACT canonical op object the Rust `Op` enum / the
-// recorder twin emit (byte-identical IR except the C1 FK-actions delta). They are
-// internal — only the fluent `table()` handle calls them.
+// These build + push the EXACT canonical op object the Rust `Op` enum
+// deserializes. They are internal — only the fluent `table()` handle calls them.
 
 function recordCreateTable(
   name: string,
@@ -3040,7 +3026,7 @@ function recordAddColumn(
     schema: args.schema,
     existenceGuard: ifNotExistsGuard(args.ifNotExists),
   });
-  // C2 — `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
+  // `.column(x).add({ type: t.text().unique() })` honors `.unique()`: emit a
   // follow-on unique constraint (mirroring the createTable per-column `.unique()`
   // image, which rides the column's `unique:true` field — but an ADD COLUMN has no
   // inline UNIQUE, so it lowers to a separate ADD CONSTRAINT).
@@ -3129,9 +3115,9 @@ function recordDropColumnDefault(table: string, name: string, args: { schema?: s
   emitDropColumnDefault({ table, column: name, schema: args.schema });
 }
 
-/** Build an `IrConstraint` of kind `fk`. **C1**: `onDelete`/`onUpdate` ARE
+/** Build an `IrConstraint` of kind `fk`. `onDelete`/`onUpdate` ARE
  *  emitted (compacted — omitted when absent, so an action-free FK is byte-
- *  identical to the pre-C1 wire image). */
+ *  identical to the action-free wire image). */
 function fkConstraintFromSpec(spec: {
   name?: string;
   columns: string[];
@@ -3861,9 +3847,9 @@ function resolveTriggerAction(args: TriggerCreateArgs): Node {
   return { kind: "body", statements };
 }
 
-// ── (E) The fluent `table()` handle — the reusable table entry (§3) ──
+// ── (E) The fluent `table()` handle — the reusable table entry ──
 
-/** Per-op-wins-over-table-default schema precedence (§3/§4): a per-op `schema`
+/** Per-op-wins-over-table-default schema precedence: a per-op `schema`
  *  overrides the table default only when the KEY is present with a defined value;
  *  an omitted key (or an explicit `undefined`) keeps the table default. */
 function pickSchema(perCall: { schema?: string } | undefined, dflt: string | undefined): string | undefined {
@@ -3902,7 +3888,7 @@ export function __makeTableHandle(
   const dflt = opts.schema;
 
   const handle: TableHandle = {
-    // §3.1 — the table itself
+    // The table itself
     create(args) {
       recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
       return handle;
@@ -3972,7 +3958,7 @@ export function __makeTableHandle(
         },
       };
     },
-    // §3.2 — columns
+    // Columns
     column(col): ColumnRef {
       requireString(col, ".column(name)");
       const id = registerSelector("column", col);
@@ -4031,12 +4017,10 @@ export function __makeTableHandle(
       };
     },
 
-    // §3.2 — constraints. Selector form is THE grammar (P1: one grammar, one
-    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED — after
-    // this slice `foreignKey(name).add`/`check(name).add` are the SOLE public
-    // writers of the `addConstraint` fk/check payload (the P1 tier-2 dup —
-    // `addConstraint` once had two public writers per slot — is collapsed; the
-    // census assertions themselves are a later slice).
+    // Constraints. Selector form is THE grammar (one grammar, one
+    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED —
+    // `foreignKey(name).add`/`check(name).add` are the SOLE public
+    // writers of the `addConstraint` fk/check payload.
     foreignKey(fkName): ForeignKeyRef {
       requireString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
@@ -4103,7 +4087,7 @@ export function __makeTableHandle(
       };
     },
 
-    // §3.4 — indexes
+    // Indexes
     index(idxName): IndexRef {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
@@ -4131,7 +4115,7 @@ export function __makeTableHandle(
       return indexRef;
     },
 
-    // §3.5 — table data (no existence guard; schema rides on args)
+    // Table data (no existence guard; schema rides on args)
     insert(args) {
       recordInsert(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;

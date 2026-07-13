@@ -1,7 +1,7 @@
 // Byte-identity oracle: the fluent `zero-migrate` authoring surface records
-// the SAME author ops the engine's embedded recorder (`migrate_ops.js`) committed
-// before the Rust build path resolves profile-owned table shape into the golden
-// corpus. The npm `ops.ts` and the V8-embedded `migrate_ops.js` are two
+// the SAME author ops the engine's embedded recorder (`dist/embedded-recorder.js`)
+// committed before the Rust build path resolves profile-owned table shape into the
+// golden corpus. The npm `ops.ts` and the compiled `embedded-recorder.js` are two
 // implementations of the same locked fluent surface; this test re-authors a
 // golden fixture's `up()` through `table()` and asserts the post-policy op list
 // equals the committed golden `.golden.json`'s `ops`.
@@ -9,8 +9,8 @@
 // Re-bless note: `fluent_ddl`'s `label` column was authored via the now-removed
 // `t.string()` alias (wire `string`). The spec removes that alias (canonical
 // `text`/`integer`), so `label` is re-authored as `t.text()` and the golden's
-// `label` type re-blessed `string` → `text`. This is the ONLY byte change beyond
-// C1 — a direct consequence of the mandated alias removal (`t.string`/`t.int`).
+// `label` type re-blessed `string` → `text`. This is a direct consequence of the
+// mandated alias removal (`t.string`/`t.int`).
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -131,7 +131,7 @@ test("fluent_ddl fluent-recorded ops equal the committed golden", async () => {
         owner: t.ref("users"),
         embedding: t.vector({ dimensions: 1536 }),
         location: t.geoPoint(),
-        // re-blessed string → text (t.string alias removed, §7).
+        // re-blessed string → text (t.string alias removed).
         label: t.text(),
         hits: t.int().notNull().default(0),
         big_hits: t.bigInt(),

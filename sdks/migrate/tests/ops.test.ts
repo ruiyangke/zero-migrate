@@ -1,8 +1,8 @@
 // `zero-migrate` — the fluent DSL records the same frozen wire ops the
 // engine recorder + golden corpus pin. The DSL's `__begin`/`__drain` ambient
 // recorder (the build-evaluator seam) is driven directly so a test can assert the
-// recorded op objects without the Rust V8 host. Table authoring is via the
-// reusable public entry `table()`.
+// recorded op objects without invoking the Rust engine host. Table authoring is via
+// the reusable public entry `table()`.
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
@@ -38,7 +38,7 @@ import {
 // The build-evaluator recorder seam (not part of the public surface).
 import { __begin, __drain } from "../src/ops.js";
 // The engine-embedded recorder is now the COMPILED artifact
-// (`dist/embedded-recorder.js`) the `zero-migrate` crate `include_str!`s —
+// (`dist/embedded-recorder.js`) the engine host consumes —
 // the same `tsup` build output of `src/ops.ts`. Importing it here (instead
 // of the deleted `migrate_ops.js` twin) makes this an artifact-identity oracle:
 // the SDK source and the shipped engine artifact record byte-identically.
@@ -1074,7 +1074,7 @@ test("eq(null)/ne(null) are record-time errors steering to isNull()/isNotNull() 
 });
 
 test("the two-arg col('table','col') records a qualified colRef; one-arg stays unqualified", () => {
-  // §3.4 the join-ON fix: `col("orders", "customer_id")` records a colRef carrying
+  // the join-ON fix: `col("orders", "customer_id")` records a colRef carrying
   // an optional `table`; `col("id")` records the pre-qualification unqualified shape
   // (no `table` key at all — byte-identical to today).
   const ops = record(() =>
@@ -1238,7 +1238,7 @@ test("table CHECK expressions allow immutable PG nodes, record aggregates, and r
 });
 
 test("portable between/like/in/notIn/distinctFrom chain builders record the right nodes", () => {
-  // §3.4 portable predicate nodes. `between`/`like` render identical syntax on
+  // portable predicate nodes. `between`/`like` render identical syntax on
   // all three dialects; `in`/`notIn` are portably named while preserving PG's
   // ANY/ALL render; `distinctFrom` is portably named but per-dialect rendered
   // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
@@ -1306,7 +1306,7 @@ test("portable between/like/in/notIn/distinctFrom chain builders record the righ
 });
 
 test("dialect() records the Layer-2 per-dialect value escape in canonical leg order", () => {
-  // §3.4 the one Layer-2 escape. Each leg is a full expression; the legs record
+  // the one Layer-2 escape. Each leg is a full expression; the legs record
   // in full in the `dialect` node in canonical order (default, pg, sqlite, mysql).
   const ops = record(() =>
     table("t").update({
@@ -1391,7 +1391,7 @@ test("dialect() still treats bare native synth symbols as expression legs", () =
 });
 
 test("aggregate chain methods and countStar record aggregate nodes", () => {
-  // §3.4/§3.6 aggregate nodes. count()/sum/avg/min/max render on all three
+  // aggregate nodes. count()/sum/avg/min/max render on all three
   // dialects; stringAgg/arrayAgg/boolAnd/boolOr are PG-first and fail closed
   // off-PG in Rust validate. countStar() is COUNT(*); { distinct: true } sets
   // the flag for receiver aggregates. `distinct` is skipped on the wire when false.

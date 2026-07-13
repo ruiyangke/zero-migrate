@@ -56,7 +56,7 @@ export {
   raw,
   // the immutable fluent column-type lexicon
   t,
-  // the shared `db` lexicon bridge (PR5 goal A): lift a live-schema
+  // the shared `db` lexicon bridge: lift a live-schema
   // `t.*` field into a migration ColumnDef through the one shared ColType lexicon
   fromDb,
   // the determinism lint (best-effort source scan)
@@ -72,7 +72,7 @@ export type {
   RevokeArgs,
 } from "./ops.js";
 
-// The single-source db field → migration `ColType` reduction (PR5 goal A) + its
+// The single-source db field → migration `ColType` reduction + its
 // structured boundary error. The JS inverse of the engine's Rust
 // `col_type_to_token`; the proof the migration DSL and the runtime schema share
 // ONE type lexicon.
@@ -238,7 +238,7 @@ export type {
 } from "./generated/ir.js";
 
 // The full generated dialect-neutral IR wire types (`Op`, `IrConstraint`,
-// `MigrationIr`, …) — generated from the engine's `op-ir.schema.json`. Re-exported
+// `MigrationIr`, …) — generated from the engine's `ir-envelope.schema.json`. Re-exported
 // AS ERGONOMICS so an advanced caller can name the exact serde shape; the golden
-// `.ir.json` corpus remains the source of truth.
+// IR envelope corpus remains the source of truth.
 export type * as ir from "./generated/ir.js";

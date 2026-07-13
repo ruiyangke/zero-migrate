@@ -1,13 +1,13 @@
-// Host PG driver (design §D.2) — a thin `pg` wrapper the addon drives over its
+// Host PG driver — a thin `pg` wrapper the addon drives over its
 // `hostDriver([request, done]) => void` TSFN contract.
 //
 // ONE pinned `pg.Client` per session (the addon pins one connection and is strictly
-// one-verb-at-a-time, §B.6). A verb request `{ kind, sql, binds, textParams }`
+// one-verb-at-a-time). A verb request `{ kind, sql, binds, textParams }`
 // becomes a `pg` query; the reply is `{ rows, rowCount }` on success or
 // `{ error: { sqlstate, message } }` on failure — surfaced to the addon as
 // `done(err, null)` / `done(null, reply)`.
 //
-// TWO integrity contracts this driver ENFORCES (not assumes), per §D.2:
+// TWO integrity contracts this driver ENFORCES (not assumes):
 //
 //  1. int8/numeric/int8[] cross as STRINGS via CONNECTION-SCOPED type parsers. The
 //     IR's exact-integer domain (`event_seq`, `version`, seq bounds) crosses as
@@ -17,30 +17,30 @@
 //     int8 parser to `Number` would silently truncate large bigints below the seam
 //     with NO error. So we construct the Client with its OWN `types` object whose
 //     `getTypeParser` forces oid 20/1700/1016 → `String`, independent of any global
-//     override. The §D.2 poison oracle proves these win.
+//     override. The poison oracle proves these win.
 //
-//  2. `executeTextParams` is a DISTINCT path (§B.2/§D.2): it receives a
+//  2. `executeTextParams` is a DISTINCT path: it receives a
 //     `(string | null)[]` and calls `client.query(sql, values)` with NO explicit
 //     param type OIDs — `pg` sends them text-format and PG INFERS the target type
-//     (matching compio's `text → timestamptz` coercion). `null` → PG NULL; every
+//     (e.g. a text literal → timestamptz). `null` → PG NULL; every
 //     non-null crosses as its exact string, no coercion.
 
-// `pg` is an optionalDependency (§D.3/§E). Imported lazily so a host that only uses
+// `pg` is an optionalDependency. Imported lazily so a host that only uses
 // SQLite (native rusqlite) never needs it installed.
 type PgModule = typeof import("pg");
 type PgClient = import("pg").Client;
 
 // The neutral cell DTOs come from the GENERATED addon `index.d.ts` (via `addon.ts`)
-// — the single source of truth (redesign step 5a). No hand-copied interfaces.
+// — the single source of truth. No hand-copied interfaces.
 import type { JsCell, JsRow, JsRequest, JsReply, JsError } from "./addon.js";
 
 /** The addon's host-driver callback contract: `hostDriver([request, done]) => void`
- *  — napi delivers `(request, done)` as a SINGLE array arg (§B.3). */
+ *  — napi delivers `(request, done)` as a SINGLE array arg. */
 export type HostDriver = (
   args: [request: JsRequest, done: (err: JsError | null, reply: JsReply | null) => void],
 ) => void;
 
-// OIDs whose values must cross as exact strings (the exact-integer domain, §D.2).
+// OIDs whose values must cross as exact strings (the exact-integer domain).
 const OID_INT8 = 20;
 const OID_NUMERIC = 1700;
 const OID_INT8_ARRAY = 1016;
@@ -49,7 +49,7 @@ const OID_INT8_ARRAY = 1016;
  * Build a connection-scoped `types` object whose `getTypeParser(oid, format)`
  * forces the exact-integer OIDs (int8/numeric/int8[]) to `String`, deferring every
  * other OID to node-pg's default parser. This is IMMUNE to a global
- * `pg.types.setTypeParser` override (§D.2), because the Client is constructed with
+ * `pg.types.setTypeParser` override, because the Client is constructed with
  * this object as its own `types`.
  */
 function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, format?: unknown) => (value: string) => unknown } {
@@ -86,7 +86,7 @@ function connectionScopedTypes(pg: PgModule): { getTypeParser: (oid: number, for
 /**
  * Open a pinned host PG session and return the `hostDriver` callback the addon
  * drives, plus a `close()` to release the connection. The Client is constructed
- * with connection-scoped exact-integer parsers (§D.2). ONE Client per session; the
+ * with connection-scoped exact-integer parsers. ONE Client per session; the
  * addon guarantees one verb at a time.
  */
 export async function openPgSession(
@@ -95,7 +95,7 @@ export async function openPgSession(
   const pg = (await import("pg")).default as unknown as PgModule;
   const client = new pg.Client({
     connectionString,
-    // Connection-scoped parsers — immune to a global setTypeParser override (§D.2).
+    // Connection-scoped parsers — immune to a global setTypeParser override.
     types: connectionScopedTypes(pg) as never,
   });
   await client.connect();
@@ -129,7 +129,7 @@ async function runVerb(client: PgClient, request: JsRequest): Promise<JsReply> {
       return { rows: [], rowCount: result.rowCount ?? undefined };
     }
     case "executeTextParams": {
-      // DISTINCT path (§B.2/§D.2): text-format params, NO explicit OID → PG infers
+      // DISTINCT path: text-format params, NO explicit OID → PG infers
       // the target type. `null` → PG NULL; non-null crosses as its exact string.
       const values = request.textParams.map((v) => (v === null || v === undefined ? null : v));
       const result = await client.query(request.sql, values);
@@ -146,7 +146,7 @@ async function runVerb(client: PgClient, request: JsRequest): Promise<JsReply> {
       });
       const columns = result.fields.map((f) => f.name);
       // Per-column OIDs: used to classify int8/numeric (→ exact `intStr` cell, the
-      // seam's `driver::Value::Int` exact-integer domain, §D.2) vs a genuine text column
+      // seam's `driver::Value::Int` exact-integer domain) vs a genuine text column
       // (→ `text` cell). Without the OID we could not tell a stringified int8 from a
       // real text value.
       const oids = result.fields.map((f) => f.dataTypeID);
@@ -162,7 +162,7 @@ async function runVerb(client: PgClient, request: JsRequest): Promise<JsReply> {
   }
 }
 
-/** Marshal neutral binds → `pg` param values (§A.1 param side). */
+/** Marshal neutral binds → `pg` param values (param side). */
 function cellsToParams(binds: JsCell[]): unknown[] {
   return binds.map((cell) => {
     switch (cell.kind) {
@@ -186,7 +186,7 @@ function cellsToParams(binds: JsCell[]): unknown[] {
 }
 
 // The int4 OID: crosses as a JS number → `int` cell (the seam's small catalog-int
-// domain, §A.2 — `character_maximum_length`, row counts).
+// domain — `character_maximum_length`, row counts).
 const OID_INT4 = 23;
 const OID_INT2 = 21;
 const OID_BOOL = 16;
@@ -194,7 +194,7 @@ const OID_BOOL = 16;
 /**
  * Marshal a `pg` result value (already parsed by the connection-scoped parsers) →
  * a neutral cell the addon deserializes to `driver::Value`, classified by the column's
- * OID (§D.2):
+ * OID:
  * - int8 (20) / numeric (1700): arrive as EXACT STRINGS via the scoped parser →
  *   `{ kind:"int", intStr }` (the seam's exact-integer `driver::Value::Int` domain —
  *   `event_seq`, `version`; NEVER `Number(x)`, which truncates > 2^53).
@@ -218,7 +218,7 @@ function valueToCell(value: unknown, oid: number): JsCell {
   }
   if (oid === OID_INT8 || oid === OID_NUMERIC) {
     // Exact-integer domain: crossed as a STRING by the scoped parser → `intStr`.
-    // This is the load-bearing §D.2 contract for journal `event_seq`/`version`.
+    // This is the load-bearing contract for journal `event_seq`/`version`.
     return { kind: "int", intStr: String(value) };
   }
   if (oid === OID_INT4 || oid === OID_INT2) {
@@ -240,7 +240,7 @@ function valueToCell(value: unknown, oid: number): JsCell {
 
 /** Marshal a thrown `pg` error → the neutral `JsError` (message + optional
  *  SQLSTATE), so `role.rs`'s message-only transient-retry classifier still fires
- *  (§F.2) and the engine surfaces the real DB error. */
+ *  and the engine surfaces the real DB error. */
 function toJsError(err: unknown): JsError {
   if (err && typeof err === "object") {
     const e = err as { message?: unknown; code?: unknown };

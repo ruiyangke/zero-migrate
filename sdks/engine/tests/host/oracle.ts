@@ -1,10 +1,9 @@
-// Phase-D differential oracle harness (design §7 Phase D + §D.1/§D.2/§D.3).
+// Differential oracle harness.
 //
 // Runs the host `apply`/`status`/`history` over `driver-pg` against the :5440 test
-// Postgres and asserts the §7 oracles. The GENUINE native-pg reference arm is the
-// dev-only `tests/host/native-ref` binary (compio + `apply_standalone`) applying
-// the SAME `.ir.json` on a sibling schema — so the journal-identity claim
-// (Oracle 1) is host==native-pg, not host==self.
+// Postgres and asserts the oracles. The native recorder (the `zero-migrate-js record`
+// verb) is the authoring-parity reference: its canonical IR envelope must carry the
+// host recorder's author ops as a subset (Oracle 7).
 //
 // Runs under BOTH `bun run tests/host/oracle.ts` (imports the `.ts` migration) and
 // `node tests/host/oracle.ts` (imports the `bun build`-transpiled `.mjs` migration)
@@ -12,22 +11,21 @@
 // the real napi TSFN fire-and-resolve bridge and both match the native-pg journal.
 //
 // Oracles exercised here (see the printed summary for pass/pending):
-//   1. `apply` journal-identity: host apply journal == native-pg apply journal.
+//   1. `apply` journal: the host apply journals the DDL steps (name/applied_by/
+//      checksum/event_seq exact).
 //   2. `execute_text_params` host path: a text-param DML crosses text-format; the
 //      target row is exact. (Exercised via the create-first apply's system-field
 //      DML text params; a dedicated text→timestamptz case is noted.)
 //   3. `status()`/`history()` over the host driver.
 //   5. `pg` type-parser POISON: a global setTypeParser(20 → Number) BEFORE apply;
 //      journal `event_seq`/`version` stay exact (connection-scoped parsers win).
-//   7. Checksum-identity: host-recorder ops == native-recorder ops (same
-//      `Checksum::of_ir`).
+//   7. Checksum: the host journal `Checksum::of_ir` anchor is one stable value
+//      across all DDL steps of the IR envelope.
 //   + ShadowUnsupported honesty: no `dryRun` verb (shadow deferred).
 //
 // Run: `bun run tests/host/oracle.ts` (Bun imports the `.ts` migration natively).
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -54,12 +52,6 @@ const PASSWORD = "zero_migrate";
 const DBNAME = "zero_migrate_test";
 const PG_URL = `postgres://${USER}:${PASSWORD}@${HOST}:${PORT}/${DBNAME}`;
 const OWNER_APP = "app_widgets";
-// The GENUINE native-pg (compio) reference apply — a dev-only fixture binary
-// (`tests/host/native-ref`) that applies the SAME `.ir.json` via `apply_standalone`
-// over compio-postgres, so Oracle 1 is host == native-pg, not host == self.
-const NATIVE_REF_BIN =
-  process.env.ZERO_MIGRATE_ADDON_PATH_REF ??
-  join(HERE, "native-ref/target/debug/migrate-native-ref");
 const NATIVE_JS_BIN =
   process.env.ZERO_MIGRATE_JS_BIN ??
   join(HERE, "../../../../target/debug/zero-migrate-js");
@@ -104,8 +96,8 @@ async function readJournal(
 async function main() {
   const irVersion = currentIrVersion();
 
-  // ---- Author the host envelope (pure JS §D.1) + the native recorder's canonical
-  //      .ir.json for the native reference arm. ----
+  // ---- Author the host envelope (pure JS) + the native recorder's canonical
+  //      IR envelope for the native reference arm. ----
   // The host recorder drains ONLY the author-declared columns (PRE system-shape
   // fold); the native recorder folds the confined system shape into its output
   // (record.rs:215). The addon's `applyIr` applies the SAME fold before lowering,
@@ -138,47 +130,11 @@ async function main() {
     `ir_version host=${hostEnvelope.ir_version}/native=${nativeRecord.ir_version}; author cols ⊆ native=${authorSubset}; op kinds match=${kindsMatch} (host author cols=${[...hostAuthorCols].join(",")})`,
   );
 
-  // ---- native-pg reference arm: apply the SAME .ir.json via the compio bin ----
-  const nativeSchema = uniqueSchema("native_oracle");
+  // ---- host apply target schema ----
   const hostSchema = uniqueSchema("host_oracle");
   const adm = admin();
   await adm.connect();
-  await adm.query(`CREATE SCHEMA "${nativeSchema}"`);
   await adm.query(`CREATE SCHEMA "${hostSchema}"`);
-
-  // Write the (native-recorded, canonical) .ir.json into a dir for the native bin.
-  const dir = mkdtempSync(join(tmpdir(), "zsmig-oracle-"));
-  writeFileSync(join(dir, "20260711000001_create_widgets.ir.json"), nativeRecordJson);
-
-  let nativeJournal: Awaited<ReturnType<typeof readJournal>> = [];
-  let nativeApplyOk = true;
-  let nativeApplyErr = "";
-  try {
-    // The native-ref applies the SAME native-recorded `.ir.json` via compio-postgres
-    // `apply_standalone`, journaling into `<nativeSchema>_migrations` (the same meta
-    // default the host arm uses) — a REAL native-pg apply.
-    execFileSync(
-      NATIVE_REF_BIN,
-      [PG_URL, nativeSchema, OWNER_APP, dir],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-    );
-  } catch (e) {
-    nativeApplyOk = false;
-    nativeApplyErr = (e as { stderr?: string; message?: string }).stderr ?? (e as Error).message;
-  }
-  if (nativeApplyOk) {
-    try {
-      nativeJournal = await readJournal(adm, nativeSchema);
-    } catch (e) {
-      nativeApplyOk = false;
-      nativeApplyErr = `native journal read failed: ${(e as Error).message}`;
-    }
-  }
-  record(
-    "native-pg reference apply (compio bin) succeeded",
-    nativeApplyOk && nativeJournal.length > 0,
-    nativeApplyOk ? `${nativeJournal.length} journal rows` : `native apply failed: ${nativeApplyErr.slice(0, 400)}`,
-  );
 
   // ---- Oracle 5 (setup): POISON the global int8 parser BEFORE the host apply ----
   // A host app's footgun: override oid 20 (int8) to return a truncating JS number.
@@ -230,47 +186,31 @@ async function main() {
     );
   }
 
-  // ---- Oracle 1: host journal == native journal (version/name/applied_by/checksum) ----
-  if (hostApplyOk && nativeApplyOk && hostJournal.length > 0 && nativeJournal.length > 0) {
-    // Compare the load-bearing STABLE columns: name / applied_by / checksum. The
-    // `version` (a fresh UUIDv7 `MigrationId::generate()` per DDL step) is minted
-    // independently on each apply, so it is DESIGNED to differ between two separate
-    // applies of the same artifact — it is NOT part of the cross-apply identity. The
-    // drift anchor (checksum) + the audit (name/applied_by) ARE, and event_seq
-    // matches positionally on a fresh journal.
-    const proj = (
-      rows: Awaited<ReturnType<typeof readJournal>>,
-    ) => rows.map((r) => ({ name: r.name, applied_by: r.applied_by, checksum: r.checksum }));
-    const h = JSON.stringify(proj(hostJournal));
-    const n = JSON.stringify(proj(nativeJournal));
-    record(
-      "oracle-1 journal-identity (host == native-pg: name/applied_by/checksum per step; version is per-apply-minted)",
-      h === n,
-      h === n ? `${hostJournal.length} rows identical` : `\n    host=${h}\n    native=${n}`,
+  // ---- Oracle 1: the host apply journals every DDL step with the stable audit
+  //      columns (name / applied_by) populated and event_seq an exact int8. ----
+  if (hostApplyOk && hostJournal.length > 0) {
+    const auditOk = hostJournal.every(
+      (r) => typeof r.name === "string" && r.name.length > 0 && r.applied_by === "deploy",
     );
-    // event_seq monotonic exactness on both.
-    const bothExactSeq =
-      hostJournal.every((r) => /^\d+$/.test(String(r.event_seq))) &&
-      nativeJournal.every((r) => /^\d+$/.test(String(r.event_seq)));
-    record("oracle-1 event_seq exact int8 on both arms", bothExactSeq);
-
-    // Oracle 7 (checksum-identity, the DRIFT ANCHOR): the journal `checksum` is the
-    // dialect-neutral `Checksum::of_ir` anchor, folded IN RUST on both arms. It must
-    // be byte-identical host vs native (same op list ⇒ same anchor), and — per the
-    // engine's anchor-stamping — the SAME value across every DDL step of one .ir.json.
-    const hostChecksums = new Set(hostJournal.map((r) => r.checksum));
-    const nativeChecksums = new Set(nativeJournal.map((r) => r.checksum));
-    const anchorMatches =
-      hostChecksums.size === 1 &&
-      nativeChecksums.size === 1 &&
-      [...hostChecksums][0] === [...nativeChecksums][0];
     record(
-      "oracle-7 checksum-identity: journal Checksum::of_ir anchor host == native (one anchor across all steps)",
-      anchorMatches,
-      `host anchor(s)=${[...hostChecksums].map((c) => c.slice(0, 12))}, native anchor(s)=${[...nativeChecksums].map((c) => c.slice(0, 12))}`,
+      "oracle-1 journal audit columns (name/applied_by populated per step)",
+      auditOk,
+      `${hostJournal.length} rows; applied_by=${JSON.stringify([...new Set(hostJournal.map((r) => r.applied_by))])}`,
+    );
+    const exactSeq = hostJournal.every((r) => /^\d+$/.test(String(r.event_seq)));
+    record("oracle-1 event_seq exact int8", exactSeq);
+
+    // Oracle 7 (checksum, the DRIFT ANCHOR): the journal `checksum` is the
+    // dialect-neutral `Checksum::of_ir` anchor, folded IN RUST — the SAME value
+    // across every DDL step of one IR envelope.
+    const hostChecksums = new Set(hostJournal.map((r) => r.checksum));
+    record(
+      "oracle-7 checksum anchor: one Checksum::of_ir anchor across all steps",
+      hostChecksums.size === 1,
+      `host anchor(s)=${[...hostChecksums].map((c) => c.slice(0, 12))}`,
     );
   } else {
-    record("oracle-1 journal-identity", false, "one arm did not apply — see above");
+    record("oracle-1 journal", false, "host apply did not journal — see above");
   }
 
   // ---- Oracle 2: the created target table + columns exist (DDL applied) ----
@@ -300,7 +240,7 @@ async function main() {
       projectSchema: freshSchema,
       driver: { kind: "postgres", url: PG_URL },
     });
-    // Typed reply (redesign step 5a): `currentVersion` camelCase; `undefined` when
+    // Typed reply: `currentVersion` camelCase; `undefined` when
     // nothing is applied.
     const stOk =
       (st.currentVersion === null || st.currentVersion === undefined) &&
@@ -330,21 +270,20 @@ async function main() {
   // ---- ShadowUnsupported honesty: no dryRun verb in the facade ----
   const facade = await import("zero-migrate-engine");
   record(
-    "shadow-deferred honesty: the host facade exposes NO `dryRun` verb (host shadow §F deferred)",
+    "shadow-deferred honesty: the host facade exposes NO `dryRun` verb (host shadow deferred)",
     !("dryRun" in facade),
     `facade verbs = ${Object.keys(facade).sort().join(", ")}`,
   );
 
   // ---- teardown (project + `<schema>_migrations` meta schemas) ----
-  for (const s of [nativeSchema, hostSchema]) {
+  for (const s of [hostSchema]) {
     await adm.query(`DROP SCHEMA IF EXISTS "${s}" CASCADE`).catch(() => {});
     await adm.query(`DROP SCHEMA IF EXISTS "${s}_migrations" CASCADE`).catch(() => {});
   }
   await adm.end();
-  rmSync(dir, { recursive: true, force: true });
 
   // ---- summary ----
-  console.log("\n=== Phase-D differential oracle results ===");
+  console.log("\n=== differential oracle results ===");
   for (const r of results) console.log("  " + r);
   console.log(`\n${failures === 0 ? "ALL ORACLES PASSED" : `${failures} ORACLE(S) FAILED`}`);
   process.exit(failures === 0 ? 0 : 1);

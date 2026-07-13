@@ -28,8 +28,9 @@ license = "Apache-2.0"
 # ---------------------------------------------------------------------------
 
 [workspace.dependencies]
-# Async / I/O — compio (io_uring), NOT tokio. The engine's Postgres executor +
-# apply flow run out-of-band on the compio run loop.
+# Async / I/O — compio (io_uring), NOT tokio. Used ONLY as a dev-dependency: the
+# async-apply test harness (`#[compio::test]`) drives the seam-generic apply path.
+# No shipped engine code links compio; the engine is compio-free.
 compio = { version = "0.18", features = ["io", "net", "runtime", "macros", "time"] }
 # Executor-agnostic future combinators (`FutureExt::catch_unwind`,
 # `futures::executor::block_on`). NOT an async runtime.
@@ -45,7 +46,7 @@ indexmap = { version = "2", features = ["serde"] }
 # `--database-url` / `DATABASE_URL` fallback.
 clap = { version = "4", features = ["derive", "env"] }
 
-# JSON Schema generation for the `op.*` migration IR contract (op-ir.schema.json).
+# JSON Schema generation for the `op.*` migration IR contract (ir-envelope.schema.json).
 schemars = "1"
 
 # Crypto / hashing

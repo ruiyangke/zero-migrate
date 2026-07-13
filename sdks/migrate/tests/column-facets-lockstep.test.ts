@@ -1,13 +1,13 @@
-// Artifact-identity parity for the column-level facets (#173/#174/#178 +
+// Artifact-identity parity for the column-level facets (column facets +
 // generated/identity): `t.id({ prefix })`, `t.vector({ dimensions, metric })`, standalone
 // `t.text().mask({ kind, classification })`, `.generated(...)`, and `.identity(...)`.
 //
-// S0.5 collapsed the recorder twin: there is no longer a hand-kept
+// The recorder twin was collapsed: there is no longer a hand-kept
 // `migrate_ops.js`. The SDK recorder (`src/ops.ts`) and the engine-embedded
-// recorder (`dist/embedded-recorder.js`, the `tsup` build output the
-// `zero-migrate` crate `include_str!`s into V8) are now the SAME source,
-// compiled two ways. This test is the design's "one-release parity tripwire →
-// artifact-identity assertion": re-author the SAME migration through BOTH the
+// recorder (`dist/embedded-recorder.js`, the `tsup` build output the engine host
+// consumes) are now the SAME source,
+// compiled two ways. This test is the artifact-identity assertion:
+// re-author the SAME migration through BOTH the
 // `ops.ts` SOURCE (`pub*`) and the COMPILED artifact (`eng*`), then assert the
 // two recorded op lists are byte-identical — proving the shipped engine artifact
 // records the EXACT camelCase wire form (`idPrefix` / `vectorMetric` /
@@ -25,8 +25,8 @@ import {
   t as pubT,
   table as pubTable,
 } from "../src/ops.js";
-// The COMPILED engine-embedded recorder artifact (the file the Rust runtime
-// include_str!s into V8). Importing it directly makes this an oracle against the
+// The COMPILED engine-embedded recorder artifact (the file the engine host
+// consumes). Importing it directly makes this an oracle against the
 // real shipped engine recording, not a self-referential restatement of the source.
 import {
   __begin as engBegin,

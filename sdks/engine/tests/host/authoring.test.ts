@@ -7,7 +7,7 @@
 //   2. the `zero-migrate-node` napi addon LOWERs the envelope in Rust (stamps
 //      `owner_app`, folds the authoritative `Checksum::of_ir` + the confined system
 //      shape) and APPLIES it over the real `pg` npm driver via the `hostDriver`
-//      seam — exactly the napi-bridge Phase-D path.
+//      seam — exactly the napi-bridge path.
 //
 // OFFLINE arm (always runs, DB-free): author the envelope and assert its shape
 // (ir_version from the addon, op count, op kinds). This is the pure-JS recorder

@@ -1,12 +1,12 @@
 // The dialect-neutral IR STRUCTURAL types (`MigrationIr`, `Op`, `Expr`,
 // `ColType`, `IrConstraint`, …), HAND-AUTHORED as a faithful transcription of the
-// engine's single-source-of-truth schema `crates/zero-migrate/op-ir.schema.json`.
+// engine's single-source-of-truth schema `crates/zero-migrate/ir-envelope.schema.json`.
 //
 // WHY HAND-AUTHORED (not generated): these defs form a self-recursive `oneOf` AST
 // (`Expr` → `BinOp.lhs: Expr`; `ColType` → `encrypted.of: ColType`; `Op` carries
 // `Expr`), which `json-schema-to-typescript` v15 cannot express — it inlines the
-// `$ref` cycle and overflows the stack. So per PR3 ("manual types for any serde
-// shape codegen cannot express"), the recursive structural types are authored
+// `$ref` cycle and overflows the stack. So — manual types for any serde
+// shape codegen cannot express — the recursive structural types are authored
 // here, while the closed STRING-ENUM tokens (`BinaryOp`, `SynthFn`, `CastTarget`,
 // …) are GENERATED into `./enums.ts` and imported below.
 //
@@ -14,8 +14,8 @@
 // variant tag, and every `Expr` node tag in THIS file against the schema, so the
 // manual transcription cannot silently drift from the engine contract.
 //
-// These types are ERGONOMICS for an advanced caller; the golden `.ir.json` corpus
-// + the `Checksum::of_ir` round-trip are the contract source of truth (§4.3/PR3).
+// These types are ERGONOMICS for an advanced caller; the golden IR envelope corpus
+// + the `Checksum::of_ir` round-trip are the contract source of truth.
 
 import type {
   AggFunc,
@@ -89,7 +89,7 @@ export type SafeI64 = number;
 /** Unsigned integer constrained by the engine schema to the JS safe-integer range. */
 export type SafeU64 = number;
 
-/** A typed scalar (the §2.5 numeric domain): null / bool / safe-int / string /
+/** A typed scalar (the numeric domain): null / bool / safe-int / string /
  *  decimal-string / base64-bytes. */
 export type IrScalar =
   | null
@@ -99,7 +99,7 @@ export type IrScalar =
   | { decimal: string }
   | { bytes: string };
 
-/** The dialect-NEUTRAL column-type lexicon (§3.2). Closed; camel-cased on the
+/** The dialect-NEUTRAL column-type lexicon. Closed; camel-cased on the
  *  wire. `encrypted.of` is itself a `ColType` (the recursive arm). */
 export type ColType =
   | "string"
@@ -126,7 +126,7 @@ export type ColType =
   | { domain: { name: string; schema?: string } }
   | { encrypted: { of: ColType } };
 
-/** The CLOSED pgvector distance-metric lexicon (P2a §4) — drives the ivfflat/hnsw
+/** The CLOSED pgvector distance-metric lexicon — drives the ivfflat/hnsw
  *  operator class. Camel-cased on the wire; faithful transcription of the schema
  *  `VectorMetric` `oneOf` const set. A DECLARED-ONLY hint introspection cannot
  *  recover, so it is carried on the column. */
@@ -182,7 +182,7 @@ export type IrDefault =
   | { json: IrJsonValue }
   | { nextval: SequenceRef };
 
-/** The CLOSED expression AST node (§3.3.1), internally tagged on `node`. */
+/** The CLOSED expression AST node, internally tagged on `node`. */
 export type Expr =
   | { node: "colRef"; name: string; table?: string | null }
   | { node: "literal"; value: IrScalar }
@@ -202,7 +202,7 @@ export type Expr =
   | { node: "extract"; field: ExtractField; from: Expr }
   | { node: "pgExtract"; field: PgExtractField; from: Expr }
   | { node: "pgInterval"; duration: Duration }
-  // The one Layer-2 portability escape (§3.4): a per-dialect value divergence.
+  // The one Layer-2 portability escape: a per-dialect value divergence.
   // Legs serialize in canonical order (default, pg, sqlite, mysql); a `None` leg
   // is skipped on the wire. Scope math is validated per-target by the engine.
   | { node: "dialect"; default?: Expr | null; pg?: Expr | null; sqlite?: Expr | null; mysql?: Expr | null };
@@ -246,10 +246,10 @@ export interface IrColumn {
   nullable?: boolean | null;
   default?: IrDefault | null;
   unique?: boolean | null;
-  /** **P2a §2b** — the `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
+  /** The `t.id({ prefix })` typed-id prefix, a DECLARED-ONLY hint
    *  introspection cannot recover. Camel-cased on the wire. Default-absent. */
   idPrefix?: string | null;
-  /** **P2a §2b** — the `t.vector(n, { metric })` distance metric (closed
+  /** The `t.vector(n, { metric })` distance metric (closed
    *  {@link VectorMetric}). Default-absent. */
   vectorMetric?: VectorMetric | null;
   /** Case-sensitivity facet for text columns. Only `false` is meaningful;
@@ -395,13 +395,13 @@ export interface IrBatch {
   batchSize: number;
 }
 
-/** §A2 — the closed trigger action: either call an operator-provided function
+/** The closed trigger action: either call an operator-provided function
  *  (PG render path) or carry a structured trigger body (SQLite render path). */
 export type TriggerAction =
   | { kind: "executeFunction"; name: string }
   | { kind: "body"; statements: TriggerStmt[] };
 
-/** §A2/§3.2 — one structured trigger body statement. Reuses the DML payload
+/** One structured trigger body statement. Reuses the DML payload
  *  shapes where possible and adds the closed `Raise` node. */
 export type TriggerStmt =
   | { stmt: "insert"; table: string; columns: string[]; rows: IrValue[][]; schema?: string | null }
@@ -410,13 +410,13 @@ export type TriggerStmt =
   | { stmt: "select"; expr: Expr }
   | { stmt: "raise"; level: RaiseLevel; message: string; errcode?: string | null };
 
-/** §A1 — a view body is either the closed, portable SelectAst subset or an
+/** A view body is either the closed, portable SelectAst subset or an
  *  operator-gated raw SELECT body. */
 export type ViewQuery =
   | { kind: "structured"; select: SelectAst }
   | { kind: "raw"; sql: string };
 
-/** §3.1 — the closed SELECT subset rendered by the engine for structured views. */
+/** The closed SELECT subset rendered by the engine for structured views. */
 export interface SelectAst {
   from: TableRef;
   /** Empty means `*`. */
@@ -463,11 +463,11 @@ export type GrantTarget =
   | { kind: "sequence"; in: string }
   | { kind: "database"; names: string[] };
 
-/** The CLOSED `op.*` operation enum (§2.3), internally tagged on `op`,
+/** The CLOSED `op.*` operation enum, internally tagged on `op`,
  *  camel-cased. NOTE the `del()` DSL function records the `"delete"` variant tag.
  *
- *  **PR10** — every TABLE-TARGETING variant carries an optional `schema?` (the
- *  §2.7 schema-qualifier — honored under Trusted/Platform, pinned/refused under
+ *  Every TABLE-TARGETING variant carries an optional `schema?` (the
+ *  schema-qualifier — honored under Trusted/Platform, pinned/refused under
  *  Confined), and every GUARDABLE DDL variant additionally carries an optional
  *  `existenceGuard?`. The DML ops (`insert`/`update`/`delete`/`backfill`) carry
  *  `schema?` but NO `existenceGuard?` (DML has no existence semantics). The
@@ -639,7 +639,7 @@ export interface PreconditionCheck {
   on_unmet?: OnUnmet;
 }
 
-/** The portable migration IR document (`.ir.json`, §2.1). */
+/** The portable migration IR document (IR envelope). */
 export interface MigrationIr {
   ir_version: number;
   name: string;

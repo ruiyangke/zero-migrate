@@ -367,9 +367,9 @@ var ColumnDefImpl = class _ColumnDefImpl {
   _default;
   _primaryKey;
   _unique;
-  // Migration-first P2a (§2b) declared-only facets carried on the IrColumn:
+  // Declared-only facets carried on the IrColumn:
   // the typed-id prefix (`t.id({prefix})`) and the pgvector distance metric
-  // (`t.vector({ dimensions, metric })`). #174: a standalone column mask (`.mask({…})`).
+  // (`t.vector({ dimensions, metric })`), plus a standalone column mask (`.mask({…})`).
   // Absent ⇒ omitted on the wire.
   _idPrefix;
   _vectorMetric;
@@ -390,7 +390,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
     this._generated = fields?.generated;
     this._identity = fields?.identity;
   }
-  /** Clone with the named fields overridden — the basis of immutability (§4). */
+  /** Clone with the named fields overridden — the basis of immutability. */
   with(over) {
     return new _ColumnDefImpl(over.type ?? this._type, {
       nullable: over.nullable ?? this._nullable,
@@ -425,7 +425,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
   unique() {
     return this.with({ unique: true });
   }
-  /** `.mask({ kind, classification? })` (#174) — declare a STANDALONE column mask so
+  /** `.mask({ kind, classification? })` — declare a STANDALONE column mask so
    *  the field reads back as `MaskedValue<T>` and the op lower emits the `zero-migrate:mask`
    *  sentinel + `_masked` sibling. `kind` is REQUIRED (closed `MASK_KINDS`);
    *  `classification` is optional and DEFAULTS to `"pii"` (closed
@@ -486,16 +486,15 @@ var ColumnDefImpl = class _ColumnDefImpl {
       type: this._type,
       nullable: this._nullable === false ? false : void 0,
       default: this._default,
-      // C2 — a PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
+      // A PRIMARY KEY already IMPLIES uniqueness, so a column that is BOTH
       // `.unique()` and `.primaryKey()` would otherwise carry a redundant
       // column-level UNIQUE (an extra index/constraint) on top of the table's pk
       // constraint. Suppress it (lock-step with the addColumn path + the differ,
       // which never emits a separate UNIQUE for the PK column).
       unique: this._unique && !this._primaryKey ? true : void 0,
-      // P2a/#174 — carry the declared-only facets onto the wire IrColumn (camelCase
-      // keys `idPrefix`/`vectorMetric`/`mask`, lock-step with `migrate_ops.js`).
-      // Absent ⇒ omitted (compact), so a plain column is byte-identical to the
-      // pre-facet image (checksum-neutral).
+      // Carry the declared-only facets onto the wire IrColumn (camelCase
+      // keys `idPrefix`/`vectorMetric`/`mask`). Absent ⇒ omitted (compact), so a
+      // plain column is byte-identical to the pre-facet image (checksum-neutral).
       idPrefix: this._idPrefix,
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : void 0,
@@ -516,7 +515,7 @@ var ColumnDefImpl = class _ColumnDefImpl {
       type: this._type,
       nullable: this._nullable === false ? false : void 0,
       default: this._default,
-      // #173: carry the vector metric + standalone mask onto the addColumn op tail
+      // Carry the vector metric + standalone mask onto the addColumn op tail
       // (camelCase keys, lock-step with `Op::AddColumn`). Absent ⇒ omitted (compact).
       vectorMetric: this._vectorMetric,
       caseSensitive: this._caseSensitive === false ? false : void 0,
@@ -1377,7 +1376,7 @@ var ExprChainImpl = class {
   cast(args) {
     return chain({ node: "cast", operand: this.__node, target: castTarget(args) });
   }
-  // Portable predicate nodes (§3.4). `between`/`like` render identical syntax on
+  // Portable predicate nodes. `between`/`like` render identical syntax on
   // all three dialects; `distinctFrom` is portably named but per-dialect rendered
   // (PG/SQLite `IS DISTINCT FROM` vs MySQL `NOT (x <=> y)`) — the engine owns it.
   between(low, high) {
@@ -1405,7 +1404,7 @@ var ExprChainImpl = class {
   distinctFrom(x) {
     return chain({ node: "distinctFrom", left: this.__node, right: exprArg(x) });
   }
-  // PG-first chain operators (P0). Same IR nodes as the old vendor helpers;
+  // PG-first chain operators. Same IR nodes as the old vendor helpers;
   // the dialect gate lives in the Rust validator (fail-closed off-target).
   regex(pattern) {
     return chain({ node: "pgRegexMatch", expr: this.__node, pattern: pgRegexPattern(pattern) });
@@ -3027,7 +3026,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
   requireString(name, "table(name, \u2026)");
   const dflt = opts.schema;
   const handle = {
-    // §3.1 — the table itself
+    // The table itself
     create(args) {
       recordCreateTable(name, { ...args, schema: pickSchema(args, dflt) }, checkExprResolver);
       return handle;
@@ -3094,7 +3093,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
         }
       };
     },
-    // §3.2 — columns
+    // Columns
     column(col) {
       requireString(col, ".column(name)");
       const id = registerSelector("column", col);
@@ -3152,12 +3151,10 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
         }
       };
     },
-    // §3.2 — constraints. Selector form is THE grammar (P1: one grammar, one
-    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED — after
-    // this slice `foreignKey(name).add`/`check(name).add` are the SOLE public
-    // writers of the `addConstraint` fk/check payload (the P1 tier-2 dup —
-    // `addConstraint` once had two public writers per slot — is collapsed; the
-    // census assertions themselves are a later slice).
+    // Constraints. Selector form is THE grammar (one grammar, one
+    // spelling). The `addForeignKey`/`addCheck` verb twins are DELETED —
+    // `foreignKey(name).add`/`check(name).add` are the SOLE public
+    // writers of the `addConstraint` fk/check payload.
     foreignKey(fkName) {
       requireString(fkName, ".foreignKey(name)");
       const id = registerSelector("foreignKey", fkName);
@@ -3223,7 +3220,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
         }
       };
     },
-    // §3.4 — indexes
+    // Indexes
     index(idxName) {
       requireString(idxName, ".index(name)");
       const id = registerSelector("index", idxName);
@@ -3250,7 +3247,7 @@ function __makeTableHandle(name, opts = {}, checkExprResolver = resolveTableChec
       };
       return indexRef;
     },
-    // §3.5 — table data (no existence guard; schema rides on args)
+    // Table data (no existence guard; schema rides on args)
     insert(args) {
       recordInsert(name, { ...args, schema: pickSchema(args, dflt) });
       return handle;

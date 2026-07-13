@@ -1,4 +1,4 @@
-// Live-MySQL host apply e2e (redesign step 4e) — the MySQL analogue of
+// Live-MySQL host apply e2e — the MySQL analogue of
 // `authoring.test.ts`, GATED behind `ZERO_MIGRATE_MYSQL_URL`.
 //
 // Proves the V8-FREE authoring path end-to-end against a REAL MySQL server, using
@@ -11,13 +11,13 @@
 //      — the `MysqlBackend` (`GET_LOCK`, MySQL journal DDL, `?` placeholders) — over
 //      the real `mysql2` npm driver (`driver-mysql2.ts`) via the `hostDriver` seam.
 //
-// This is the structural proof of the C1 fix: a `{ kind: "mysql" }` driver routes
+// This is the structural proof that a `{ kind: "mysql" }` driver routes
 // into the MySQL backend, NOT the Postgres executor, and applies a real migration.
 //
 // GATING: unless `ZERO_MIGRATE_MYSQL_URL` is set, the whole test SKIPS cleanly, so
 // DB-free CI stays green. Set it to e.g.
 //   mysql://root:root@127.0.0.1:3310/zmtest
-// (a dedicated throwaway server — see the redesign step 4e runbook).
+// (a dedicated throwaway server).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
