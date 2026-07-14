@@ -12,6 +12,7 @@ default-members = [
     "crates/zero-migrate",
     "crates/zero-migrate-guard",
     "crates/zero-migrate-ir",
+    "crates/zero-migrate-policy",
 ]
 
 # ---------------------------------------------------------------------------
