@@ -2325,8 +2325,10 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "zero-migrate",
  "zero-migrate-guard",
  "zero-migrate-ir",
+ "zero-migrate-policy",
 ]
 
 [[package]]
