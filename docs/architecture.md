@@ -1,242 +1,215 @@
-# zero-migrate — architecture
+# How zero-migrate works
 
-`zero-migrate` is a versioned database-migration engine for creator project
-databases. Migrations are authored as a portable, closed **op DSL** (never raw
-SQL strings on the trusted path), lowered to a canonical intermediate
-representation (IR), security-checked with the real Postgres parser, and applied
-transactionally against Postgres, MySQL, or SQLite.
+zero-migrate separates writing a database change from deciding where and how it
+runs. Authors write one typed JavaScript migration; the deployment host chooses
+the database target, project identity, ownership information, credentials, and
+approval.
 
-The engine core is a plain Rust library: **no tokio, no compio/io_uring, no
-embedded V8**. Live network execution (Postgres, MySQL) is delegated to a
-host-supplied JavaScript driver over a small, dialect-neutral session seam;
-SQLite runs in-process. The one native C dependency in the graph is a SQL
-*parser* (`pg_query`/libpg_query), owned by a single crate — not a database
-driver.
+## The migration journey
 
----
-
-## The 4 Rust crates
-
-```
-                         zero-migrate-ir
-                    (pure-data wire contract:
-                     MigrationIr / Op / Expr / SelectAst,
-                     validate / checksum / load gate,
-                     typed-id, precondition vocab)
-                     deps: serde, schemars, base64,
-                           sha2, hex, thiserror, uuid
-                     NO I/O · NO C · NO driver
-                          ▲            ▲
-                          │            │
-         ┌────────────────┘            └───────────────┐
-         │                                             │
-  zero-migrate-guard                                zero-migrate
-  (pg_query / libpg_query               (THE engine + the driver seam:
-   SQL security: classify,               schema replay/diff/DDL, IR → script
-   deny-list, advisories.                compile, policy validation, journal,
-   The ONE C dep — a SQL                 executor, drift, role provisioning,
-   PARSER, not a driver)                 3 backends, the SqlSession seam)
-         ▲                                             ▲
-         └──────────────────┬──────────────────────────┘
-                            │
-                     zero-migrate-node
-              (napi cdylib: typed verb boundary,
-               JS-driver → SqlSession adapter,
-               #[napi] DTOs as the .d.ts source of truth)
-```
-
-| Crate | Role | Notable deps |
-| --- | --- | --- |
-| `zero-migrate-ir` | The **wire contract**: the `MigrationIr` document, the closed `Op` enum, the closed `Expr` AST + `SelectAst`, the constrained `IrScalar`, the precondition vocabulary, the typed-id machinery, the canonical `Checksum`, the structural (allow-list) validator, and the policy-free half of the fail-closed IR envelope load gate. A true leaf: I/O-free, C-free, driver-free, and it does **not** depend on the engine. | `serde`, `serde_json`, `schemars`, `base64`, `sha2`, `hex`, `thiserror`, `uuid` |
-| `zero-migrate-guard` | The `pg_query`(libpg_query)-backed SQL security layer: parse every statement with the real Postgres parser, enforce the deny-list, cross-schema confinement, and operational advisories. Owns the **only C dependency** on the non-SQLite path. Depends on `zero-migrate-ir` only. | `pg_query`, `serde`, `serde_json`, `thiserror`, `zero-migrate-ir` |
-| `zero-migrate` | **The engine.** Schema snapshot/replay/diff/DDL, IR → executable script compile, policy validation, the append-only journal, the transactional/two-phase executor, drift + tamper detection, least-privilege role provisioning, the three dialect backends, and the `driver::SqlSession` seam. This is the crate an embedder (a Rust host) depends on. | `zero-migrate-ir`, `zero-migrate-guard`, `rusqlite` (bundled SQLite), `serde`, … (**no** tokio, **no** compio in shipped deps) |
-| `zero-migrate-node` | The napi **cdylib** (`crate-type = ["cdylib", "rlib"]`). It exposes the engine over N-API with a zero-tokio, zero-io_uring transport: `#[napi(object)]` DTOs in `wire.rs` are the single source of truth (TS imports the generated `.d.ts`), plus the JS-driver → `SqlSession` adapter and the typed verbs. Depends on `zero-migrate` (the only edge). | `napi`, `zero-migrate`, `pg_query`/`rusqlite` (transitively) |
-
-The dependency graph is strictly acyclic: `ir → guard → zero-migrate → node`.
-`zero-migrate-ir` sits at the bottom; the engine re-exports its modules under
-their historical paths (`pub use zero_migrate_ir::{id, capability, expr, ir,
-migration, policy, precondition, probe}`) and flattens the individual IR types
-at the root (`pub use model::ir::{MigrationIr, Op, …}`), so downstream code
-names `zero_migrate::MigrationIr`, `zero_migrate::Op`, etc. unchanged.
-
-### tokio/compio-free core, one C dep
-
-The shipped engine links **neither tokio nor compio**:
-
-```
-cargo tree -p zero-migrate -e normal | grep -E 'tokio|compio'   # → empty
-```
-
-`tokio` appears only transitively behind the blocking `postgres` crate used by
-the **dev-only** test driver (a `[dev-dependencies]` entry that never ships). The
-single C dependency in the whole graph is `pg_query` (libpg_query) in
-`zero-migrate-guard` — a SQL **parser** chosen precisely so the security
-deny-list sees exactly what Postgres would execute and cannot be bypassed by
-exotic syntax a pure-Rust parser would misparse. SQLite's C library rides in via
-`rusqlite`'s bundled build, which the engine drives in-process; it is not a
-network driver.
-
----
-
-## The 2 npm packages
-
-```
-zero-migrate            The authoring DSL — op.*, table() builders,
-  (package: sdks/migrate) defineMigration types, and the pure-JS recorder.
-                        ZERO native code, zero runtime deps. What a migration
-                        file imports. Exposes the recorder to the host via a
-                        documented "./internal/recorder" subpath (one consumer).
-    ▲
-    │ depends on (drains up() through ./internal/recorder)
-zero-migrate-engine     The host runtime — loads the zero-migrate-node addon,
-  (package: sdks/engine)  ships the pg / mysql2 driver adapters as
-                        optionalDependencies, exposes apply/plan/status/
-                        history/validate, and ships the ONE CLI
-                        (bin: `zero-migrate`, cli.ts).
-```
-
-`zero-migrate` (npm) is the DSL a creator's migration file imports
-(`import { op } from "zero-migrate"`). `zero-migrate-engine` (npm) is the host
-that actually applies migrations: it loads the native addon and injects a
-`pg`/`mysql2` driver. `pg` and `mysql2` are **optionalDependencies** — a host
-that only targets SQLite (in-process rusqlite) needs neither installed.
-
-> Cross-registry note: the flagship **Rust crate** `zero-migrate` is the
-> *engine* (what embedders depend on); the flagship **npm package**
-> `zero-migrate` is the *DSL* (what migration files import). Different audiences,
-> different registries — each is "the main thing you touch" in its world.
-
----
-
-## Runtime flow
-
-```
-  migration file                                (a creator's *.ts)
-  import { op } from "zero-migrate"
-        │
-        │  export default defineMigration({ up(t){ op.createTable(...) } })
+```text
+TypeScript migration
+        │ preview and validate
         ▼
-  zero-migrate (npm, DSL)                        pure JS, no native code
-    recorder drains up() → { ir_version, name, ops }  envelope
-        │                                        (ir_version from the addon's
-        │                                         irVersion(); NO owner_app,
-        ▼                                         NO checksum yet)
-  zero-migrate-engine (npm, host)                loads the addon, opens a
-    opens a pinned pg / mysql2 session           ONE-connection host session
-        │
+reviewed migration document
+        │ add trusted project and operator inputs
         ▼
-  zero-migrate-node (napi addon)                 typed verb boundary
-    applyIr(hostDriver, request)                 LOWERs the envelope in Rust:
-        │                                         stamps owner_app, folds the
-        │                                         authoritative Checksum::of_ir
+PostgreSQL / MySQL 8 / SQLite
+        │ apply supported work
         ▼
-  zero-migrate (Rust engine)                     guard → plan → gate → executor
-    guard (line 1) · least-priv role (line 2)
-    executor::apply<B: MigrationBackend>
-        │
-        │  every SqlSession verb crosses back to JS ────────┐
-        ▼                                                   ▼
-  PostgresBackend<S> / MysqlBackend<S>           driver::SqlSession  ⇄  JS driver
-    ($N / pg_advisory_lock)  (? / GET_LOCK)      batch/exec/exec_text/         (pg /
-                                                 query/query_one               mysql2)
-                                                        │
-                                                        ▼
-                                                   the database
+append-only migration history
 ```
 
-SQLite takes a shorter path: it never crosses the seam. `SqliteBackend` is an
-in-process `rusqlite` actor that the engine drives directly (with a
-`prepare`-time authorizer as the line-2 defense, plus statically-registered
-`vec0` and FTS5 with `load_extension` locked down).
+This gives users three practical benefits:
 
-The engine is a synchronous, reactor-less library. Under the napi addon, each
-async host-driven verb (`applyIr`, `status`, `history`) runs the engine on its
-own worker thread via a reactor-less `futures::executor::block_on`; each
-`SqlSession` verb parks on a `oneshot` channel that a JS `done(err, reply)`
-callback fires — no `#[napi] async fn`, no `Promise::await`, no tokio runtime.
+- migration intent can be reviewed before deployment;
+- unsupported database features fail clearly instead of being guessed;
+- the deployment environment, not the migration file, controls authority.
 
----
+## The JavaScript experience
 
-## The three backends + the `MigrationBackend` trait
+Most users work with two packages:
 
-The executor's apply/rollback **orchestration** (versioned vs repeatable
-partitioning, the drift/tamper gate, squash/expand gates, pending ordering, the
-first/second pass, rollback selection) is dialect-agnostic and lives once in
-`apply::executor`. Everything dialect-coupled sits behind the
-`MigrationBackend` trait — connection/session I/O (the project lock, GUC
-snapshot/restore, `SET ROLE`/`RESET ROLE`, transaction control), the confined
-per-migration apply, journal row I/O (as dialect-neutral owned structs, never a
-driver row), non-txn idempotency validation, and drift schema introspection.
+| Package | Use it for |
+| --- | --- |
+| `zero-migrate` | Write migrations with `table`, `view`, `t`, expressions, and related helpers |
+| `zero-migrate-engine` | Preview, validate, plan, apply, inspect status/history, and run the CLI |
 
-The trait is used through **static dispatch** (`<B: MigrationBackend>`), so
-native `async fn` in trait is used directly — no `dyn`, no `async-trait`
-allocation on the apply hot path.
+A migration module is ordinary TypeScript:
 
-| Backend | Dialect | Lock | Placeholders | Transport |
-| --- | --- | --- | --- | --- |
-| `PostgresBackend<S: SqlSession>` | Postgres | `pg_advisory_lock(hashtext($1))` | `$N` (numbered) | `driver::SqlSession` seam (npm `pg`) |
-| `MysqlBackend<S: SqlSession>` | MySQL | `GET_LOCK(...)` | `?` (positional) | `driver::SqlSession` seam (npm `mysql2`) |
-| `SqliteBackend` | SQLite | in-process `BEGIN IMMEDIATE` | rendered locally | in-process `rusqlite` (**not** the seam) |
+```ts
+import { now, table, t } from "zero-migrate";
 
-Each backend owns *its* dialect's lock/journal/session SQL and placeholder style,
-rendered **before** any SQL crosses the seam, so no dialect SQL ever lives in the
-shared executor. `SqlSession` is an implementation detail of the two *network*
-backends, not a bound on the `MigrationBackend` trait. The Postgres and MySQL
-backend modules compile behind the `pg_seam` cfg (emitted by `build.rs` from the
-`host-pg` feature); `SqliteBackend` is always present.
+export const name = "create_projects";
 
----
+export default {
+  up() {
+    table("projects").create({
+      columns: {
+        id: t.id({ prefix: "proj" }),
+        name: t.text().notNull(),
+        created_at: t.timestamp().notNull().default(now()),
+      },
+      indexes: [
+        { name: "projects_name_uq", on: ["name"], unique: true },
+      ],
+    });
+  },
+};
+```
 
-## Authoring model — closed op DSL, no raw SQL on the trusted path
+Calling these helpers describes the change; it does not connect to a database.
 
-Migrations are authored as an ordered list of `Op`s (the closed `Op` enum in
-`zero-migrate-ir`). Every transform and predicate position carries the closed
-`Expr` AST — constructed in JS, serialized as data, **never parsed from text**.
-Views are expressed as `ViewQuery::Structured { SelectAst }` (the engine's own
-`SelectAst`) or, capability-gated, `ViewQuery::Raw`. `Op::Insert` carries literal
-rows; `INSERT ... SELECT` is deliberately **not** a feature. This closed surface
-is what lets the structural validator be a pure allow-list walk and the checksum
-be canonical.
+Migration modules are still executable JavaScript. The Node API and CLI do not
+sandbox them. Run trusted modules directly, or evaluate untrusted/generated
+source in a separate no-secrets, no-authority sandbox and use a reviewed
+Rust/custom-host workflow for deployment.
 
-Two authoring-time codec knobs are configurable rather than hard-coded brands:
+## What the deployment host controls
 
-- **Sentinel prefixes** — the persisted encryption/mask sentinel prefixes are a
-  `SentinelPrefix` config value (defaults `zero-migrate:enc:` /
-  `zero-migrate:mask:`). A host that must interoperate with a legacy writer in
-  the same schema injects that writer's prefix (for example the legacy `zsenc:`);
-  the standalone default carries this project's own brand so no stranger's
-  `pg_dump` carries a foreign one.
-- **Reserved SQL prefix** — `__zero_migrate` is reserved for the engine's own
-  internal objects (e.g. SQLite rebuild temp tables like
-  `users__zero_migrate_rebuild`).
+The migration file intentionally does not control:
 
----
+- database URL or credentials;
+- authenticated application identity;
+- project schema or database;
+- ownership of existing tables;
+- operator policy;
+- destructive-change approval;
+- audit identity written to history.
 
-## Security stance
+The CLI supplies a small set of options for local and create-first workflows. A
+Node host can provide the complete public JavaScript option set:
 
-Migrations are privileged, arbitrary schema changes authored by untrusted
-creators (and potentially a prompt-injectable AI). Defense is in depth:
+```ts
+import { apply } from "zero-migrate-engine";
+import * as migration from "./migrations/20260715090000_create_projects.js";
 
-- **Line 1 — the guard** (`zero-migrate-guard`). Every statement is parsed with
-  the real Postgres parser and checked against a hard deny-list; dangerous
-  constructs nested inside `DO $$…$$` blocks and function bodies are inspected
-  too. Unparseable input is denied. The guard *denies* RCE / privilege-escalation
-  / cross-tenant / file / network, and only *flags* data loss
-  (`DROP`/`TRUNCATE`/lossy type change) — the apply gate decides on destructive
-  ops.
-- **Line 2 — the least-privilege `migrator` role** (Postgres) / the `prepare`-time
-  authorizer (SQLite). The database itself rejects the same ops even if SQL
-  somehow slips past parse.
+await apply({
+  migration,
+  ownerApp: "app_projects",
+  projectSchema: "app_projects",
+  registry: {
+    projects: "app_projects",
+  },
+  driver: {
+    kind: "postgres",
+    url: process.env.DATABASE_URL!,
+  },
+  approved: false,
+  appliedBy: "deploy:production",
+});
+```
 
-The guard runs out-of-band at deploy time, not on the request hot path, so it is
-plain synchronous logic — no tokio/compio — and exhaustively unit-testable
-without a database.
+See [Node API](node-api.md) for the exact JavaScript types.
 
----
+## Preview, validation, and planning
 
-## Where to go next
+The public JavaScript preview, `validate()`, and `plan()` workflows are offline.
+They check the migration document, selected dialect, and supplied table
+ownership without opening a database.
 
-- **Embedding + customizing the engine** (Rust host or Node host):
-  [`embedding.md`](./embedding.md).
-- **Writing a `SqlSession` driver** (the network-dialect seam):
-  [`driver-authors.md`](./driver-authors.md).
+They are not a simulation of the live database. They do not render final SQL,
+compare the live schema, or predict runtime locks and database errors.
+
+Apply performs the additional deployment checks: project confinement, policy,
+approval, migration history, locking, and target execution.
+
+## Ownership and project confinement
+
+`ownerApp` identifies the application deploying the migration.
+`projectSchema` identifies the SQL namespace it owns. `registry` maps existing
+tables to their trusted owners:
+
+```ts
+const registry = {
+  users: "app_identity",
+  orders: "app_orders",
+};
+```
+
+A migration can create and then alter a table within one module. A later module
+that alters an existing table needs a matching registry entry. Unknown or
+mismatched ownership fails closed.
+
+The project schema or database must exist before JavaScript apply. zero-migrate
+does not create that outer namespace for you.
+
+## Policy and approval
+
+Policy controls sensitive capabilities such as destructive operations, raw SQL,
+cross-schema access, roles, extensions, and optional platform-owned table
+requirements.
+
+The public Node API uses a confined built-in policy. Custom policy composition
+is available to Rust hosts for planning and host decisions, but arbitrary custom
+policy cannot yet be passed to the public apply API.
+
+Destructive work needs explicit operator approval. Node exposes a coarse
+`approved` boolean; the CLI does not expose approval. Review and approve the
+exact migration content, not only its filename.
+
+## Apply and history
+
+From a user's perspective, apply:
+
+1. validates the migration and trusted host inputs;
+2. checks policy and approval;
+3. acquires the project lock;
+4. checks previously applied migration identities and checksums;
+5. executes pending supported work;
+6. records the result in append-only history;
+7. releases the lock and database session.
+
+A set of migration files is not one global transaction. If a later migration
+fails, earlier completed migrations remain applied.
+
+PostgreSQL and SQLite can make supported transactional schema work and its
+history event atomic. MySQL DDL auto-commits, so interrupted deployments use a
+separate recovery flow.
+
+## Database support
+
+| Target | JavaScript apply | Rust apply | Important behavior |
+| --- | --- | --- | --- |
+| PostgreSQL | Yes | Yes | Broadest feature set; supports transactional and explicitly non-transactional work |
+| MySQL 8 | Yes | Yes | Supported DDL subset; DDL auto-commits |
+| SQLite | No | Yes | In-process Rust backend; some table changes require rebuilds |
+
+There is no MariaDB compatibility promise. Treat the MySQL target as MySQL 8.
+
+The same migration can target all three only when every operation and expression
+is supported everywhere. Use `dialect()` for explicit, reviewed differences.
+See [Dialect support](dialects.md).
+
+## Current JavaScript boundaries
+
+- The JavaScript packages are not published to npm yet; use the documented
+  source-checkout workflow.
+- JavaScript apply currently executes DDL only. It can validate and preview
+  `insert`, `update`, `delete`, and `backfill`, but it does not execute them.
+- A mixed migration can therefore apply schema changes while omitting data
+  changes; keep data operations out of Node/CLI apply workflows.
+- JavaScript apply supports PostgreSQL and MySQL 8, not SQLite.
+- CLI plan currently targets PostgreSQL.
+- The CLI cannot supply an ownership registry, so later changes to an existing
+  table generally require the Node API or a Rust host.
+- JavaScript status reads journal state but does not discover pending files.
+- JavaScript history is currently PostgreSQL-only.
+- Structural schema drift checks require an explicit Rust workflow.
+- There is no public high-level rollback command; prefer a forward fix.
+
+## Rust integrations
+
+Rust hosts can access additional database backends and planning, drift,
+reconciliation, policy, and approval capabilities. The user-facing public Rust
+types are documented separately in [Rust API](embedding.md).
+
+## Next
+
+- [Getting started](getting-started.md)
+- [Writing migrations](writing-migrations.md)
+- [Node API](node-api.md)
+- [Operating migrations](operations.md)
+- [Rust API](embedding.md)
+- [Security model](security-model.md)
+- [Documentation home](README.md)

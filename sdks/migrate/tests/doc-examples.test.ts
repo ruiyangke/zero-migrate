@@ -1,5 +1,5 @@
 // CI DOC-EXAMPLE GATE — the typed `zero-migrate` examples in
-// `docs/op-dsl.md` must TYPECHECK against the REAL package
+// `docs/writing-migrations.md` must TYPECHECK against the REAL package
 // types, so a future API change that rots a documented snippet FAILS CI.
 //
 // HOW IT WORKS. The test extracts every fenced ```ts block from the reference
@@ -33,7 +33,7 @@ import { test } from "node:test";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
 const DOCS_DIR = resolve(PKG_ROOT, "../../docs");
-const OP_DSL_DOC = resolve(DOCS_DIR, "op-dsl.md");
+const WRITING_MIGRATIONS_DOC = resolve(DOCS_DIR, "writing-migrations.md");
 const GETTING_STARTED_DOC = resolve(DOCS_DIR, "getting-started.md");
 
 // The full documented import vocabulary the fragment harness exposes. The
@@ -153,8 +153,8 @@ function typecheck(harnessSource: string): string | null {
   }
 }
 
-test("doc-gate: every typed example in op-dsl.md typechecks against the real package", () => {
-  const md = readFileSync(OP_DSL_DOC, "utf8");
+test("doc-gate: every typed example in writing-migrations.md typechecks against the real package", () => {
+  const md = readFileSync(WRITING_MIGRATIONS_DOC, "utf8");
   const blocks = extractTsBlocks(md);
   assert.ok(blocks.length >= 6, `expected the doc to carry several runnable ts examples; found ${blocks.length}`);
   const harness = assembleHarness(blocks);
@@ -162,14 +162,14 @@ test("doc-gate: every typed example in op-dsl.md typechecks against the real pac
   assert.equal(
     diagnostics,
     null,
-    `a typed example in docs/op-dsl.md no longer compiles against zero-migrate.\n` +
+    `a typed example in docs/writing-migrations.md no longer compiles against zero-migrate.\n` +
       `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
   );
 });
 
 test("doc-gate: every DSL example in getting-started.md typechecks against the real package", () => {
   // The step-by-step guide's `zero-migrate` (DSL) examples ride the SAME
-  // harness as op-dsl.md. Its `zero-migrate-engine` (host) snippet is excluded
+  // harness as writing-migrations.md. Its `zero-migrate-engine` (host) snippet is excluded
   // here — `extractTsBlocks` skips engine-import blocks — and is gated instead
   // by the engine package's own doc-typecheck.
   const md = readFileSync(GETTING_STARTED_DOC, "utf8");

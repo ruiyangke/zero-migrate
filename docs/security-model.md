@@ -1,272 +1,245 @@
-# zero-migrate — security model
+# Security model
 
-Migrations are privileged, arbitrary schema changes authored by **untrusted**
-creators — and, increasingly, by a prompt-injectable AI agent acting on their
-behalf. A migration that can drop another tenant's tables, read the server
-filesystem, open a network socket, or escalate to superuser is a
-platform-ending event. `zero-migrate` therefore treats every migration as
-hostile input and defends in depth: no single control is load-bearing on its
-own, and each layer fails **closed**.
+A database migration can create code, change permissions, rewrite data, or
+delete an entire schema. zero-migrate treats the requested database changes as
+untrusted input and keeps database authority in the trusted host and database.
 
-This document is the map of those layers, grounded in the code that implements
-them.
+The public Node API and CLI execute migration modules as ordinary JavaScript.
+They do not sandbox imports, top-level code, or `up()`. A module can access the
+host's environment, files, network, and any imported Node API. Run only trusted
+module code directly. Evaluate untrusted/generated source in an external sandbox
+with no secrets or authority, then move only a reviewed migration plan into a
+Rust/custom-host deployment workflow.
 
----
+This guide explains what the platform protects, what the operator must provide,
+and where the public JavaScript workflow currently stops.
 
-## The layers, top to bottom
+## Trust roles
 
-```
-  authored migration (.ts)  ← untrusted creator / AI
-        │
+| Role | Trusted responsibilities |
+| --- | --- |
+| Migration author | Describes the requested change; executable module code must be trusted or externally sandboxed |
+| Host | Authenticates the app, supplies ownership, schema, policy, approval, and credentials |
+| Operator | Provisions least privilege, protects policy/journal/approval state, and handles incidents |
+| Database | Enforces the final privileges and transaction rules |
+
+The same person can fill all roles in a small project. The separation matters
+when migrations come from customers, plugins, generated code, or AI.
+
+## Defense layers
+
+```text
+typed JavaScript operations
         ▼
-  ┌──────────────────────────────────────────────────────────────┐
-  │ 0. Closed authoring surface (no raw expression SQL)           │  sdks/migrate
-  ├──────────────────────────────────────────────────────────────┤
-  │ 1. Fail-closed load gate  (ir_version → validate → ownership) │  zero-migrate-ir
-  │ 2. Policy validation      (SealedProfile ceiling ⊓ draft)     │  zero-migrate::model::profile
-  │ 3. The guard              (pg_query deny-list / classify)     │  zero-migrate-guard
-  │ 4. The plan/apply gate    (destructive ⇒ Approval::Approved)  │  zero-migrate::apply
-  │ 5. The least-priv role    (migrator SET ROLE, DB rejects too) │  zero-migrate::apply::role
-  │ 6. Journal immutability    (append-only, migrator cannot forge)│  zero-migrate::apply
-  └──────────────────────────────────────────────────────────────┘
-        │
+structured migration preview
         ▼
-  the database
+target + ownership + schema checks
+        ▼
+policy + SQL safety guard
+        ▼
+operator approval
+        ▼
+least-privilege database identity
+        ▼
+append-only journal + checksum history
 ```
 
-Layers 1–3 run **out of band** at deploy time — plain synchronous logic, no
-tokio/compio, exhaustively unit-testable without a database. Layers 4–6 run on
-the apply path, so a control that slips past parse is still refused by the
-database itself.
+No layer replaces another. Policy permission does not create a database grant;
+approval does not override a safety denial; a database role does not verify
+migration identity.
 
----
+## Structured migration data
 
-## 0. The closed authoring surface
+After trusted/sandboxed JavaScript evaluation, the API represents tables,
+columns, constraints, expressions, views, and data operations as typed values.
+Unknown operations and malformed values are rejected rather than interpreted as
+SQL.
 
-The first defense is that a migration **cannot express** a raw SQL expression at
-all. Every transform and predicate is a node of the closed `Expr` AST built in
-JS and serialized as data — never parsed from text (see
-[`op-dsl.md`](./op-dsl.md), property A). The structural validator downstream can
-therefore be a pure allow-list walk, and the content checksum can be canonical.
+Strings used as values stay values. There is no raw expression builder.
 
-The one deliberate whole-**statement** escape, `raw({ sql, reason })`, is
-capability-gated (below) and unreachable from a confined creator migration by
-construction. There is no raw *expression* escape on any dialect.
+There are two privileged text surfaces:
 
----
+- PostgreSQL-only `raw({ sql, reason })` for a whole statement;
+- a raw view body constrained to one read-only `SELECT`.
 
-## 1. The fail-closed load gate
+Both require policy permission and pass the PostgreSQL SQL safety parser. Prefer
+structured operations whenever possible.
 
-Before any lowering or apply, an authored IR document passes an ordered gate.
-The policy-free half lives in `zero-migrate-ir` (`load.rs` / `validate.rs`); the
-engine's `model::load::load_ir_document` threads the policy-aware pieces. The
-order is deliberate and each step fails closed:
+## Identity and ownership
 
-1. **Deserialize.** The closed AST and the constrained numeric domain reject a
-   malformed document or a lossy scalar here — an unknown `Expr` node tag or an
-   out-of-range numeric is refused at `serde` boundary, not later.
-2. **`ir_version` fail-closed** (`MigrationIr::check_ir_version`) — a document
-   declaring a **future** `ir_version` this engine cannot interpret is rejected
-   **before** any checksum or lower. Never optimistically apply an envelope shape
-   the engine does not fully understand.
-3. **Structural validation** (`validate_ir_scoped`) — the authoritative allow-list
-   walk over every op and every `Expr` slot, threaded with the active
-   `SchemaScope`: a **Confined** cross-schema op is refused here, fail-closed,
-   before lower (`CROSS_SCHEMA`). Portability violations (`EXPR_NOT_PORTABLE`,
-   `DIALECT_UNSUPPORTED`) are caught here too, against the resolved target
-   dialect.
-4. **Ownership** (`enforce_ir_ownership`) — the check is **not** against the
-   artifact's *claimed* owner (a spoofable field). It is against the deploying
-   app id plus a `{ live table → owning app }` project registry. An op that
-   touches a table owned by a **different** app is refused, and an **unknown**
-   owner fails closed — so a partial-union deploy cannot mass-drop another
-   tenant's tables.
-5. **Advisory checksum-hint compare** — if the artifact carries a checksum hint,
-   it is recomputed and compared, then **dropped** (the hint never folds into the
-   authoritative checksum). If the hint domain is not fully computable, the load
-   fails rather than comparing against a partial domain.
+The migration module does not choose its authoritative owner or checksum. The
+trusted host supplies `ownerApp`, and zero-migrate computes the checksum from
+the validated migration.
 
-Only after all five pass does the engine **server-stamp** `owner_app` (a spoofed
-or absent artifact value is discarded) and fold the authoritative `Checksum`. The
-identity of the migration is engine-owned provenance, never author-supplied.
+For existing tables, the host supplies a trusted table-to-owner registry:
 
----
+```ts
+const registry = {
+  accounts: "app_identity",
+  orders: "app_orders",
+};
+```
 
-## 2. Policy validation — the operator ceiling ⊓ author draft
+A migration that targets another app's table—or an existing table whose owner
+cannot be proven—fails closed.
 
-What a migration is *allowed* to do is governed by a `PolicyProfile`
-(`crates/zero-migrate/src/model/profile.rs`). A profile carries capability flags
-(`schema`, `role`, `grant`, `rls`, `partition`, `policy`, `function`, `raw_sql`,
-`raw_view_body`, `materialized_view`, …), operational limits, data-security
-config, and the injected-system-column shape. Three named postures exist:
-`PolicyProfile::confined()` (the creator path — the default), `platform()`, and
-the `Trusted` posture.
+The project schema/database is also host-controlled. It must exist before
+JavaScript apply.
 
-The load-bearing composition is **`meet_ceiling_draft`**: an operator ceiling and
-an author-submitted draft are combined by set intersection / boolean-AND /
-ordered minimum, and a draft that tries to **exceed** the ceiling is **rejected**
-(never silently clamped up). Obligation knobs meet by unioning *upward*, so a
-ceiling requirement cannot be removed by the draft. This is monotonic
-tightening: the effective policy is always `ceiling ⊓ draft`, so a creator draft
-can only narrow, never widen, what the operator permitted.
+## Policy
 
-The result is a **`SealedProfile`** — a sealed, MAC-authenticated value produced
-only through `SealedProfile::mint` (the public `seal_effective_profile` seam,
-which validates the MAC key). A privileged profile presented **without** a valid
-token fails closed to Confined. Because the privileged constructors and the seal
-are token-gated, an external embedder cannot flip the engine into a privileged
-posture by constructing a struct.
+Policy can limit raw SQL, schema access, role/grant operations, extensions,
+functions, partitions, RLS, destructive changes, and operator-owned table
+shape.
 
-The per-op vendor gate follows from this: a Postgres-vendor op (a `raw` DDL, a
-`CREATE FUNCTION`, an RLS policy, a raw view body) is checked against the
-profile's `VendorCapabilities`; a confined migration that reaches for one is
-refused `VENDOR_OP_DENIED`.
+An untrusted project policy can narrow a trusted ceiling but cannot widen it.
+Hard safety rules still win even when a capability is granted.
 
----
+Custom policy can drive Rust planning and host decisions. The public JavaScript
+facade uses a confined, no-injection posture, and a general end-to-end custom
+executor policy is not exposed yet. See [Policy model](policy.md).
 
-## 3. The guard — `zero-migrate-guard` (line 1)
+## Approval
 
-The `zero-migrate-guard` crate is the security heart, extracted so it owns the
-**only C dependency** on the non-SQLite path: `pg_query`/libpg_query — the *real
-Postgres parser*, chosen precisely so the deny-list sees exactly what Postgres
-would execute and cannot be evaded by exotic syntax a pure-Rust parser would
-misparse. It is line 1; it does not depend on the engine.
+Destructive changes require an approval decision supplied by trusted host code.
+Do not accept `approved: true` from migration input or bind approval only to a
+filename.
 
-Every statement is parsed and checked against a hard **deny-list**
-(`guard/denylist.rs`), including dangerous constructs nested inside `DO $$…$$`
-blocks and function bodies (the body walk). **Unparseable input is denied.** The
-deny-list refuses, with stable rule ids surfaced on `GuardError::Denied`:
+A production approval should include:
 
-- **RCE / library loading** — `COPY … PROGRAM` (`copy_program_rce`), `COPY …
-  FROM/TO 'file'` (`copy_file_access`), `LOAD` (`load_library`), untrusted PL
-  languages (`untrusted_language`), `SECURITY DEFINER` functions.
-- **Privilege escalation** — `ALTER SYSTEM`, role/privilege management
-  (`CREATE/ALTER/DROP ROLE`, `GRANT`/`REVOKE`), granting a privileged role,
-  changing object ownership to a privileged role, `SET ROLE` /
-  `session_authorization` / `search_path` (`forbidden_set_param`), the superuser
-  role (denied in **all** profiles including Platform).
-- **File / network reach** — file-access functions, network functions, foreign
-  data wrapper management, `set_config`, name-resolver / object-address
-  functions.
-- **Cross-tenant** — cross-schema references outside the confined scope, access
-  to platform schemas (`control`, `auth`, `billing`), system-catalog access.
+- the exact migration identity and checksum;
+- the target project and database;
+- the reviewed destructive actions;
+- the approver and time;
+- an expiry or deployment scope where appropriate.
 
-Alongside the deny-list, `analyze` / `classify` (`analysis/`) **classify** each
-statement: its `DdlKind`, its `DataSecurityClass` (whether it is destructive —
-`DROP` / `TRUNCATE` / a lossy type change), the schemas it references, the
-relations it touches, and the ownership it needs. The guard **denies** the
-RCE / escalation / cross-tenant / file / network classes outright; it only
-**flags** data loss — the decision on a destructive op belongs to the apply gate
-(layer 4), because a `DROP` is sometimes exactly what the operator intends.
+The Node API exposes a coarse `approved` boolean. Rust hosts can use
+`ApprovalScope` to approve selected versions only.
 
-Under the `Trusted` posture the deny-list, cross-schema, and body walks are
-skipped by design (the public dbmate-like CLI stance); `Trusted` is
-`#[non_exhaustive]` and constructed only through a token-gated in-crate seam, so
-a creator can never reach it.
+## PostgreSQL protection
 
----
+PostgreSQL has the strongest SQL text guard. Policy-gated statements are parsed
+before execution and checked for dangerous file, program, privilege, session,
+and cross-schema behavior.
 
-## 4. The plan/apply gate
+Use a dedicated, non-login migrator role with only the project-schema
+permissions required by approved migrations. The Rust `ExecutorConfig` does not
+select this role unless the host configures it; the public CLI cannot configure
+one.
 
-`engine.plan(...)` runs the guard over every migration's `up` and produces a
-read-only preview: a denial lands in the plan's denied set, a destructive op sets
-`requires_approval`. `engine.apply(...)` then enforces the gate before touching
-the database:
+Keep the migration journal schema inaccessible to the migrator role.
 
-- A **denied** plan is refused outright.
-- A **destructive** plan (a `DROP`/`TRUNCATE`/lossy-type-change `up`, or any
-  rollback — a `down` is inherently destructive) requires `Approval::Approved`.
-  Absent approval, only a non-destructive batch runs.
+## MySQL protection
 
-Layered on top is `ApprovalScope` (`crates/zero-migrate/src/approval.rs`): a
-fail-closed answer to "*which* destructive ops did the operator individually
-review?" A destructive op runs iff `Approval::Approved` **and** the scope admits
-its version id. An empty scope authorizes nothing destructive even under
-`Approved`; there is no "unrecognized scope ⇒ allow" arm. Approving one
-destructive change never silently green-lights an unreviewed one.
+The MySQL path uses structured, generated DDL. PostgreSQL whole-statement raw SQL
+is not supported.
 
-The gate is not the last word: the executor **independently re-runs** the guard
-and re-applies the migrator role, so the same checks hold even if a caller
-constructs a plan by hand.
+MySQL does not switch to a separate role during apply. The connecting account's
+grants are the database security boundary, so use a dedicated account limited
+to the target database and protected journal database.
 
----
+MySQL DDL auto-commits. zero-migrate records started/completed recovery state,
+but the schema change and journal completion cannot be one transaction.
 
-## 5. The least-privilege migrator role (line 2)
+## SQLite protection
 
-Even if a dangerous statement somehow slipped past parse, the **database itself**
-rejects it. `apply::role` provisions a deterministic per-project `migrator_
-<project>_<hash>` role and applies each migration under `SET ROLE` for it (with
-`RESET ROLE` on exit). The role is `NOLOGIN` + `NOSUPERUSER`, so privilege checks
-run as an unprivileged principal — a `SET ROLE` to a `NOSUPERUSER` role means the
-DB enforces least privilege even when the connecting principal is an admin.
+SQLite apply is available through Rust. It uses separate application and journal
+files, disables extension loading, enables defensive settings, and restricts
+migration statements with a database authorizer.
 
-The grant set is exactly what a migration needs and nothing more: `CREATE ROLE`,
-`ALTER SYSTEM`, and `CREATE DATABASE` are denied by attribute; the migrator gets
-`USAGE` (resolution only, never `CREATE`) on the extension schema(s) so it can
-reference shared extension types but cannot stage objects there. Deny-by-absence:
-the role has only what it is explicitly granted.
+The in-process backend serializes operations inside one process. Coordinate
+separate processes outside zero-migrate.
 
-On **SQLite** the peer of the migrator role is the `prepare`-time **authorizer**
-(plus statically-registered `vec0`/FTS5 with `load_extension` locked down): the
-in-process connection rejects the same disallowed operations at prepare time.
+## Journal and integrity
 
----
+Migration history is append-only. Events identify the migration, checksum,
+actor, time, and outcome. Recovery markers are kept separately from durable
+history.
 
-## 6. Journal immutability
+During apply:
 
-The append-only journal (the per-project `schema_migrations` table, in a
-dedicated meta schema derived as `<project_schema>_migrations`) records what has
-been applied and its checksum, and drives drift/tamper detection. Its integrity
-matters because a migration's `up` runs **as the migrator role** — so if the
-migrator could write the journal, it could forge history.
+- a reused identity with a different checksum fails;
+- a versioned/repeatable kind mismatch fails;
+- an independently stored manifest can verify the expected migration set in
+  Rust hosts.
 
-It cannot. The journal schema is **off the migrator's path**: the migrator gets
-neither `USAGE` on the meta schema nor `INSERT`/`UPDATE`/`DELETE` on the journal
-table. The engine writes journal rows as the **admin role**, outside the `SET
-ROLE` window. So a migration cannot insert a completed row for work it did not
-do, nor delete/rewrite an existing row to hide a change. Drift and tamper
-detection then compare the live schema and the recorded checksums against the
-migration set on every apply.
+Do not give migration credentials permission to update, delete, or truncate the
+journal. Do not “repair” history manually after a failure.
 
----
+Structural schema drift is separate from checksum history. Rust hosts can
+capture and compare PostgreSQL or SQLite schema snapshots; it is not
+automatically run on every JavaScript apply.
 
-## Configurable-but-safe: sentinels and the reserved namespace
+## Failure and recovery
 
-Two brand strings are engine-configurable knobs rather than hard-coded — but
-neither is a security downgrade:
+Static validation, policy, guard, and approval failures happen before migration
+SQL changes the application schema or data. Journal initialization and locking
+may occur earlier. Once execution begins, migrations commit one by one. If a
+later migration fails, earlier completed migrations remain applied.
 
-- **Encryption / mask sentinel prefixes** — a `SentinelPrefix`
-  (`schema::mask_codec`) defaulting to `zero-migrate:enc:` / `zero-migrate:mask:`.
-  A host that must interoperate with a legacy writer in the same schema injects
-  that writer's prefix (for example the legacy `zsenc:`), so the persisted
-  encrypted/masked-column format stays one agreed contract per schema. The
-  standalone default carries this project's own brand so no stranger's `pg_dump`
-  carries a foreign one.
-- **Reserved SQL prefix `__zero_migrate`** — reserved for the engine's own
-  internal objects (e.g. the SQLite rebuild temp table `users__zero_migrate_
-  rebuild`). Reserving the namespace prevents an authored object name from
-  colliding with an engine-synthesized one.
+For non-transactional PostgreSQL work and MySQL DDL:
 
----
+1. preserve the database and journal state;
+2. inspect the started/completed recovery record;
+3. verify whether the schema change took effect;
+4. recover through the engine or ship a reviewed forward fix;
+5. never invent a completion event just to clear the incident.
 
-## What is deliberately *not* defended here
+There is no public high-level rollback workflow. Low-level Rust down operations
+do not provide complete selection, approval, guard, or state validation. Prefer
+a forward migration and keep tested backups.
 
-The guard runs at deploy time, not on the request hot path — it is an offline,
-synchronous gate, not a runtime WAF. Runtime tenant isolation of *queries* (as
-opposed to *migrations*) is the host's concern, outside this engine. And the
-engine trusts its own `SqlSession` driver to faithfully execute the SQL it is
-handed; a driver author's obligations (session pinning, transaction visibility,
-faithful `exec_text` coercion) are covered by the conformance kit in
-[`driver-authors.md`](./driver-authors.md).
+## Current JavaScript boundaries
 
----
+- Node/CLI apply supports PostgreSQL and MySQL DDL, not SQLite.
+- Node/CLI does not execute authored `insert`, `update`, `delete`, or
+  `backfill` steps.
+- Node `plan`/`validate` are offline checks and do not inspect the live database.
+- The CLI cannot provide an ownership registry for later alter-table files.
+- The CLI cannot configure a PostgreSQL migrator role or approval.
+- Node status/history are PostgreSQL-only in practice.
+- Node status does not calculate pending files from a migration directory.
+- Node `apply()` accepts executable modules only. Platforms accepting untrusted
+  source need an external sandbox plus a reviewed Rust/custom-host workflow.
 
-## See also
+These are product boundaries, not permissions to bypass the host. Use a Rust
+integration when the public JavaScript surface does not provide a required
+control.
 
-- [`op-dsl.md`](./op-dsl.md) — the closed authoring surface (layer 0).
-- [`architecture.md`](./architecture.md) — the crate structure and the two lines
-  of defense in context.
-- [`embedding.md`](./embedding.md) — how a host selects a profile and threads
-  per-apply identity.
-- [`driver-authors.md`](./driver-authors.md) — the `SqlSession` seam the engine
-  trusts.
+## What zero-migrate does not protect
+
+zero-migrate cannot protect against:
+
+- a compromised trusted host that supplies the wrong owner, policy, approval,
+  or credentials;
+- a database administrator acting outside the engine;
+- incorrect application-level tenant filtering or query authorization;
+- missing backups, disaster recovery, secret storage, or deployment controls;
+- a custom database session that changes the SQL or connection semantics.
+
+Keep the host and database credentials inside the trusted computing base.
+
+## Production checklist
+
+- Authenticate `ownerApp` independently of the migration.
+- Maintain a complete trusted ownership registry.
+- Pre-create the project schema/database.
+- Use least-privilege credentials.
+- Keep journal storage outside migration authority.
+- Validate the exact target dialect.
+- Review the structured migration preview.
+- Bind destructive approval to immutable content.
+- Store verified manifests independently when using them.
+- Test transactional and non-transactional recovery.
+- Run explicit structural drift checks when required.
+- Maintain and test backups.
+- Prefer forward fixes over low-level rollback.
+
+## Next
+
+- [Getting started](getting-started.md)
+- [Node API](node-api.md)
+- [Policy model](policy.md)
+- [Operating migrations](operations.md)
+- [Rust API](embedding.md)
+- [Documentation home](README.md)
