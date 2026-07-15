@@ -382,7 +382,7 @@ zero-migrate (engine)     runs the inject/validate rule evaluator during authori
 normalization (II.2.7), `⊑`/`⊓`/`⊔`, "which rules cover object *o*" — is a single
 implementation living in `zero-migrate-policy`. The guard is a *policy-enforcement
 point*: its whole job is (1) parse an op into the `(key, object)` pairs it references
-(a `core.raw_sql` statement expands to one pair per referenced object, II.4.4), and
+(a `sql.raw` statement expands to one pair per referenced object, II.4.4), and
 (2) ask the decision-query API. If the guard held its own `Scope` and matched names
 itself, we would have two matcher implementations to keep bit-identical — the exact
 class of drift Part I indicts (E1/E2). One matcher, one normalizer, one lattice;
@@ -400,8 +400,8 @@ or a `zeroship-migrate-profiles` package) and are injected at engine constructio
 ```rust
 /// One policy knob, declared once. The declaration IS the machine.
 pub struct KnobDef {
-    /// Namespaced key: "core.raw_sql", "pg.role", "pg.rls",
-    /// "op.lock_timeout_ms", "sec.require_rls", "acme.hypertable".
+    /// Namespaced key: "sql.raw", "access.role", "access.rls",
+    /// "runtime.lock_timeout_ms", "safety.require_rls", "acme.hypertable".
     pub key: KnobKey,
     pub kind: KnobKind,          // Bool | StrSet | UintCeiling { hard_floor } | OrderedEnum(&[...]) | Digest
     pub polarity: Polarity,      // see below
@@ -418,6 +418,13 @@ pub struct KnobDef {
     /// affecting metadata; a seal minted under a def with a different `requires_db_privilege`
     /// must not verify.
     pub requires_db_privilege: bool,
+    /// Whether a SILENT draft INHERITS this knob's grant from the ceiling at `admit`
+    /// (the default, `true`), or is instead pinned to the knob's DEFAULT (`false`).
+    /// `false` marks a POWER GRANT that must never be conferred by omission — a silent
+    /// creator draft gets the tightest value, not the ceiling's; a draft that EXPLICITLY
+    /// grants it is still bounded by the ordinary `draft ⊑ ceiling` check. `schema.alter_injected`
+    /// is the first `inherit = false` knob. Part of the sealed registry digest (enforcement-affecting).
+    pub inherit: bool,
     pub docs: &'static str,
 }
 
@@ -427,12 +434,12 @@ pub enum ObjectModel {
     /// destructive-ops, raw-SQL-over-tables, index creation, table rewrite.)
     PerTable,
     /// Authority is per schema; table-granular scopes are illegal on this key.
-    /// (`core.create_schema` — the authority to create a schema matching a
+    /// (`schema.create_schema` — the authority to create a schema matching a
     /// schema-name scope — and other CREATE-in-schema effects that are not
     /// table-specific.)
     PerSchema,
     /// Authority is database-global — it cannot be attributed to any object subset.
-    /// (`pg.extension`, `pg.role`.) A Global knob's `scope` is a legality marker whose
+    /// (`code.extension`, `access.role`.) A Global knob's `scope` is a legality marker whose
     /// only admissible value is ⊤ (`All`); it is EXEMPT from the `default_scope` meet
     /// (II.2.4/II.2.5). Any authored scope other than `All` is a hard load error at
     /// document-load time (II.2.5), never a silent narrowing.
@@ -457,10 +464,13 @@ pub enum Polarity {
 }
 ```
 
-- **The engine registers its builtin knobs** (the current eleven vendor capabilities
-  as `pg.*`/`core.*` grant keys, the two timeouts, `index_creation`, `table_rewrite`,
-  `require_rls`, `no_hard_delete`, `sensitive_columns`, `destructive_ops`, and
-  **`sec.require_approval`** — an OrderedEnum obligation `never ⊑ on_destructive ⊑ always`,
+- **The engine registers its builtin knobs** in the six DOMAIN namespaces
+  (`sql.*`/`schema.*`/`access.*`/`code.*`/`runtime.*`/`safety.*`) — the vendor
+  capabilities as grant keys (`access.role`, `code.extension` (a StrSet allowlist),
+  `sql.raw`, …), the two `runtime.*` timeouts, `runtime.index_creation`,
+  `runtime.table_rewrite`, `safety.require_rls`, `safety.no_hard_delete`,
+  `safety.sensitive_columns`, `safety.destructive_ops`, and
+  **`safety.require_approval`** — an OrderedEnum obligation `never ⊑ on_destructive ⊑ always`,
   `Require` polarity, `DeclaredOnly` enforcement, default `never` (M-2; the workflow-flag
   that II.7 formerly said was "not a policy knob at all" is now a first-class registered
   knob, host-read via the sealed decision query)). One table, one place; the guard, the
@@ -478,10 +488,11 @@ pub enum Polarity {
   impossible: there is only one definition to drift from.
 - **The registry has a canonical digest.** `PolicyRegistry::digest()` is a hash over the
   **full canonical `KnobDef` encoding** of every knob — the complete tuple
-  `(key, kind, polarity, default, enforcement, object_model, requires_db_privilege)` — in
+  `(key, kind, polarity, default, enforcement, object_model, requires_db_privilege, inherit)` — in
   key-sorted order. The digest MUST cover *every* enforcement-affecting field, including
-  `requires_db_privilege` (II.10.5): two registries that agree on key/kind/polarity/
-  default/enforcement/object_model but disagree on whether a `pg.*` knob presupposes a DB
+  `requires_db_privilege` (II.10.5) and `inherit` (the power-grant flag): two registries that
+  agree on key/kind/polarity/default/enforcement/object_model but disagree on whether a knob
+  presupposes a DB
   privilege enforce differently, so a seal minted under one must not verify against the
   other. This digest is bound into the seal (II.7): a `key` string means nothing without
   the *whole* def it resolves to, so a seal is only valid against the registry that minted
@@ -572,7 +583,7 @@ Construction rules (enforced at document load and in the `Scope` smart construct
     database-global grant must be spelled loudly and unambiguously.
   - The **unattributable-reference / unqualified-name check** (II.2.5) "matches only a
     ⊤-scoped grant" means only a grant whose `effective_scope` is the literal `All`; a
-    `core.raw_sql` grant scoped `Of{ include = ["*"] }` does **not** admit an
+    `sql.raw` grant scoped `Of{ include = ["*"] }` does **not** admit an
     unattributable statement. Fail-closed: an author who wants "raw SQL truly everywhere,
     including things I can't attribute" must write the explicit `All`, so the blunt
     universal grant is never obtained by an incidental `"*"` glob.
@@ -597,9 +608,9 @@ Construction rules (enforced at document load and in the `Scope` smart construct
   lattice operation, and it too is name-based.)
 
 Scope applies to **all four rule kinds**. Examples the design owner named:
-  - `grant "core.raw_sql"` scoped `Of { include = ["staging"] }` — raw SQL only in
+  - `grant "sql.raw"` scoped `Of { include = ["staging"] }` — raw SQL only in
     schema `staging`.
-  - `require "sec.require_rls"` scoped `Of { include = ["tenant_*"] }` — RLS obligation
+  - `require "safety.require_rls"` scoped `Of { include = ["tenant_*"] }` — RLS obligation
     on tenant tables only.
   - `inject { audit columns }` scoped `Of { include = ["*"], exclude = ["*.journal"] }`
     — audit columns everywhere except the journal. (Note: "everywhere except X" is a
@@ -633,7 +644,7 @@ rules carry no knob key and are always object-filterable — never Global — so
 take the meet branch.) The narrow-only invariant below is therefore stated over the rules
 where narrowing *means* something (every `PerTable`/`PerSchema` rule and every
 inject/validate rule); Global-key rules are exempt by construction, which is exactly what
-keeps the doc's `default_scope = app_*` + `pg.extension scope = all`
+keeps the doc's `default_scope = app_*` + `code.extension scope = all`
 example legal (II.2.5).
 
 Because `⊓` is a genuine greatest-lower-bound on the scope lattice (II.3.1), we have
@@ -660,13 +671,13 @@ property suite (II.9) asserts it on the ⊥/⊤/disjoint cases explicitly.
 A scope is only meaningful for a knob whose authority *can* be attributed to objects.
 `KnobDef.object_model` (II.2.1) declares this, and the document loader enforces it:
 
-- **`Global`** (`pg.extension`, `pg.role` — authority the database applies
+- **`Global`** (`code.extension`, `access.role` — authority the database applies
   database-wide; a Global knob cannot be attributed to any object subset): a rule naming
   a Global key **must be authored with `scope = All`**. On a Global key the `scope` is
   **not an object filter — it is a legality marker** whose only admissible value is
   `All`; any *authored* scope other than `All` (an `Of{...}` or `Nothing`) is a **hard
   load error** (`ScopeIllegalForGlobalKnob`). This is *not* a silent normalize-to-⊤:
-  refusing is the fail-closed choice, because "grant `pg.extension` on `app_*`" is a
+  refusing is the fail-closed choice, because "grant `code.extension` on `app_*`" is a
   category error the author must see, not a request the engine can honor
   object-by-object.
   - **Global knobs are EXEMPT from the `default_scope` meet (Defect: global-knob vs
@@ -675,7 +686,7 @@ A scope is only meaningful for a knob whose authority *can* be attributed to obj
     rule.scope` is **not applied to Global-key rules**: their effective scope is `All`,
     full stop, and `default_scope` never touches it. This is the specific carve-out that
     makes the doc's own example TOML below (`default_scope = { include = ["app_*"] }`
-    together with `pg.extension … scope = "all"`) **LEGAL**: without the exemption, the
+    together with `code.extension … scope = "all"`) **LEGAL**: without the exemption, the
     meet `app_* ⊓ All = app_*` would silently produce a non-⊤ effective scope and the
     Global-legality check would then reject the very config the design intends. With the
     exemption, a Global rule authored `scope = All` stays `All` regardless of
@@ -694,9 +705,9 @@ cover *through* `object_model`:
 
 - A `PerTable`/`PerSchema` op names its object(s) directly (the table/schema it
   targets, normalized per II.2.7).
-- A `core.raw_sql` op's object set is **every object the statement references** —
+- A `sql.raw` op's object set is **every object the statement references** —
   every table, view, and schema named anywhere in the parsed statement. The grant
-  check succeeds only if the resolved `core.raw_sql` grant covers **every one** of
+  check succeeds only if the resolved `sql.raw` grant covers **every one** of
   those objects (∀-quantified, II.3.2). This is why "`raw_sql` only in `staging`" is a
   **statement-level referenced-object containment** guarantee: a statement that touches
   `staging.a` *and* `app.b` is denied, because `app.b` is outside the grant's scope.
@@ -709,27 +720,27 @@ cover *through* `object_model`:
 for whatever it does (Defect: raw create/DDL bypass).** Injection is an IR transform
 (II.4.4) and *cannot rewrite raw SQL text*. A raw statement the engine cannot
 structurally attribute must therefore be denied under any scoped grant, never waved
-through on the strength of "every referenced object is inside `core.raw_sql`". The
-guard classifies every `core.raw_sql` statement by parsed shape and layers the matching
+through on the strength of "every referenced object is inside `sql.raw`". The
+guard classifies every `sql.raw` statement by parsed shape and layers the matching
 structured-grant checks **on top of** the referenced-object check above:
 
 - **Raw DML** (`INSERT`/`UPDATE`/`DELETE`/`SELECT` with no schema-object side effect):
-  passes on the referenced-object `core.raw_sql` check alone.
+  passes on the referenced-object `sql.raw` check alone.
 - **Raw create** (`CREATE TABLE`, `CREATE TABLE … AS` / CTAS, `SELECT … INTO`,
   `CREATE TABLE … (LIKE …)`, `CREATE TABLE … PARTITION OF …`, and every other spelling
   that brings a table into existence): must **additionally** pass the
-  `core.create_table` grant at the new table's normalized name (II.2.6a) — the raw path
+  `schema.create_table` grant at the new table's normalized name (II.2.6a) — the raw path
   gets no exemption from the namespace anchor. **AND — because injection cannot be
   applied to raw DDL — a raw create is DENIED whenever ANY `inject` rule (mandatory or
   not) covers the target object.** The structured DSL path is the *only* way to create a
   table inside any inject scope; a raw `CREATE TABLE app_x.t (…)` under a
-  `core.raw_sql@app_*` grant is denied because an `inject` rule covers `app_x.t` and the
+  `sql.raw@app_*` grant is denied because an `inject` rule covers `app_x.t` and the
   engine cannot inject into raw text (`RawCreateInInjectScope`). A raw create is admitted
-  only where **no** inject rule covers the target *and* `core.create_table` grants it.
-- **Raw `CREATE SCHEMA`**: must additionally pass `core.create_schema` at the target
+  only where **no** inject rule covers the target *and* `schema.create_table` grants it.
+- **Raw `CREATE SCHEMA`**: must additionally pass `schema.create_schema` at the target
   schema (II.2.6a).
 - **Raw rename / move** (`ALTER TABLE … RENAME TO`, `ALTER TABLE … SET SCHEMA`): must
-  additionally pass `core.rename_into` at the *target* scope **and** is subject to the
+  additionally pass `schema.rename` at the *target* scope **and** is subject to the
   same post-move re-evaluation as the structured op (II.2.6b/d). Because the engine
   cannot re-run injection over the moved object via IR when the mover is raw text, a raw
   rename **into** any scope covered by an `inject` rule is DENIED (`RawRenameIntoInjectScope`) —
@@ -740,37 +751,37 @@ structured-grant checks **on top of** the referenced-object check above:
   the structured op does; a raw statement gets no exemption from injected-shape immutability.
 - **Opaque-body constructs** (`CREATE FUNCTION`, `CREATE PROCEDURE`, `CREATE TRIGGER`,
   `DO $$…$$`, and any construct whose body carries statements the outer parse does not
-  model): see below — DENIED under any non-⊤ `core.raw_sql` grant.
+  model): see below — DENIED under any non-⊤ `sql.raw` grant.
 
 The corresponding structured ops (`createTable`, `createSchema`, `renameTable`,
 `alterTable`, …) already run these checks natively; the classification simply routes a
 *raw* statement into the *same* gate so raw text can never be the escape hatch around
-`core.create_table`, injection, or injected-shape immutability. If the parser cannot
+`schema.create_table`, injection, or injected-shape immutability. If the parser cannot
 classify a raw statement into exactly one of these shapes, it is treated as
 unattributable (below).
 
 - **Unqualified names / `search_path` are unattributable under a scoped grant
-  (Defect: `search_path` attribution).** Under a non-⊤ `core.raw_sql` grant an object
+  (Defect: `search_path` attribution).** Under a non-⊤ `sql.raw` grant an object
   reference written **without an explicit schema** is UNATTRIBUTABLE — the engine will
   not run schema-resolution heuristics (there is no live `search_path` state to consult
   intensionally, and guessing is an escalation vector). An unqualified name therefore
   matches **only a ⊤-scoped grant** (like any unattributable reference below), so any
   raw statement containing an unqualified object reference is **denied under every scoped
-  `core.raw_sql` grant** (`UnqualifiedNameUnderScopedRawSql`). Correspondingly,
+  `sql.raw` grant** (`UnqualifiedNameUnderScopedRawSql`). Correspondingly,
   `SET search_path` (and every equivalent: `SET LOCAL search_path`,
   `SELECT set_config('search_path', …)`, a `search_path` `GUC` set in `ALTER ROLE`/
-  `ALTER DATABASE`) is **REFUSED under any non-⊤ `core.raw_sql` grant**
+  `ALTER DATABASE`) is **REFUSED under any non-⊤ `sql.raw` grant**
   (`SearchPathUnderScopedRawSql`): a scoped grant cannot admit a statement that mutates
-  the very name-resolution context attribution depends on. Only a ⊤-scoped `core.raw_sql`
+  the very name-resolution context attribution depends on. Only a ⊤-scoped `sql.raw`
   grant may carry unqualified names or touch `search_path`.
 
 - **Opaque-body constructs are denied under scoped raw_sql (Defect: body indirection).**
   A `CREATE FUNCTION staging.f()` whose body writes `app.b`, a `CREATE TRIGGER`, or a
   `DO $$ … $$` block defeats statement-level attribution: the body's referenced objects
   are not visible to the outer parse, so a body-level write to `app.b` would sail past a
-  `core.raw_sql@staging` grant. Therefore **`CREATE FUNCTION`, `CREATE PROCEDURE`,
+  `sql.raw@staging` grant. Therefore **`CREATE FUNCTION`, `CREATE PROCEDURE`,
   `CREATE TRIGGER`, `DO`, and any other opaque-body construct are DENIED under any non-⊤
-  `core.raw_sql` grant** (`OpaqueBodyUnderScopedRawSql`) — only a ⊤-scoped `core.raw_sql`
+  `sql.raw` grant** (`OpaqueBodyUnderScopedRawSql`) — only a ⊤-scoped `sql.raw`
   grant may author them, and even then the DB-role least-privilege floor (II.10.5) is the
   real backstop, because the engine cannot statically bound what a function body will do
   at execution time.
@@ -778,7 +789,7 @@ unattributable (below).
 - An **unattributable or unparseable** reference (a statement the guard cannot resolve
   to a concrete normalized object set — dynamic SQL, an unqualified name under a scoped
   grant, a construct the parser does not model) matches **only a ⊤-scoped grant**. If the
-  effective `core.raw_sql` grant is anything narrower than `All`, an unattributable
+  effective `sql.raw` grant is anything narrower than `All`, an unattributable
   reference is **denied**. Fail-closed: "I can't tell what this touches" resolves to
   "deny unless you were trusted with everything."
 
@@ -797,20 +808,20 @@ and by defining rule evaluation for `ALTER`/`RENAME`, not only `createTable`.
 knobs, each `default = deny` (the tightest value), `Enforced`:
 
 ```
-core.create_table   (PerTable)   — may create a table matching this scope
-core.create_schema  (PerSchema)  — may create a schema matching this scope
-core.rename_into    (PerTable)   — may name/move a table INTO this scope
+schema.create_table   (PerTable)   — may create a table matching this scope
+schema.create_schema  (PerSchema)  — may create a schema matching this scope
+schema.rename    (PerTable)   — may name/move a table INTO this scope
                                     (target of a RENAME / SET SCHEMA / CREATE-as)
 ```
 
 Now the operator can *anchor* the namespace: an object can only come into existence
-where `core.create_table` is granted, and a grant is bounded by the root ceiling like
+where `schema.create_table` is granted, and a grant is bounded by the root ceiling like
 any other. Crucially this lets the operator guarantee the **creatable ⊑ injected**
 containment that makes injection un-evadeable:
 
 > **Compose-time creatable-scope lint.** An operator may mark an `inject` rule
 > `mandatory = true` in the root ceiling. At compose time, the composer computes, for
-> each mandatory inject rule *I*, the effective `core.create_table` scope *K* the
+> each mandatory inject rule *I*, the effective `schema.create_table` scope *K* the
 > policy grants, and **errors unless `K ⊑ scope(I)`** (`CreatableEscapesMandatoryInject`,
 > blame the draft when it is the draft that widened *K*). Because `⊑` is decidable and
 > **sound** (a false "not-contained" only ever tightens — it can conservative-reject but
@@ -872,23 +883,23 @@ creation-provenance record:
 
 - An `ALTER TABLE … DROP COLUMN` / `RENAME COLUMN` / `ALTER COLUMN` (type/nullability)
   **on a column for which `is_injected_shape(object, column)` holds** is a guard denial
-  (`InjectedColumnImmutable`) unless an explicit `core.alter_injected_column` grant
+  (`InjectedColumnImmutable`) unless an explicit `schema.alter_injected` grant
   (default deny, `Enforced`, PerTable) covers the object. Injected columns are the
   operator's floor; a draft cannot quietly strip them post-creation.
 - An `ALTER TABLE … DROP CONSTRAINT <pk>` / a PK-replacing `ALTER` **on a table whose
   primary key `is_injected_shape` pins** (the covering inject rule carries
   `primary_key: Some(...)`) is a guard denial (`InjectedPrimaryKeyImmutable`) unless the
-  same `core.alter_injected_column` grant covers the object. The pinned PK is part of the
+  same `schema.alter_injected` grant covers the object. The pinned PK is part of the
   injected shape (`InjectSpec.primary_key`); dropping it is as forbidden as dropping an
   injected column.
 - A `DROP INDEX` / index-replacing `ALTER` **on an index for which `is_injected_shape`
   holds** (the index name/key matches one a covering inject rule's `InjectSpec.indexes`
   contributes) is a guard denial (`InjectedIndexImmutable`) unless the same
-  `core.alter_injected_column` grant covers the object. Injected indexes are part of the
+  `schema.alter_injected` grant covers the object. Injected indexes are part of the
   operator's floor exactly as injected columns are.
 - A `RENAME TABLE` / `ALTER TABLE … SET SCHEMA` that would move a table **across a
   scope boundary** — i.e. the object's set of covering inject/validate/grant rules
-  before ≠ after the move — requires `core.rename_into` on the *target* scope AND is
+  before ≠ after the move — requires `schema.rename` on the *target* scope AND is
   subject to **re-evaluation**: after the rename, the engine re-runs inject
   applicability and every covering `validate` predicate against the moved table
   (II.4.4). A rename that would land a table in a scope whose mandatory injection it
@@ -918,8 +929,8 @@ evaluator (II.4.4) dispatches per op class: `createTable` → inject + validate;
 `alterTable`/`renameColumn`/`dropColumn`/`dropConstraint`/`dropIndex` →
 injected-shape-immutability check (columns, pinned PK, and indexes, each via
 `is_injected_shape`, II.2.6b) + covering validates that mention affected columns;
-`renameTable`/`setSchema` → `core.rename_into` + re-run inject applicability + re-run
-covering validates on the post-move object; `createSchema` → `core.create_schema`. An op
+`renameTable`/`setSchema` → `schema.rename` + re-run inject applicability + re-run
+covering validates on the post-move object; `createSchema` → `schema.create_schema`. An op
 class with no defined policy interaction is a no-op for the evaluator (but still subject
 to grant checks for its own key).
 
@@ -978,9 +989,9 @@ include = ["app_*"]            # a proper `Of` scope; ⊤ is spelled `all = true
 # hard load error (A3), never a silent ⊤. A grant must state its scope or inherit an
 # explicit default; ambient "grant everywhere" is unrepresentable by omission.
 [[grant]]
-key   = "pg.extension"
+key   = "code.extension"
 value = true
-scope = "all"                            # pg.extension is a GLOBAL knob (II.2.5): it MUST
+scope = "all"                            # code.extension is a GLOBAL knob (II.2.5): it MUST
                                          # be authored `scope = "all"` (a legality marker,
                                          # not an object filter). This is LEGAL even
                                          # though default_scope = app_* above, because
@@ -991,19 +1002,19 @@ scope = "all"                            # pg.extension is a GLOBAL knob (II.2.5
                                          # the narrow default, is a load error.
 
 [[grant]]
-key   = "core.raw_sql"
+key   = "sql.raw"
 value = true
 scope = { include = ["staging"] }        # narrower than app_* → raw SQL only where EVERY
                                          # referenced object is in `staging` (II.2.5)
 
 [[grant]]
-key   = "core.create_table"              # namespace anchor (II.2.6): tenant may create
+key   = "schema.create_table"              # namespace anchor (II.2.6): tenant may create
 value = true                             # tables only inside app_* — and (if the ceiling
 scope = { include = ["app_*"] }          # marks the inject mandatory) only where an
                                          # injection already covers them
 
 [[require]]
-key   = "sec.require_rls"
+key   = "safety.require_rls"
 value = true
 scope = { include = ["tenant_*"] }
 
@@ -1368,7 +1379,7 @@ never needs checking). This is what makes **narrow-to-default representable** (H
 old single-notion definition (`grantedScope` = "raises above default") classified
 `raw_sql = false` as *silent*, so the draft inherited the ceiling's `true` — the creator
 asked for LESS and got MORE. The presence/non-default split fixes it. It also makes a
-Global-knob narrowing (`pg.extension = false` over an inherited `true`) representable.
+Global-knob narrowing (`code.extension = false` over an inherited `true`) representable.
 
 For a Bool knob "loosest" = OR; StrSet = union; UintCeiling = max; OrderedEnum =
 rank-max. (Within one layer, more grant rules on a key can only *loosen* — a tenant
@@ -1402,8 +1413,8 @@ Semantics, pointwise, **per (key, object)**:
 
 - **Scalar knobs — LAST-WINS, PRESENCE-based.** For grant/obligation values and the
   operational knobs (grants, obligation-knob values, and all per-op operational scalars —
-  `op.statement_timeout_ms`, `op.lock_timeout_ms`, `sec.require_approval`,
-  `sec.destructive_ops`, …): **where `over` has ANY covering rule on key `k` at object
+  `runtime.statement_timeout_ms`, `runtime.lock_timeout_ms`, `safety.require_approval`,
+  `safety.destructive_ops`, …): **where `over` has ANY covering rule on key `k` at object
   `o`** (`over.covers(k, o)`, presence — even one that restates the default), the result
   value at `(k, o)` is **`over`'s** value; otherwise it is `base`'s value. `over` wins
   outright — it may raise or lower the value with no ordering constraint, and it may lower
@@ -1562,7 +1573,7 @@ provenance is not something prose has to promise). `admit` returns `Ok(Effective
   This reverses the old draft-authoritative semantics. **Contrast:** previously the
   effective grant for `k` was the *draft's* grant map — so a draft that simply **omitted**
   a grant the ceiling allowed silently **lost** it (fell to the default-deny). That is the
-  footgun: an operator whose ceiling grants `pg.extension@all` would find a creator who
+  footgun: an operator whose ceiling grants `code.extension@all` would find a creator who
   forgot to re-declare it silently stripped of it, an availability/usability trap that
   pushes creators toward over-broad drafts. Under **inherit-then-narrow**, a silent draft
   simply *keeps* the ceiling's grant; a draft that wants *less* narrows it explicitly
@@ -1573,15 +1584,18 @@ provenance is not something prose has to promise). `admit` returns `Ok(Effective
   > DEFAULTS that every silent creator holds.** Because a silent draft inherits the
   > ceiling's grant value, any grant an operator writes into a ceiling is *automatically
   > held by every creator who does not mention it* — convenient for benign grants
-  > (`pg.extension`), but hazardous for grants that should be opt-IN per creator
-  > (`core.skip_static_guard`, `core.alter_injected_column`, a ⊤-scoped `core.raw_sql`).
+  > (`code.extension`), but hazardous for grants that should be opt-IN per creator
+  > (`schema.alter_injected`, a ⊤-scoped `sql.raw`).
   > An operator must therefore treat "put it in the ceiling" as "grant it to everyone by
-  > default". A **future** per-rule `inherit = false` opt-out is noted: an inject/grant rule
-  > marked `inherit = false` would still BOUND the draft (a draft may narrow *up to* it) but
-  > would NOT be inherited by a silent draft — the draft would fall to the knob default
-  > unless it explicitly, admissibly claims the grant. This keeps hazardous grants
-  > opt-in-per-creator while the ceiling still caps them. Deferred, not in this cut; called
-  > out so the inheritance default is a deliberate, documented choice.
+  > default". The per-knob **`KnobDef.inherit` flag** is the opt-out: a knob declared
+  > `inherit = false` still BOUNDS the draft (a draft may claim it *up to* the ceiling
+  > via the ordinary escalation check) but is NOT inherited by a silent draft — the
+  > draft falls to the knob default unless it explicitly, admissibly claims the grant.
+  > `schema.alter_injected` is the first `inherit = false` power grant: "override the
+  > platform's injected columns" is never conferred by omission. (The single most
+  > dangerous switch — "skip the static guard belt" — is not a composable knob AT ALL:
+  > it is the root/host-set `GuardMode { Enforced | Off }`, quarantined out of the
+  > registry so it can be neither granted, inherited, nor drafted.)
 
   **The escalation check ranges over `grantedScope` (non-default), not `coveredScope`.**
   For each grant key `k`, the draft is admissible iff **at every object `o` where the draft
@@ -1674,7 +1688,7 @@ provenance is not something prose has to promise). `admit` returns `Ok(Effective
 - **Require rules (incl. valued Require, A5).** effective = ceiling's require rules
   **plus** the draft's, each at its own scope (union-up). A ceiling require can never
   be removed or scope-narrowed by the draft; the draft may only *add*. For a **valued**
-  Require knob (e.g. `sec.sensitive_columns : StrSet`), the obligation at object `o` is
+  Require knob (e.g. `safety.sensitive_columns : StrSet`), the obligation at object `o` is
   the **per-object union** of every covering require rule's value:
   `obligation(k, o) = ⋃ { r.value : r covers o }` — obligations accumulate pointwise
   exactly as grants join pointwise, so a ceiling's required sensitive-column set can
@@ -2008,43 +2022,43 @@ one `env` overlay per environment:
 # base.policy.toml — deny by default; the floor every environment starts from
 policy_version = 1
 default_scope = "all"                                                 # every scopeless rule inherits ⊤ (A3)
-[[grant]]  key = "core.raw_sql"              value = false            # scalar: no raw SQL (scope ⊤)
-[[grant]]  key = "pg.extension"  scope="all" value = false            # Global: extensions off (⊤ mandatory)
-[[grant]]  key = "op.statement_timeout_ms"   value = 30000            # scalar: 30s budget (scope ⊤)
+[[grant]]  key = "sql.raw"              value = false            # scalar: no raw SQL (scope ⊤)
+[[grant]]  key = "code.extension"  scope="all" value = false            # Global: extensions off (⊤ mandatory)
+[[grant]]  key = "runtime.statement_timeout_ms"   value = 30000            # scalar: 30s budget (scope ⊤)
 ```
 
 ```toml
 # dev.policy.toml — dev ENABLES (overlay is trusted, so loosening is allowed)
 policy_version = 1
 default_scope = "all"                                                 # scopeless rules inherit ⊤ (A3)
-[[grant]]  key = "core.raw_sql"              value = true             # ENABLE raw SQL
-[[grant]]  key = "pg.extension"  scope="all" value = true             # ENABLE extensions
+[[grant]]  key = "sql.raw"              value = true             # ENABLE raw SQL
+[[grant]]  key = "code.extension"  scope="all" value = true             # ENABLE extensions
 ```
 
 ```toml
 # prod.policy.toml — prod TIGHTENS a scalar + ADDS an obligation
 policy_version = 1
 default_scope = "all"                                                 # scopeless rules inherit ⊤ (A3)
-[[grant]]  key = "op.statement_timeout_ms"   value = 10000            # tighten 30s → 10s
-[[require]] key = "sec.require_approval"      value = "always"        # obligation: always approve (Require/DeclaredOnly, M-2)
+[[grant]]  key = "runtime.statement_timeout_ms"   value = 10000            # tighten 30s → 10s
+[[require]] key = "safety.require_approval"      value = "always"        # obligation: always approve (Require/DeclaredOnly, M-2)
 ```
 
 **`overlay(base, dev)` result** — last-wins on the scalars `dev` sets, `base`
 pass-through otherwise:
 
 ```
-core.raw_sql             = true      # dev wins (base false → dev true; loosened, legal — trusted)
-pg.extension @all        = true      # dev wins (ENABLED)
-op.statement_timeout_ms  = 30000     # base pass-through (dev is silent)
+sql.raw             = true      # dev wins (base false → dev true; loosened, legal — trusted)
+code.extension @all        = true      # dev wins (ENABLED)
+runtime.statement_timeout_ms  = 30000     # base pass-through (dev is silent)
 ```
 
 **`overlay(base, prod)` result** — last-wins tightening + obligation accumulation:
 
 ```
-core.raw_sql             = false     # base pass-through (prod silent)
-pg.extension @all        = false     # base pass-through (prod silent)
-op.statement_timeout_ms  = 10000     # prod wins (30s → 10s; tightened)
-require sec.require_approval = always # obligation ADDED (require rules accumulate/union)
+sql.raw             = false     # base pass-through (prod silent)
+code.extension @all        = false     # base pass-through (prod silent)
+runtime.statement_timeout_ms  = 10000     # prod wins (30s → 10s; tightened)
+require safety.require_approval = always # obligation ADDED (require rules accumulate/union)
 ```
 
 (If `base` and `env` each carried `inject`/`validate` rules, those **accumulate** — the
@@ -2070,7 +2084,7 @@ trust *gradient* — host ⊒ org ⊒ project — inserts `restrict` before fina
 `admit(finalize_ceiling(restrict(host_env, org_env))?, draft)`.)
 
 **The security argument, stated explicitly.** `overlay` may **enable** `raw_sql` and
-`pg.extension` in `dev` *because it is trusted* — the operator authors both `base` and
+`code.extension` in `dev` *because it is trusted* — the operator authors both `base` and
 `dev`, so there is no adversary on either input and loosening is the operator's own
 choice. The **untrusted creator is still bounded by `admit`**: no matter how the
 operator assembles the ceiling (which fragments they overlay, whether they enable or
@@ -2111,40 +2125,43 @@ sets *where that boundary sits*. The two phases are cleanly separated: trusted a
   `EffectivePolicy` only through the decision-query API (II.1): it parses an op into the
   `(key, object)` pairs it references and calls `grants(key, object)` /
   `obligations(object)` / `validates_for(object)` — it holds no `Scope` and runs no
-  `⊑`/`⊓` itself. The deny-list belt-skip is an ordinary Grant knob
-  `core.skip_static_guard` (default false, `Enforced`). Today's
-  `GuardConfig::confined/platform/trusted` constructors and the dialect fail-close
-  (`guard/mod.rs:123-215,253-311`) reduce to one constructor
-  `GuardConfig::from_policy(&EffectivePolicy, dialect)`; the SQLite/MySQL rule
+  `⊑`/`⊓` itself. The deny-list belt-skip is NOT a composable knob — it is the
+  root/host-set `GuardMode { Enforced | Off }` on the guard config (`Off` is the Trusted
+  dbmate-like posture), quarantined out of the registry so it can be neither granted,
+  inherited, nor drafted. The raw-island role-needle relaxation is likewise the guard's
+  INTERNAL vendor-lower rule (`GuardMode::Enforced` + `access.role`), not an
+  operator-authorable grant. Today's `GuardConfig::confined/platform/trusted`
+  constructors and the dialect fail-close reduce to
+  `GuardConfig::from_policy_with_mode(&EffectivePolicy, dialect, GuardMode)`; the SQLite/MySQL rule
   "descriptor-diff only, raw SQL refused" keys off `dialect` + the raw-SQL grant
   *evaluated at the op's object scope via the PDP*, not off a preset name.
   - **Raw SQL is checked against ALL referenced objects AND routed through the
-    structured gate (II.2.5).** A `core.raw_sql` op's object set is *every*
+    structured gate (II.2.5).** A `sql.raw` op's object set is *every*
     table/view/schema the parsed statement names; the guard denies unless
-    `grants("core.raw_sql", o)` is loose enough at **every** such `o`. So "`core.raw_sql`
+    `grants("sql.raw", o)` is loose enough at **every** such `o`. So "`sql.raw`
     only in `staging`" grants a statement confined to `staging.*` and denies one that
     also touches `app_main.*` — **statement-level referenced-object containment**, not a
     single-object check (not *absolute* containment — the DB-role least-privilege floor,
     II.10.5, backstops what statement-level attribution cannot see). Beyond the
     referenced-object check, the guard **classifies** the raw statement (II.2.5) and
     layers the matching structured gate on top: a raw create/CTAS/`SELECT INTO`/`LIKE`
-    must also pass `core.create_table` and is DENIED wherever any inject rule covers the
+    must also pass `schema.create_table` and is DENIED wherever any inject rule covers the
     target (injection can't rewrite raw text); a raw `CREATE SCHEMA` must pass
-    `core.create_schema`; a raw rename/`SET SCHEMA` must pass `core.rename_into` and is
+    `schema.create_schema`; a raw rename/`SET SCHEMA` must pass `schema.rename` and is
     denied when it moves a table into an inject scope; a raw alter of an injected shape
     element is subject to injected-shape immutability; and `CREATE FUNCTION`/`TRIGGER`/
     `DO`, unqualified names, and `SET search_path` are DENIED under any non-⊤
-    `core.raw_sql` grant. An unparseable/unattributable statement (incl. an unqualified
+    `sql.raw` grant. An unparseable/unattributable statement (incl. an unqualified
     name under a scoped grant) matches only a ⊤-scoped raw-SQL grant, else deny.
   - **Namespace ops are guarded too (II.2.6).** `createTable`/`createSchema` check
-    `core.create_table`/`core.create_schema` at the target; a `renameTable`/`setSchema`
-    across a scope boundary checks `core.rename_into` at the target *and* re-runs inject
+    `schema.create_table`/`schema.create_schema` at the target; a `renameTable`/`setSchema`
+    across a scope boundary checks `schema.rename` at the target *and* re-runs inject
     applicability + covering validates on the post-move object; an `ALTER/DROP/RENAME`
     of an injected shape element — column, pinned PK, or index, decided by
-    `is_injected_shape` (II.2.6b) — checks `core.alter_injected_column`. These are
+    `is_injected_shape` (II.2.6b) — checks `schema.alter_injected`. These are
     ordinary Grant-knob decisions through the same decision-query API.
 
-  Scoped grants thus make "`core.raw_sql` only in schema `staging`" a first-class guard
+  Scoped grants thus make "`sql.raw` only in schema `staging`" a first-class guard
   decision. The dbmate posture (G4) is now just the CLI's `trusted` document — reachable
   in production, still impossible to reach *accidentally* because the host must put it in
   its catalog and compose it under its root ceiling.
@@ -2186,7 +2203,7 @@ sets *where that boundary sits*. The two phases are cleanly separated: trusted a
   authority flows only through injected documents, and `admit` makes
   escalation a type-system impossibility rather than a code-review promise. The root
   ceiling is also where an operator marks an `inject` rule `mandatory = true` and pairs
-  it with a bounded `core.create_table` grant + a `table_name_forbidden` predicate
+  it with a bounded `schema.create_table` grant + a `table_name_forbidden` predicate
   (II.2.6) — the three pieces that make an injection un-evadeable rather than merely
   present.
 - **Operational ceilings stop being constants (G5).** The engine's *hard* invariants
@@ -2206,7 +2223,7 @@ scatter, E4):
   `index_creation=require_concurrent`, `table_rewrite≠allow`) **cannot be set to a
   non-default value in any document composed toward an enforced path** — the same
   fail-closed guarantee as today's `UnsupportedProfileKnob`, but visible in the
-  registry, in generated docs, and in error messages ("`sec.no_hard_delete` is
+  registry, in generated docs, and in error messages ("`safety.no_hard_delete` is
   declared-only in this engine version; it is enforced by a server, not the engine").
   When the engine later grows the enforcement, the def flips to `Enforced` — a
   one-line, self-documenting change.
@@ -2219,14 +2236,14 @@ scatter, E4):
 ## II.7 Cleanups the model forces
 
 - **`DestructiveOps` splits** (E3): the ordered enforcement knob
-  `sec.destructive_ops ∈ {forbid < warn < allow}` (Grant, OrderedEnum, Enforced). The
-  approval workflow is **no longer a non-knob** [M-2]: `sec.require_approval` is now a
+  `safety.destructive_ops ∈ {forbid < warn < allow}` (Grant, OrderedEnum, Enforced). The
+  approval workflow is **no longer a non-knob** [M-2]: `safety.require_approval` is now a
   real, registered policy knob (`never ⊑ on_destructive ⊑ always`, OrderedEnum, **`Require`
   polarity** — composes UP, un-lowerable — **`DeclaredOnly`** enforcement, default `never`;
   registered as a builtin, resolved per-object, and read by the HOST via the sealed
   decision query, not gated by the engine's own guard/apply). It appears in the II.2.1
   builtin registry list. The old guard `RequireApproval → Forbid` silent coercion
-  (`guard/mod.rs:239-244`) is deleted — `sec.destructive_ops` and `sec.require_approval`
+  (`guard/mod.rs:239-244`) is deleted — `safety.destructive_ops` and `safety.require_approval`
   are now two separate, independently-authorable knobs, so the coercion is unrepresentable.
 - **`extends` gets safe semantics or dies** (E5, H-1). It resolves in the *document loader*
   against the injected `ProfileCatalog`, via the trusted cascade **`overlay`** —
@@ -2268,9 +2285,9 @@ scatter, E4):
      the seal binds the layer boundaries: a re-flatten OR a reorder tamper fails the MAC;
   2. a **registry digest** — the canonical `PolicyRegistry::digest()` (II.2.1) over the
      **full canonical `KnobDef` encoding** of every knob, i.e.
-     `(key, kind, polarity, default, enforcement, object_model, requires_db_privilege)`.
-     Every enforcement-affecting field is covered, `requires_db_privilege` included
-     (II.10.5) — a registry that flips whether a `pg.*` knob presupposes a DB privilege
+     `(key, kind, polarity, default, enforcement, object_model, requires_db_privilege, inherit)`.
+     Every enforcement-affecting field is covered, `requires_db_privilege` and `inherit`
+     included (II.10.5) — a registry that flips whether a knob presupposes a DB privilege
      enforces differently. A `key` string is meaningless without the whole def it resolves
      to; binding the digest stops a seal minted under registry A being replayed on an
      engine built with registry B where the *same key* means something different (a
@@ -2301,8 +2318,8 @@ scatter, E4):
 | Was (engine-embedded) | Becomes (zeroship-supplied) |
 |---|---|
 | `policy-profiles/confined.toml` / `platform.toml` (`profile.rs:34-39`) | documents in zeroship's repo, injected via `ProfileCatalog` |
-| 7-column `system_shape` in Rust/TOML/tests (`profile.rs:192-248`) | one **`inject` rule** in zeroship's **`RootCeiling` document** (NOT a catalog entry — `mandatory = true` is `RootCeiling`-only, II.4.2/M-5), scoped `Of{ include = ["*"], exclude = [` system/journal tables `] }` (all app tables minus bookkeeping); carries `mandatory = true` (drives the `creatable ⊑ inject` lint, II.2.6a) — plus mandatory-by-union-up droppability; anchored by a `core.create_table` grant `⊑` the inject scope (II.2.6) and a `table_name_forbidden` predicate over the excluded names |
-| RLS obligation / hard-delete / sensitive columns | scoped **`require`**/**`validate`** rules (e.g. `require sec.require_rls scope tenant_*`, `validate has_primary_key scope app_*`) in zeroship's catalog |
+| 7-column `system_shape` in Rust/TOML/tests (`profile.rs:192-248`) | one **`inject` rule** in zeroship's **`RootCeiling` document** (NOT a catalog entry — `mandatory = true` is `RootCeiling`-only, II.4.2/M-5), scoped `Of{ include = ["*"], exclude = [` system/journal tables `] }` (all app tables minus bookkeeping); carries `mandatory = true` (drives the `creatable ⊑ inject` lint, II.2.6a) — plus mandatory-by-union-up droppability; anchored by a `schema.create_table` grant `⊑` the inject scope (II.2.6) and a `table_name_forbidden` predicate over the excluded names |
+| RLS obligation / hard-delete / sensitive columns | scoped **`require`**/**`validate`** rules (e.g. `require safety.require_rls scope tenant_*`, `validate has_primary_key scope app_*`) in zeroship's catalog |
 | `PLATFORM_*_CEILING_MS` constants (`profile.rs:30-31`) | values in zeroship's root-ceiling document |
 | "no permissive preset" (`profile.rs:115-124`) | zeroship's catalog simply doesn't contain one |
 | `TrustProfile::Confined/Platform` wiring | two catalog entries; guard reads the composed policy |
@@ -2359,9 +2376,9 @@ Pre-launch, no external engine users are known; favor the right shape.
       **union** of both layers' rules (accumulate), NOT last-wins, in **base-then-over order**
       [M-3] — assert both a base-only and an over-only inject/validate rule survive the
       overlay, and that the effective inject order is base's rules before over's. Also assert
-      the II.5.0 worked results: `overlay(base,dev)` enables `raw_sql`+`pg.extension`,
+      the II.5.0 worked results: `overlay(base,dev)` enables `raw_sql`+`code.extension`,
       `overlay(base,prod)` tightens the timeout `30000→10000` and accumulates the
-      `require sec.require_approval` obligation;
+      `require safety.require_approval` obligation;
     - **`finalize_ceiling(assembled)` — the fallible ceiling gate (H-3).** Assert a
       collision-free assembled ceiling passes and is IDENTITY on the rule set; assert each
       conflict class REJECTS: overlapping-scope inject/inject same-column
@@ -2390,7 +2407,7 @@ Pre-launch, no external engine users are known; favor the right shape.
       `raw_sql = false` over a ceiling `raw_sql = true@app_*` — assert the effective value at
       an `app_*` object is `false` (the draft WINS by presence, `coveredScope`), NOT the
       inherited `true`; and assert this object is NOT escalation-checked (it is in
-      `coveredScope` ∖ `grantedScope`). Same for a Global narrow (`pg.extension = false` over
+      `coveredScope` ∖ `grantedScope`). Same for a Global narrow (`code.extension = false` over
       inherited `true`);
     - **`admit` grants are CEILING-INHERITED + LAYERED (H-4):** effective grants =
       **inherit-then-narrow** over a `[draft] over [ceiling]` layer stack — where the draft is
@@ -2419,7 +2436,7 @@ Pre-launch, no external engine users are known; favor the right shape.
     scope-subset transitivity; inject union-up ⇒ ceiling-injection-un-droppable; validate
     accumulation; valued-Require per-object union;
   - **object_model:** Global knob refuses non-⊤ authored scope; Global knob is EXEMPT
-    from the `default_scope` meet — `default_scope = app_*` + `pg.extension scope = all`
+    from the `default_scope` meet — `default_scope = app_*` + `code.extension scope = all`
     LOADS (effective scope `All`, not `app_*`); PerSchema refuses table scope;
   - **scope difference `∖` [C1, oracle-verified]:** `A ∖ B` OVER-approximates (never
     under-approximates) the true difference — `Objects(A∖B) ⊇ Objects(A) \ Objects(B)`,
@@ -2433,19 +2450,19 @@ Pre-launch, no external engine users are known; favor the right shape.
   - **namespace anchoring:** `CreatableEscapesMandatoryInject` fires when
     `creatable ⋢ inject`; rename-across-boundary re-evaluation denies the TOCTOU;
   - **raw-SQL structured gate (Defect 1/2/4):** raw `CREATE TABLE app_x.t` under
-    `core.raw_sql@app_*` DENIED when an inject rule covers `app_x.t`
+    `sql.raw@app_*` DENIED when an inject rule covers `app_x.t`
     (`RawCreateInInjectScope`) — for CTAS / `SELECT INTO` / `LIKE` / `PARTITION OF`
-    spellings; raw create outside any inject scope still requires `core.create_table`;
+    spellings; raw create outside any inject scope still requires `schema.create_table`;
     raw rename INTO an inject scope DENIED (`RawRenameIntoInjectScope`); `CREATE FUNCTION`/
     `CREATE TRIGGER`/`DO` DENIED under scoped raw_sql (`OpaqueBodyUnderScopedRawSql`);
     unqualified name DENIED under scoped raw_sql (`UnqualifiedNameUnderScopedRawSql`);
     `SET search_path` REFUSED under scoped raw_sql (`SearchPathUnderScopedRawSql`); all
-    admitted under a ⊤ `core.raw_sql` grant;
+    admitted under a ⊤ `sql.raw` grant;
   - **injected-shape immutability (Defect 7):** `is_injected_shape` is name-match-at-op-
     time — a table renamed INTO an inject scope carrying a matching column/index/PK is
     immutable; `DROP CONSTRAINT <pk>` on a pinned-PK table → `InjectedPrimaryKeyImmutable`;
     `DROP INDEX` on an injected index → `InjectedIndexImmutable`; each waved only by
-    `core.alter_injected_column`;
+    `schema.alter_injected`;
   - **compose-time collisions:** draft-vs-ceiling inject collision → `admit`
     error; draft `ForbiddenColumns` vs ceiling `Inject` → error; ceiling-vs-ceiling →
     **`finalize_ceiling` error** (H-3: `overlay`/`restrict` stay TOTAL — the conflict is
@@ -2472,12 +2489,12 @@ Pre-launch, no external engine users are known; favor the right shape.
   `system_shape` from policy; add the optional `TableShapeTransform` escape hatch. (3)
   Guard/executor as a thin PEP over the decision-query API (raw-SQL all-referenced-objects
   attribution + raw-statement classification into the structured gate — raw create/rename
-  routed through `core.create_table`/`core.rename_into` + inject-scope denial, opaque-body/
+  routed through `schema.create_table`/`schema.rename` + inject-scope denial, opaque-body/
   unqualified-name/`search_path` denial under scoped raw_sql; namespace/rename ops;
   injected-shape immutability via `is_injected_shape`); delete
   `TrustProfile`/token. (4) Delete embedded presets; add `RootCeiling`/`ProfileCatalog`/
   optional transform to `EngineOptions` + napi surface. (5) zeroship-side: profile
-  documents, the shape as an `inject` rule + `core.create_table` anchor +
+  documents, the shape as an `inject` rule + `schema.create_table` anchor +
   `table_name_forbidden` predicate, RLS/etc as scoped require/validate rules, ceiling
   document, conformance tests.
 
@@ -2530,11 +2547,11 @@ Pre-launch, no external engine users are known; favor the right shape.
    untrusted creator's `effective ⊑ overlay(base,env)`, so trusted assembly never weakens
    the untrusted boundary — it only sets where the boundary sits.
 2b. **Namespace can't be escaped (II.2.6):** objects come into existence only where
-   `core.create_table`/`core.create_schema` grant; a mandatory-inject scope forces
+   `schema.create_table`/`schema.create_schema` grant; a mandatory-inject scope forces
    `creatable ⊑ inject` at compose time, so a tenant cannot create outside the injection;
-   renames across a scope boundary need `core.rename_into` and re-run inject/validate on
+   renames across a scope boundary need `schema.rename` and re-run inject/validate on
    the moved object (no TOCTOU); the injected **shape** — columns, the pinned PK, and
-   injected indexes — is immutable without an explicit `core.alter_injected_column` grant,
+   injected indexes — is immutable without an explicit `schema.alter_injected` grant,
    decided by the `is_injected_shape` PDP query at op time (name-match, not provenance —
    a table renamed into an inject scope carrying a matching column/index/PK is treated as
    injected, II.2.6b); a `table_name_forbidden` predicate closes the published-exclude
@@ -2542,12 +2559,12 @@ Pre-launch, no external engine users are known; favor the right shape.
 2c. **Raw SQL can't dodge the structured gate (II.2.5):** injection is an IR transform
    and cannot rewrite raw SQL text, so a raw statement the engine cannot structurally
    attribute is denied, never waved through. A raw `CREATE TABLE` (any form — CTAS,
-   `SELECT INTO`, `LIKE`, `PARTITION OF`) must additionally pass `core.create_table` and
+   `SELECT INTO`, `LIKE`, `PARTITION OF`) must additionally pass `schema.create_table` and
    is DENIED wherever ANY inject rule covers the target; a raw rename **into** an inject
    scope is denied; a raw alter of an injected column/PK/index is subject to injected-
    shape immutability; `CREATE FUNCTION`/`CREATE TRIGGER`/`DO` and other opaque-body
    constructs, unqualified names, and `SET search_path` are all DENIED under any non-⊤
-   `core.raw_sql` grant. The structured DSL path is the only way to create an injected
+   `sql.raw` grant. The structured DSL path is the only way to create an injected
    table. The residual (function bodies a ⊤-grant admits) is backstopped by DB-role
    least-privilege (II.10.5), not by static analysis.
 3. **No unenforced authority:** `DeclaredOnly` knobs cannot reach an enforced path at
@@ -2564,8 +2581,9 @@ Pre-launch, no external engine users are known; favor the right shape.
    meaning cannot drift between mint and verify. The `TableShapeTransform.digest()` is
    host-trusted, not a control against a hostile transform.
 5. **Least-privilege DB backing:** the `migrator_unbacked_capability` reconciliation
-   (`profile.rs:1353-1367`) survives as a registry-driven check: each `pg.*` Grant
-   knob's def carries `requires_db_privilege: bool`, and the executor refuses a policy
+   (`profile.rs:1353-1367`) survives as a registry-driven check: each privileged
+   (`access.*`/`code.*`) Grant knob's def carries `requires_db_privilege: bool`, and
+   the executor refuses a policy
    granting such a knob while `SET ROLE`-ing into a floor role — same guarantee, no
    if-chain.
 
