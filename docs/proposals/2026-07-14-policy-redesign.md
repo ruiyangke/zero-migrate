@@ -344,9 +344,23 @@ zero-migrate-policy       (new leaf; no SQL deps) — the Policy Decision Point 
   │              + the rule evaluator (inject-then-validate over createTable/alter/rename IR)
   ├─ document:   PolicyDoc (strict TOML/JSON, registry-validated, versioned,
   │              default_scope + per-rule scope)
-  ├─ algebra:    compose_strict / compose_clamp, EffectivePolicy (unforgeable)
+  ├─ algebra:    overlay (trusted config cascade) + restrict (trusted tightening
+  │              gradient), the two TOTAL trusted combinators, in this module;
+  │              finalize_ceiling (the fallible trusted-side conflict gate);
+  │              TrustedDoc (provenance newtype — constructible ONLY from host-injected
+  │              sources: RootCeiling + catalog entries registered at Engine::builder();
+  │              overlay/restrict accept only TrustedDoc — H-1);
+  │              Ceiling / EffectivePolicy (unforgeable, LAYERED — H-4)
+  ├─ boundary:   admit(ceiling, draft) — the SOLE untrusted trust-boundary crossing (the
+  │              only escalation-bearing operator; returns Result, rejects escalation).
+  │              `ceiling` is a finalized `Ceiling`/`EffectivePolicy` (TrustedDoc-descended);
+  │              `draft` is an untrusted `PolicyDoc`. Deliberately its OWN module, apart
+  │              from the trusted combinators, so the one place a security check lives is
+  │              unmissable.
   ├─ decide:     the DECISION-QUERY API (pure PDP; the only thing the guard calls):
-  │                 grants(key, object)      -> Option<Value>   (loosest covering grant, II.3.2)
+  │                 grants(key, object)      -> Option<Value>   (loosest covering grant
+  │                                              WITHIN the highest layer that covers the
+  │                                              object, else fall through; II.3.2, H-4)
   │                 obligations(object)      -> Vec<Require>     (all covering requires)
   │                 injects_for(object)      -> Vec<InjectSpec>  (all covering inject rules)
   │                 validates_for(object)    -> Vec<ValidatePredicate>
@@ -445,10 +459,13 @@ pub enum Polarity {
 
 - **The engine registers its builtin knobs** (the current eleven vendor capabilities
   as `pg.*`/`core.*` grant keys, the two timeouts, `index_creation`, `table_rewrite`,
-  `require_rls`, `no_hard_delete`, `sensitive_columns`, `destructive_ops` — the last
-  split per II.7). One table, one place; the guard, the seal validator, the composer,
-  and the diagnostics all iterate the same registry. E1's five parallel definitions
-  and E2's dead table collapse into this.
+  `require_rls`, `no_hard_delete`, `sensitive_columns`, `destructive_ops`, and
+  **`sec.require_approval`** — an OrderedEnum obligation `never ⊑ on_destructive ⊑ always`,
+  `Require` polarity, `DeclaredOnly` enforcement, default `never` (M-2; the workflow-flag
+  that II.7 formerly said was "not a policy knob at all" is now a first-class registered
+  knob, host-read via the sealed decision query)). One table, one place; the guard, the
+  seal validator, the composer, and the diagnostics all iterate the same registry. E1's
+  five parallel definitions and E2's dead table collapse into this.
 - **Consumers register extensions** at engine construction:
   `PolicyRegistry::with(&[KnobDef { key: "acme.hypertable", … }])`. Ops or
   consumer-side validators may require consumer keys; the guard's grant check is
@@ -513,7 +530,7 @@ nothing, inject nothing, validate nothing** (G1 stays dead — see II.4).
 The single most dangerous bug in a scope model is conflating **the empty set** with
 **the universe**. The earlier sketch made empty-`include` mean "all objects" (a ⊤),
 which collides with the natural representation of an empty scope (a ⊥). That collision
-turns `⊓` of two *disjoint* scopes into the universe — the clamp of `raw_sql@staging`
+turns `⊓` of two *disjoint* scopes into the universe — the `restrict` of `raw_sql@staging`
 and `raw_sql@analytics` becomes `raw_sql` **everywhere**, a straight privilege
 escalation. So `Scope` gets an explicit three-case representation in which ⊥ and ⊤ are
 distinguished values and `Of { include }` is **never empty**:
@@ -1029,7 +1046,7 @@ S₁ ⊔ S₂   = the scope denoting Objects(S₁) ∪ Objects(S₂)   (least up
 Everything below is *decidable structurally* because patterns are globs over one or two
 name segments, not regex. The three primitives — pattern∩pattern, `⊓`, `⊑` — are
 specified precisely enough to implement and property-test. **`⊓` must be EXACT** (it
-feeds clamp, hence the effective policy); **`⊑` for `compose_strict` may
+feeds `restrict`, hence the effective policy); **`⊑` for `admit` may
 conservative-reject** (a false "not-contained" only ever *tightens*).
 
 **Segment normalization / cross-arity.** Before any pair operation, normalize every
@@ -1140,16 +1157,31 @@ the true intersection (including the corner case) with no over- or under-approxi
 `Of{ include = iA ∪ iB, exclude = eA ∩ eB }` **followed by a repair step**: an object
 excluded by only one side but included by the other must survive, so the naive
 `exclude = eA ∩ eB` over-includes; the exact join subtracts from `exclude` any pattern
-region now covered by the other side's include. **Scope-`⊔` has exactly ONE consumer:
-the `grantedScope(P,k) = ⋃ Objects(r.effective_scope)` aggregation** (II.3.2) — folding
-one policy's several grant rules on a key into the object set where that key is
-non-default. There the conservative direction is "cover at least the union", so we accept
-a **⊒-conservative** `⊔` (may denote a *superset*) for that aggregation. The
-`compose_clamp` Require/Inject/Validate paths do **not** use scope-`⊔` — they union the
-*rule sets* (each rule kept at its own `effective_scope`), never joining two scopes into
-one — and the strict-path grant check does **not** use `⊔` at all (it uses `⊓` to
-partition and `∖` to find the uncovered region, II.3.2). So join's conservatism touches
-only the `grantedScope` domain estimate and can never widen an enforced grant's *value*.
+region now covered by the other side's include.
+
+**Scope-`⊔` is `⊒`-conservative (may denote a *superset*), and MUST NOT be used on any
+security-enforced path.** Its only sanctioned consumers are **domain ESTIMATES** where
+"cover at least the union" is the safe direction — never a coverage claim the escalation
+check subtracts against:
+
+- `coveredScope(P,k)` / `grantedScope(P,k) = ⋃ Objects(r.effective_scope)` (II.3.2) —
+  folding one policy's several grant rules on a key into a single object-set *estimate*.
+  Over-approximating this **widens the region the escalation check must clear**, which is
+  the fail-closed direction.
+
+**The `admit` escalation check MUST NOT `⊔`-materialize the ceiling side (C-1).** Because
+`⊔` **drops excludes** (`exclude = eA ∩ eB` discards an exclude present on only one side),
+a `⊔`-folded ceiling coverage OVER-states what the ceiling grants; used as the subtrahend
+of `∖` it would UNDER-approximate the uncovered region and let `admit` **accept an
+escalation** (the C-1 defect). So the `admit` grant path computes the uncovered region by
+**iterated per-ceiling-rule `∖` subtraction** (II.3.2), where each ceiling rule's own
+`effective_scope` (excludes intact) is subtracted individually — `⊔` never touches the
+ceiling coverage. The `restrict`/`overlay` Require/Inject/Validate paths likewise do **not**
+`⊔` two scopes into one — they union the *rule sets*, each rule kept at its own
+`effective_scope`. (The earlier claim that "join's conservatism … can never widen an
+enforced grant's value" was FALSE and is deleted: a `⊔`-folded ceiling in the antitone
+position of `∖` widens exactly the region the check treats as *already covered*, which is
+an escalation. The fix is structural — the enforced path never calls `⊔` on the ceiling.)
 
 **Scope subset `⊑` (SOUND, including excludes).** `D ⊑ C` must hold iff *every* object
 `D` denotes is one `C` denotes. Excludes make this non-trivial: `D`'s objects are
@@ -1162,7 +1194,7 @@ D ⊑ C   iff   Objects(D.include \ D.exclude) ⊆ Objects(C.include)
 ```
 
 with the base cases `Nothing ⊑ anything`, `S ⊑ All`, and `All ⊑ C` iff `C ≡ All`.
-Decision procedure (structural, sound; may conservative-reject for `compose_strict`):
+Decision procedure (structural, sound; may conservative-reject for `admit`):
 
 1. Compute `Dobj = D.include \ D.exclude` as a scope (via `⊓` with the complement — in
    practice: for each `d ∈ D.include`, subtract `D.exclude`, keeping the pattern minus
@@ -1173,7 +1205,7 @@ Decision procedure (structural, sound; may conservative-reject for `compose_stri
    (`c = *` covers anything; `c = pre_*` covers `d` iff `d`'s matches all start with
    `pre`; etc.). A `d` not covered by any single `c` ⇒ **reject** (conservative: we do
    not attempt to prove coverage by a *union* of several `c` patterns — that is the
-   sanctioned conservative-reject for the strict path).
+   sanctioned conservative-reject for the `admit` path).
 3. **Disjointness from `C.exclude`:** `Dobj ∩ Objects(C.exclude)` must be empty, i.e.
    for every `d`-region and every `e ∈ C.exclude`, `d ∩ e = ∅` OR the overlap is
    itself already carved out by `D.exclude`. If any `C.exclude` pattern clips a
@@ -1183,7 +1215,7 @@ Decision procedure (structural, sound; may conservative-reject for `compose_stri
 `C = Of{ include=[app_*], exclude=[app_tmp_*] }`. Step 2 passes (`app_* ⊆ app_*`). Step
 3 fails: `C.exclude = app_tmp_*` overlaps `D`'s region `app_*`, and `D` does not carve
 `app_tmp_*` out, so `Dobj ∩ Objects(C.exclude) ≠ ∅` ⇒ **`D ⋢ C`**. Correct: `C` forbids
-`app_tmp_*` and `D` would grant it, so `D` is *not* below `C`, and `compose_strict`
+`app_tmp_*` and `D` would grant it, so `D` is *not* below `C`, and `admit`
 rejects the escalation. (A naive "include ⊆ include" check would have wrongly accepted
 it — that is precisely the excludes-aware hole this closes.)
 
@@ -1200,7 +1232,7 @@ effort-but-fail-closed** operation, not an exact one:
 `A∖B = Of{A.include, A.exclude ∪ B.include}` was WRONG — it silently dropped
 `B.exclude` and UNDER-approximated the difference, which is the *escalation* direction.**
 `A∖B` under-approximated means a truly-non-empty uncovered region can compute empty, so
-the `compose_strict` uncovered-region check (II.3.2) would wrongly ACCEPT an escalation.
+the `admit` uncovered-region check (II.3.2) would wrongly ACCEPT an escalation.
 The settled counterexample `A = {app_*}` vs `B = {app_*, exclude app_tmp_*}` **must stay
 a reject**: `A ∖ B = Objects(app_tmp_*)` is non-empty (B excludes `app_tmp_*`, so those
 objects are in `A \ B`), and the old formula would have carved `app_tmp_*` out of A's
@@ -1254,108 +1286,442 @@ excludes; the `⊔` may over-approximate, which is the safe direction). The base
 > The two escalation cases the corrections above target — a `∖` under-approximation and
 > `a*a ∩seg a*a ∋ a` — are both asserted impossible by the oracle.
 
-### II.3.2 Two composition operators — pointwise over (key × object)
+### II.3.2 Three composition operators — pointwise over (key × object)
+
+There are **three** composition operators, and only ONE of them crosses a **trust
+boundary**. Keeping them distinct is the whole security architecture: an operator authors
+and combines *their own* policies with two **total, infallible, trusted** combinators
+(`overlay`, `restrict`); a separate trusted-side gate `finalize_ceiling` lints the assembled
+ceiling for *misconfiguration* (colliding injects/PKs — a loud operator error, NOT a trust
+crossing, H-3); and the *untrusted* creator draft is admitted through exactly **one
+escalation-bearing trust boundary** (`admit`). So "can reject" is true of both
+`finalize_ceiling` (trusted-side config lint) and `admit` (untrusted escalation check), but
+"crosses a trust boundary" is true of `admit` **alone** — the two properties are distinct
+and only `admit` carries both.
+
+| operator | relationship | semantics | inputs | crosses a trust boundary? | can reject? |
+|---|---|---|---|---|---|
+| `overlay(base, over)` | trusted config cascade (`base` + `env`) | **last-wins** (presence-based override) | `TrustedDoc × TrustedDoc` | no | **no — TOTAL** |
+| `restrict(a, b)` | trusted tightening gradient (host ⊒ org ⊒ project) | **meet** (⊓) | `TrustedDoc × TrustedDoc` | no | **no — TOTAL** |
+| `finalize_ceiling(assembled)` | trusted ceiling-conflict gate | conflict lint pass (identity on success) | assembled ceiling | no | **YES — but trusted-side (loud operator error, not a trust crossing)** |
+| `admit(ceiling, draft)` | untrusted draft vs. **finalized** ceiling | layered `[draft] over [ceiling]` + **ceiling-inherited**, presence-override grants | `Ceiling/EffectivePolicy × PolicyDoc` | **YES — the only trust crossing** | **YES** |
+
+Only `admit` carries **trust-boundary** security weight; `overlay`/`restrict` are the
+operator's own algebra over policies **they author** (both inputs `TrustedDoc`, H-1) — the
+operator is trusted with both inputs, so neither can escalate anything and both are TOTAL
+(never reject). Ceiling *misconfigurations* (colliding injects, PK conflicts) are not
+silently merged nor rejected inside the total combinators — they surface at the explicit
+`finalize_ceiling` gate (H-3), which every assembled ceiling passes before it may be
+`admit`'s ceiling; it is a **trusted-side loud error** (operator fixes their own config),
+not a trust crossing. `admit` is the sole place an *untrusted* input (the creator's
+`draft`) meets a *trusted* ceiling, so it is the sole place **escalation** is checked. It
+stands apart in its own module (II.1 `boundary`) precisely so this asymmetry is impossible
+to miss when reading or auditing.
+
+The three used together (II.5): `overlay` assembles an operator's *own* per-environment
+ceiling from co-authored profiles (`base + env`); `restrict` chains a *trust gradient*
+of operator-authored ceilings (host ⊒ org ⊒ project); `admit` bounds the *untrusted*
+creator against whatever ceiling those trusted steps produced.
+
+#### The value-lattice primitives (shared by all three)
 
 The grant check is **not** scope-containment-plus-a-scalar-value. A grant is a partial
 function `Object → Value`: at an object `o`, the value a policy grants for key `k` is
 the **loosest value any covering grant rule on `k` supplies at `o`** (there may be
 several grant rules on one key in one layer — the earlier "one scalar `C_k`"
 formulation could not express `timeout=60s@app_* + 600s@staging` and so missed the
-escalation it hides). Define, per policy `P`, key `k`, object `o`:
+escalation it hides).
+
+Two DISTINCT rule-significance notions are needed and must never be conflated (the H-2
+soundness split — collapsing them makes narrow-to-default impossible). Define, per
+policy `P`, key `k`, object `o`, **within one layer** (H-4: `value`/`grants`/`covers`
+are all layer-local; a layered `EffectivePolicy` queries the top covering layer, below):
 
 ```
 value(P, k, o) = ⨆_value { r.value : r ∈ P.grants(k), o ∈ Objects(r.effective_scope) }
                  (the LOOSEST — join over the knob's value order — of all covering
                   grant rules; the knob default (tightest) if no rule covers o)
+
+--- (a) the OVERRIDE / MASKING set — PRESENCE-based -----------------------------
+coveredScope(P, k) = ⋃ Objects(r.effective_scope)
+                       over ALL r ∈ P.grants(k)          // ANY value, incl. == default
+                     (the object set where P has ANY grant rule on k, regardless of its
+                      value — this is where P's value WINS over an inherited value, even
+                      when P narrows k DOWN TO its default. "P.covers(k, o)" ≝
+                      o ∈ coveredScope(P,k).)
+
+--- (b) the ESCALATION-CHECK domain — NON-DEFAULT ------------------------------
 grantedScope(P, k) = ⋃ Objects(r.effective_scope)
                        over r ∈ P.grants(k) WHERE r.value ≠ default
-                     (the ⊔ of the scopes of exactly the grant rules that raise the value
-                      above default; a rule whose value equals default contributes
-                      nothing, so grantedScope is precisely the object set where
-                      value(P,k,o) ≠ default — one definition, no ambiguity)
+                     (the object set where P RAISES k above default; precisely the object
+                      set where value(P,k,o) ≠ default. This — NOT coveredScope — is the
+                      domain the ⊑-ceiling escalation check ranges over: a rule that only
+                      restates the default cannot escalate, so it need not be checked.)
 ```
+
+`grantedScope(P,k) ⊆ coveredScope(P,k)` always (a non-default rule is a covering rule).
+They differ **exactly** on the objects where `P` explicitly *narrows `k` to its default*
+— e.g. a draft writing `raw_sql = false` on a ceiling that grants `raw_sql = true`:
+that object is in `coveredScope` (presence, so the draft's `false` WINS) but not in
+`grantedScope` (value == default, so it is exempt from the escalation check — narrowing
+never needs checking). This is what makes **narrow-to-default representable** (H-2): the
+old single-notion definition (`grantedScope` = "raises above default") classified
+`raw_sql = false` as *silent*, so the draft inherited the ceiling's `true` — the creator
+asked for LESS and got MORE. The presence/non-default split fixes it. It also makes a
+Global-knob narrowing (`pg.extension = false` over an inherited `true`) representable.
 
 For a Bool knob "loosest" = OR; StrSet = union; UintCeiling = max; OrderedEnum =
 rank-max. (Within one layer, more grant rules on a key can only *loosen* — a tenant
 authoring multiple grants on one key never tightens itself by accident; the ceiling
 check below is what bounds them.)
 
-- **`compose_strict(ceiling, draft) -> Result<EffectivePolicy, PolicyError>`** — the
-  ingress boundary (untrusted draft). Evaluated **pointwise per (key, object)**:
-  - **Grant rules — the ∀-object value check.** For each grant key `k`, the draft is
-    admissible iff **at every object `o` in the draft's granted scope for `k`, the
-    draft's value is `⊑` the ceiling's value there**:
-    ```
-    ∀ o ∈ grantedScope(draft, k):  value(draft, k, o)  ⊑_value  value(ceiling, k, o)
-    ```
-    `⊑_value` is the knob's polarity order (Bool implication, StrSet ⊆, Uint ≤, rank ≤).
-    This is stronger than the old scope-only `D_k ⊑ C_k` and catches the escalation it
-    missed: with ceiling `timeout=60s@app_* + 600s@staging` and draft `timeout=600s@app_*`,
-    the object `app_main.t` has `value(ceiling)=60s` (only the `app_*` ceiling rule
-    covers it) but `value(draft)=600s` — `600 ≤ 60` is false ⇒ **reject**. A scope-only
-    check (draft scope `app_* ⊑` ceiling union scope `app_*∪staging`) would have wrongly
-    passed it. Practically the check is decided *symbolically* over the pattern lattice,
-    not by enumerating objects: partition the draft's granted scope by which ceiling
-    rules cover each region (via `⊓`), and on each region compare the draft's loosest
-    value to the ceiling's loosest value over that region. The **uncovered region** — the
-    part of `grantedScope(draft, k)` the ceiling's grant rules for `k` do not cover — is
-    computed with the scope-difference primitive `grantedScope(draft,k) ∖
-    grantedScope(ceiling,k)` (II.3.1). There the ceiling's value is `default` (tightest),
-    so **any non-default draft value on a non-empty uncovered region ⇒ reject**; and if
-    `∖` returns "not cleanly representable" (`UncoveredRegionNotRepresentable`), the check
-    **fails closed and rejects** (the sanctioned conservative-deny — the engine never
-    treats an un-representable uncovered region as empty). The effective grant for `k` is
-    the draft's grant map (proven ⊑ the ceiling pointwise). Errors carry
-    `(knob_key, offending_object_region, draft_value, ceiling_value)`.
-  - **Require rules (incl. valued Require, A5).** effective = ceiling's require rules
-    **plus** the draft's, each at its own scope (union-up). A ceiling require can never
-    be removed or scope-narrowed by the draft; the draft may only *add*. For a **valued**
-    Require knob (e.g. `sec.sensitive_columns : StrSet`), the obligation at object `o` is
-    the **per-object union** of every covering require rule's value:
-    `obligation(k, o) = ⋃ { r.value : r covers o }` — obligations accumulate pointwise
-    exactly as grants join pointwise, so a ceiling's required sensitive-column set can
-    only grow, never shrink, under a draft.
-  - **Inject rules:** union-up, each at its own scope; a ceiling injection is
-    **mandatory and un-droppable** (II.4). Draft-vs-ceiling inject *collisions* are now
-    rejected at **compose time** (II.6/II.4.4), not deferred to resolve time.
-  - **Validate rules:** union-up, accumulate; the effective predicate set is every
-    covering ceiling predicate plus every covering draft predicate. A draft can add but
-    never drop a ceiling predicate. A draft `Validate` that contradicts a ceiling
-    `Inject` (e.g. `ForbiddenColumns` naming an injected column on overlapping scope) is
-    rejected at compose time (II.6).
-  - **Pinned knobs** (now only the opaque `TableShapeTransform` digest, II.4): error
-    unless `draft == ceiling` or the ceiling marks it delegable.
-- **`compose_clamp(outer, inner) -> Policy`** — a true meet, total and associative, for
-  chaining *trusted* ceilings (host → org → project). **Pointwise**, per key:
-  - **Grant:** the clamped grant is the pointwise meet
-    `value(clamped, k, o) = value(outer, k, o) ⊓_value value(inner, k, o)` (Bool AND,
-    StrSet ∩, Uint min, rank-min) — and its domain is the scope meet
-    `grantedScope(outer,k) ⊓ grantedScope(inner,k)`. Represented as the finite set of
-    grant rules obtained by intersecting each outer rule's scope with each inner rule's
-    scope (via `⊓`) and meeting their values; empty-scope products drop out. This is
-    exact because `⊓` is exact — no `⊔`-scalar approximation anywhere on the grant path.
-  - **Require / Inject / Validate:** rule sets join upward (union, each rule at its own
-    scope); valued Requires accumulate per-object as above.
+> **`overlay` already uses presence-based override** (its scalar last-wins is "where
+> `over` has a covering rule, `over` wins" = `over.covers(k,o)`, II.3.2 overlay). `admit`
+> now uses the SAME `covers`-based override for the inherit-vs-override decision, so the
+> two operators' rule-significance rule is **explicit and consistent**: *presence* decides
+> who wins the value; *non-default* decides who is escalation-checked.
 
-  Chains of ceilings compose with `clamp`; the final untrusted draft lands through
-  `strict`. E3's "one name, two semantics" stays honest, and the equivalence
-  `strict(clamp(a,b), draft) ≡` "check `draft` against the tightest chain" holds
-  **pointwise over (key, object)** — because both operators are defined pointwise and
-  `⊓_value`/`⊑_value` obey the lattice laws, the clamped ceiling's value at every object
-  is the meet of the chain's values there, so a draft grant admissible against the clamp
-  is exactly one admissible against every link.
+#### `overlay(base: TrustedDoc, over: TrustedDoc) -> Ceiling` — trusted config cascade (last-wins), TOTAL
 
-Both operators are **one generic function over the registry + the rule list**, driven
-by each knob's declared polarity/value-order — no per-facet hand-written meet remains to
-drift (E2, E3). The scope-lattice `⊓`/`⊑` and the per-knob value `⊓_value`/`⊑_value`
-are the only primitives; every polarity reuses them.
+`overlay` assembles ONE operator's own ceiling from co-authored profile fragments
+(`base + env`, II.5). It is **trusted-side only, enforced by the type system (H-1)** —
+both inputs are `TrustedDoc`, a newtype constructible ONLY from host-injected sources
+(the `RootCeiling` and catalog entries registered at `Engine::builder()`), so an untrusted
+creator `PolicyDoc` **cannot be passed to `overlay`** (it is not a `TrustedDoc` and there
+is no conversion). This closes the II.7 `extends`-laundering hole (H-1): a creator draft
+can never reach `overlay` as an operand. `overlay` never rejects and never crosses a trust
+boundary. **It is NEVER applied to an
+untrusted creator draft.** Its semantics are **last-wins**: for every key `over` sets,
+`over` wins; keys only in `base` pass through unchanged. Because `over` can set a knob
+to *any* legal value, overlay can **ENABLE or DISABLE** — loosen *or* tighten — which is
+exactly what a config cascade needs (dev enables `raw_sql`; prod tightens a timeout).
+There is **no `⊑` constraint** on overlay: it is not a security combinator, it is the
+operator composing their own layered configuration.
 
-**`EffectivePolicy` is unforgeable:** private fields, no `Deserialize`, constructible
-only by `compose_strict`/`compose_clamp` from a `RootCeiling` (II.5). It carries the
-resolved, scoped rule set. This replaces the `OperatorCapability` token (E6) with a
-boundary that actually exists: you cannot hold an `EffectivePolicy` you did not
-compose under the host's root — and you cannot hold one whose grants are scoped wider,
-whose obligations/injections/validations are fewer, than the root ceiling permitted.
+Semantics, pointwise, **per (key, object)**:
+
+- **Scalar knobs — LAST-WINS, PRESENCE-based.** For grant/obligation values and the
+  operational knobs (grants, obligation-knob values, and all per-op operational scalars —
+  `op.statement_timeout_ms`, `op.lock_timeout_ms`, `sec.require_approval`,
+  `sec.destructive_ops`, …): **where `over` has ANY covering rule on key `k` at object
+  `o`** (`over.covers(k, o)`, presence — even one that restates the default), the result
+  value at `(k, o)` is **`over`'s** value; otherwise it is `base`'s value. `over` wins
+  outright — it may raise or lower the value with no ordering constraint, and it may lower
+  `k` **to its default** (presence, not raises-above-default, is the override trigger — the
+  same H-2 masking notion `admit` uses). (A key `over` does not mention at `o` inherits
+  `base`'s value there.)
+- **Rule LISTS — ACCUMULATE (union), in a fixed order.** The `inject` and `validate` rule
+  lists are **unioned** across the two layers: every `inject` rule and every `validate`
+  predicate from *both* `base` and `over` is kept, each at its own `effective_scope`.
+  `over` does not *replace* `base`'s inject/validate rules; it *adds to* them. **[M-3]
+  Inject-list order is `base`-first then `over`** — `overlay(base, over)`'s effective
+  inject list is `base`'s inject rules (in document order) followed by `over`'s (in
+  document order). This is the innermost two links of the cross-layer inject total order
+  (II.4.4): a `base+env` pair sits with `base` OUTSIDE `env` (`… host → org → base → env →
+  … → draft`), so the assembled ceiling's inject order is stable and drives the canonical
+  column order → checksum deterministically. (These are the two content rule kinds; they
+  have no single "value" a last-wins rule could overwrite — they are obligations, and
+  obligations accumulate.)
+
+So the split is precise: **scalar knobs are last-wins/presence-based (`over` overwrites
+where it has any covering rule), rule lists (inject/validate) accumulate (union) in
+base-then-over order.** `overlay` is total, associative-enough for `base + env` layering,
+and consumes only the value-lattice primitives above — no `⊑` check anywhere, because it
+is the trusted operator's own algebra. **`overlay` is TOTAL — it never rejects** (H-3);
+inject/PK/index collisions between `base` and `over` are NOT rejected here — they are
+caught by the fallible `finalize_ceiling` step every assembled ceiling passes before it
+can be `admit`'s ceiling (II.3.2 `finalize_ceiling`, II.4.4).
+
+#### `restrict(a: TrustedDoc, b: TrustedDoc) -> Ceiling` — trusted tightening gradient (MEET), TOTAL
+
+`restrict` chains a **trust gradient** of operator-authored ceilings (host ⊒ org ⊒
+project): it produces the **narrower of two ceilings** — the greatest lower bound — so
+that each inner tier can only ever tighten the tier above it. It is **trusted-side only,
+type-enforced (H-1)** — both `a` and `b` are `TrustedDoc` (host-injected), so an untrusted
+draft cannot be a `restrict` operand — **total** (defined on every pair), and **never
+rejects**. It is a genuine lattice **meet** (⊓), so it is associative and
+commutative and a chain re-associates freely. **Pointwise**, per key:
+
+- **Grant:** the restricted grant is the pointwise meet
+  `value(restricted, k, o) = value(a, k, o) ⊓_value value(b, k, o)` (Bool AND, StrSet ∩,
+  Uint min, rank-min) — and its domain is the scope meet
+  `grantedScope(a,k) ⊓ grantedScope(b,k)`. Represented as the finite set of grant rules
+  obtained by intersecting each `a`-rule's scope with each `b`-rule's scope (via `⊓`)
+  and meeting their values; empty-scope products drop out. This is exact because `⊓` is
+  exact — no `⊔`-scalar approximation anywhere on the grant path.
+- **Require / Inject / Validate:** rule sets join upward (union, each rule at its own
+  scope); valued Requires accumulate per-object as above.
+
+`restrict` never rejects because a meet is defined on all pairs — that is exactly the
+property `admit` lacks and why the two must be different operators (E3's "one name, two
+semantics" is now two names). A `restrict` chain of ceilings composes below the root and
+the final untrusted draft lands through `admit`. **`restrict` is TOTAL (H-3):** it unions
+the two ceilings' inject/validate lists without inspecting them for conflict, exactly like
+`overlay` — inject/PK/index collisions between two co-authored ceilings are NOT rejected
+here. They are surfaced by the separate fallible `finalize_ceiling` step (below) that every
+assembled ceiling must pass before it may be `admit`'s ceiling argument. Keeping `restrict`
+total preserves the meet laws (associativity/commutativity) that the `restrict`-chain
+equivalence theorem relies on — a *fallible* meet would break re-association.
+
+#### `finalize_ceiling(assembled) -> Result<Ceiling, PolicyError>` — the ceiling-conflict gate (H-3)
+
+`overlay` and `restrict` are total precisely so the composition algebra stays lawful, but
+a trusted ceiling assembled by them can still contain a *misconfiguration* — two inject
+rules that collide, a PK-pin conflict, a duplicate index name, an inject-vs-validate
+self-contradiction across the merged layers. Those are real errors that must surface
+**loudly** before enforcement; they simply must not live inside the total combinators.
+So they move to one explicit, **fallible finalization step**:
+
+```
+finalize_ceiling(assembled: Ceiling) -> Result<Ceiling, PolicyError>
+```
+
+`finalize_ceiling` runs the ceiling-side conflict lints over the whole assembled rule set:
+
+- **overlapping-scope inject/inject same-column** (two inject rules add a column of the
+  same normalized name on scopes whose `⊓` is non-`Nothing`) → `CeilingInjectColumnConflict`;
+- **PK-pin conflicts** (two inject rules pin different `primary_key` on overlapping scope,
+  or conflicting `author_primary_key` Allow-vs-Forbid) → `CeilingPrimaryKeyConflict`;
+- **duplicate index name** on overlapping scope → `CeilingIndexNameConflict`;
+- **inject-vs-validate contradiction** across the merged layers (a `ForbiddenColumns` /
+  `ColumnConstraint` that a ceiling-injected column can never satisfy on overlapping scope)
+  → `CeilingInjectValidateContradiction`.
+
+These are the **same lints** that II.4.4 attributes to "ceiling-vs-ceiling collisions" and
+that admit's draft-vs-ceiling and single-doc load-time lints mirror — here run once over
+the finalized ceiling. **Every assembled ceiling MUST pass `finalize_ceiling` before it may
+be passed as `admit`'s `ceiling` argument** (the resolve-time "already collision-free
+composed list" assumption of II.4.4 is *discharged by* this gate, not assumed). Concretely
+the two-phase pipeline is:
+
+```
+env_ceiling = finalize_ceiling( overlay(base, env) )?          # trusted assembly, then finalize
+effective   = admit(env_ceiling, creator_draft)?              # the sole untrusted crossing
+# with a trust gradient:
+ceiling     = finalize_ceiling( restrict(host_env, org_env) )?
+effective   = admit(ceiling, creator_draft)?
+```
+
+`admit`'s `ceiling` parameter type is the finalized `Ceiling` (or an `EffectivePolicy`,
+which is already finalized-by-construction), so "un-finalized ceiling reaches admit" is a
+**type error**, not a runtime hazard. `finalize_ceiling` is idempotent and, being a pure
+lint pass, does not change the rule set on success.
+
+#### `admit(ceiling: Ceiling, draft: PolicyDoc) -> Result<EffectivePolicy, PolicyError>` — the SOLE trust boundary
+
+`admit` is the **only** untrusted boundary crossing and the **only** place *escalation*
+is checked. `ceiling` is a **finalized** `Ceiling` (or `EffectivePolicy`) — trusted,
+`TrustedDoc`-descended, `overlay`/`restrict`-assembled and `finalize_ceiling`-passed
+(H-1/H-3); the type forbids passing an un-finalized ceiling. `draft` is the **untrusted**
+creator's `PolicyDoc` (H-1: the untrusted operand type is distinct from `TrustedDoc`, so
+provenance is not something prose has to promise). `admit` returns `Ok(EffectivePolicy)` iff the draft escalates nothing, else it
+`Err`s with a precise blame. Evaluated **pointwise per (key, object)**:
+
+- **Grant rules — CEILING-INHERITED, narrow-only, PRESENCE-overridden (the footgun fix).**
+  Grants in `admit` are **inherited from the ceiling and may only be NARROWED by the
+  draft**, *not* draft-authoritative. `admit` produces a **LAYERED `EffectivePolicy`**
+  (H-4) — it does NOT flatten draft + ceiling into one loosest-covering rule set, because
+  a flat set cannot represent an OVERRIDE where the draft is *narrower* than a ceiling rule
+  it overlaps (e.g. ceiling `timeout=30000@All` + draft `timeout=10000@app_*`: a flat
+  loosest-covering query on `app_main.t` returns `30000`, discarding the narrower draft
+  value; the draft's narrowing is silently lost). The complement region (`All ∖ app_*`)
+  is not glob-representable, so the two rules cannot be flattened into one layer. Instead
+  the effective grant value is defined **layer-by-layer with precedence**:
+
+  ```
+  # The admit layer stack (top precedence first):
+  #     [ draft ]  over  [ ceiling ]          (ceiling itself may be layered, H-4 below)
+  #
+  value(effective, k, o) =
+      value(draft, k, o)     if draft.covers(k, o)   # PRESENCE — the draft has ANY grant
+                                                     #  rule on k covering o (H-2 masking
+                                                     #  set), so the draft's value WINS here,
+                                                     #  even a narrow-to-default value.
+                                                     #  Admissible only if the escalation
+                                                     #  check below passed; else admit REJECTS.
+      value(ceiling, k, o)   otherwise               # the draft is SILENT here (no covering
+                                                     #  rule) → INHERIT the ceiling's value,
+                                                     #  by falling through to the next layer.
+  ```
+
+  Two changes from the earlier single-notion definition:
+  - **Override is PRESENCE-based, not raises-above-default (H-2).** "The draft wins at
+    `(k,o)`" means `o ∈ coveredScope(draft,k)` — the draft has *any* covering grant rule
+    on `k` at `o`, at *any* value (II.3.2). So a draft that writes `raw_sql=false` over a
+    ceiling `raw_sql=true` **narrows to default and wins** (the creator asked for less and
+    gets less). Under the old `grantedScope` (raises-above-default) definition that draft
+    was classified *silent* and inherited the ceiling's `true` — the footgun this closes.
+  - **The result is a LAYERED policy, queried top-down (H-4).** `value`/`grants` fall
+    through: query the **top layer** (`draft`) first, joining loosest-covering **only
+    within that layer**; if the top layer has no rule covering `o` for `k`, fall through
+    to the next layer (`ceiling`). The seal binds the **layer boundaries** (II.7) — a
+    re-flattened rule set changes meaning, so it must fail the MAC. Everywhere the draft
+    is *silent*, the effective value is the **ceiling's**, inherited — it does **not** fall
+    to the knob default.
+
+  This reverses the old draft-authoritative semantics. **Contrast:** previously the
+  effective grant for `k` was the *draft's* grant map — so a draft that simply **omitted**
+  a grant the ceiling allowed silently **lost** it (fell to the default-deny). That is the
+  footgun: an operator whose ceiling grants `pg.extension@all` would find a creator who
+  forgot to re-declare it silently stripped of it, an availability/usability trap that
+  pushes creators toward over-broad drafts. Under **inherit-then-narrow**, a silent draft
+  simply *keeps* the ceiling's grant; a draft that wants *less* narrows it explicitly
+  (presence override, admitted because a narrow is `⊑` the ceiling); a draft that wants
+  *more* is **rejected**.
+
+  > **Operator hazard [M-4]: ceiling-inheritance turns a ceiling's grants into live
+  > DEFAULTS that every silent creator holds.** Because a silent draft inherits the
+  > ceiling's grant value, any grant an operator writes into a ceiling is *automatically
+  > held by every creator who does not mention it* — convenient for benign grants
+  > (`pg.extension`), but hazardous for grants that should be opt-IN per creator
+  > (`core.skip_static_guard`, `core.alter_injected_column`, a ⊤-scoped `core.raw_sql`).
+  > An operator must therefore treat "put it in the ceiling" as "grant it to everyone by
+  > default". A **future** per-rule `inherit = false` opt-out is noted: an inject/grant rule
+  > marked `inherit = false` would still BOUND the draft (a draft may narrow *up to* it) but
+  > would NOT be inherited by a silent draft — the draft would fall to the knob default
+  > unless it explicitly, admissibly claims the grant. This keeps hazardous grants
+  > opt-in-per-creator while the ceiling still caps them. Deferred, not in this cut; called
+  > out so the inheritance default is a deliberate, documented choice.
+
+  **The escalation check ranges over `grantedScope` (non-default), not `coveredScope`.**
+  For each grant key `k`, the draft is admissible iff **at every object `o` where the draft
+  RAISES `k` above default, the draft's value is `⊑` the ceiling's value there**:
+  ```
+  ∀ o ∈ grantedScope(draft, k):  value(draft, k, o)  ⊑_value  value(ceiling, k, o)
+  ```
+  (Objects the draft narrows *to default* are in `coveredScope` but not `grantedScope`, so
+  they are exempt — a narrowing can never escalate, so it needs no check. This is the
+  second half of the H-2 split.) `⊑_value` is the knob's polarity order (Bool implication,
+  StrSet ⊆, Uint ≤, rank ≤). This catches the multi-rule escalation the old scope-only
+  check missed: with ceiling `timeout=60s@app_* + 600s@staging` and draft
+  `timeout=600s@app_*`, the object `app_main.t` has `value(ceiling)=60s` (only the `app_*`
+  ceiling rule covers it) but `value(draft)=600s` — `600 ≤ 60` is false ⇒ **reject**.
+  Practically the check is decided *symbolically* over the pattern lattice, not by
+  enumerating objects: partition the draft's granted scope by which ceiling rules cover
+  each region (via `⊓`), and on each region compare the draft's loosest value to the
+  ceiling's loosest value over that region.
+
+  **The uncovered region — computed by ITERATED PER-CEILING-RULE SUBTRACTION, never by
+  `⊔`-materializing the ceiling (C-1).** The "uncovered region" is the part of the draft's
+  granted scope that **no ceiling grant rule on `k` covers** — where the ceiling's value is
+  `default` (tightest), so any non-default draft value there is a straight escalation. The
+  earlier draft computed it as `grantedScope(draft,k) ∖ grantedScope(ceiling,k)`. **That is
+  UNSOUND (C-1):** `grantedScope(ceiling,k)` folds the ceiling's several grant rules into
+  ONE scope via the `⊒`-conservative scope-`⊔` (II.3.1), which **drops excludes** and
+  therefore denotes a *superset* of the ceiling's true coverage; sitting in the **antitone
+  (right) position of `∖`**, an over-approximated subtrahend **under-approximates** the
+  uncovered region — the *escalation* direction — so `admit` would ACCEPT an escalation the
+  ceiling denies. Counterexample: ceiling grants `raw_sql` on `Of{[app_*], exclude=[app_secret]}`
+  **plus** a disjoint `Of{[reports]}`; `⊔` drops the `app_secret` exclude, so
+  `grantedScope(ceiling, raw_sql)` computes as covering `app_secret`; a draft
+  `raw_sql@app_secret` then computes as *covered* and is **wrongly accepted** — but the
+  ceiling explicitly denies `app_secret`.
+
+  The uncovered region is therefore computed by **iterated subtraction of each ceiling
+  grant rule's effective scope**, never by materializing the ceiling side with `⊔`:
+
+  ```
+  R := grantedScope(draft, k)                       # start with the whole draft-raised region
+  for each ceiling grant rule r on k:               # subtract ONE ceiling rule at a time
+      R := R ∖ Objects(r.effective_scope)           # ∖ over-approximates → fold stays fail-closed
+  # after the fold, R is the (over-approximated) region no single ceiling rule covers
+  if R is non-empty  AND  ∃ o ∈ R with value(draft,k,o) ≠ default  ⇒  REJECT
+  if any R := R ∖ … step returns "not cleanly representable"       ⇒  REJECT (fail-closed)
+  ```
+
+  Each `∖` step **over-approximates** `R` (II.3.1 `∖` is `⊇` the true difference), so every
+  step keeps *at least* the truly-uncovered objects; the fold therefore **never
+  under-approximates** the uncovered region → `admit` cannot accept an escalation through it.
+  Because the excludes on a ceiling rule are carried by `r.effective_scope` and `∖`'s
+  construction retains a subtrahend's excluded holes (the C1 fix in II.3.1 keeps
+  `B.exclude` as part of `A ∖ B`), the `app_secret` exclude in the counterexample survives:
+  `app_secret` stays in `R` after subtracting both ceiling rules, the draft's value there is
+  non-default ⇒ **reject** (correct). A non-representable `∖` at any step ⇒ reject
+  (`UncoveredRegionNotRepresentable`) — the engine never treats an un-representable
+  difference as empty. Errors carry `(knob_key, offending_object_region, draft_value,
+  ceiling_value)`.
+
+  > **Theorem (no-escalation is preserved under ceiling-inheritance): `effective ⊑ ceiling`
+  > for EVERY key `k` and object `o`.** Take any `(k, o)`. The layered `value(effective,·)`
+  > has exactly three arms, split on the draft's **presence** at `(k,o)` (`coveredScope`):
+  > - *Case A — the draft is silent at `(k, o)`* (`o ∉ coveredScope(draft, k)`): the top
+  >   layer has no covering rule, so the query falls through and
+  >   `value(effective, k, o) = value(ceiling, k, o)`, `⊑_value` holds with **equality**.
+  >   Inheriting can never exceed the thing inherited from.
+  > - *Case B — the draft narrows to default at `(k, o)`* (`o ∈ coveredScope(draft,k)` but
+  >   `o ∉ grantedScope(draft,k)`, i.e. the draft has a covering rule whose value == default):
+  >   the draft wins by presence, so `value(effective,k,o) = value(draft,k,o) = default`,
+  >   and `default ⊑_value value(ceiling,k,o)` holds because the knob default is the tightest
+  >   value (II.2.1). This arm needs **no** escalation check — a value pinned at default can
+  >   never exceed anything — which is why the check ranges over `grantedScope`, not
+  >   `coveredScope`.
+  > - *Case C — the draft raises above default at `(k, o)`* (`o ∈ grantedScope(draft, k)`):
+  >   `admit` returned `Ok`, so the admissibility check
+  >   `value(draft, k, o) ⊑_value value(ceiling, k, o)` passed (including the uncovered-region
+  >   check that guarantees `value(ceiling,k,o)` is a real ceiling grant, not a `⊔`-inflated
+  >   phantom — C-1), and `value(effective, k, o) = value(draft, k, o) ⊑_value value(ceiling, k, o)`.
+  >
+  > In all three cases `value(effective, k, o) ⊑_value value(ceiling, k, o)`. Since this holds
+  > for every `(k, o)`, `effective ⊑ ceiling` pointwise over the entire (key × object)
+  > universe — the no-escalation guarantee. **Inherit-then-narrow can never exceed the
+  > ceiling**: the *only* three ways an effective value is produced are "copy the ceiling"
+  > (equality), "the draft pinned it at default" (`⊑` trivially), and "a draft value the check
+  > proved `⊑` the ceiling" (narrowing above default). There is no fourth path, so no
+  > object/key can end up above the ceiling. ∎ (Property-tested over the whole bounded
+  > universe in II.9 as the new `effective ⊑ ceiling` invariant, on the silent-inherit,
+  > narrow-to-default, and explicit-narrow-above-default arms.)
+
+- **Require rules (incl. valued Require, A5).** effective = ceiling's require rules
+  **plus** the draft's, each at its own scope (union-up). A ceiling require can never
+  be removed or scope-narrowed by the draft; the draft may only *add*. For a **valued**
+  Require knob (e.g. `sec.sensitive_columns : StrSet`), the obligation at object `o` is
+  the **per-object union** of every covering require rule's value:
+  `obligation(k, o) = ⋃ { r.value : r covers o }` — obligations accumulate pointwise
+  exactly as grants join pointwise, so a ceiling's required sensitive-column set can
+  only grow, never shrink, under a draft. (Obligations still **union-up** — the
+  ceiling-inheritance change touches only the grant arm; obligations were already
+  ceiling-preserving by union.)
+- **Inject rules:** union-up, each at its own scope; a ceiling injection is
+  **mandatory and un-droppable** (II.4). Draft-vs-ceiling inject *collisions* are now
+  rejected at **compose time** (II.6/II.4.4), not deferred to resolve time.
+- **Validate rules:** union-up, accumulate; the effective predicate set is every
+  covering ceiling predicate plus every covering draft predicate. A draft can add but
+  never drop a ceiling predicate. A draft `Validate` that contradicts a ceiling
+  `Inject` (e.g. `ForbiddenColumns` naming an injected column on overlapping scope) is
+  rejected at compose time (II.6).
+- **Pinned knobs** (now only the opaque `TableShapeTransform` digest, II.4): error
+  unless `draft == ceiling` or the ceiling marks it delegable.
+
+Chains of trusted ceilings compose with `restrict` (and each tier is assembled with
+`overlay`, then `finalize_ceiling`); the final untrusted draft lands through `admit`. The
+equivalence `admit(finalize_ceiling(restrict(a,b)), draft) ≡` "check `draft` against the
+tightest chain" holds **pointwise over (key, object)** — because both trusted operators are
+defined pointwise and total (`finalize_ceiling` only lints, it does not alter the rule set
+on success), and `⊓_value`/`⊑_value` obey the lattice laws, the restricted ceiling's value
+at every object is the meet of the chain's values there, so a draft grant admissible against
+the `restrict` is exactly one admissible against every link. (Ceiling-inheritance does not
+perturb this: on any object the draft is silent, `admit` against the `restrict` inherits the
+restricted value = the meet of the chain's values, which is exactly what admitting against
+each link in turn would inherit. Note the ceiling here is ONE layer — `restrict` flattens a
+trusted chain into a single meet-layer; the *two-layer* structure `admit` builds is
+`[draft] over [that finalized ceiling]`, H-4.)
+
+All three operators are **one generic function each over the registry + the rule list**,
+driven by each knob's declared polarity/value-order — no per-facet hand-written meet
+remains to drift (E2, E3). The scope-lattice `⊓`/`⊑` and the per-knob value
+`⊓_value`/`⊑_value` are the only primitives; every polarity reuses them.
+
+**`EffectivePolicy` is unforgeable AND layered:** private fields, no `Deserialize`,
+constructible only by `admit` from a **finalized** `RootCeiling`-descended ceiling — where
+that ceiling was itself assembled by the trusted `overlay`/`restrict` combinators over
+`TrustedDoc`s (H-1) and passed `finalize_ceiling` (H-3). It carries a **layer stack** —
+`[draft] over [finalized ceiling]`, the ceiling itself possibly `[env] over [base]` (H-4) —
+NOT a flattened rule set: `grants`/`value` query top-down (II.3.2), and the seal binds the
+**layer boundaries** (II.7) so a re-flattened set fails the MAC. This replaces the
+`OperatorCapability` token (E6) with a boundary that actually exists: you cannot hold an
+`EffectivePolicy` you did not compose under the host's root — and you cannot hold one whose
+grants are scoped wider, whose obligations/injections/validations are fewer, than the root
+ceiling permitted.
 
 ## II.4 Injection & validation as first-class scoped rule kinds
 
@@ -1487,18 +1853,25 @@ load** on a single document:
   draft-`Validate`-vs-ceiling-`Inject` check below (which needs *two* layers); the
   single-doc case must not slip through to compose time (or worse, resolve time) as a
   surprise "every table fails validation".
-- **Draft-vs-ceiling collisions → `compose_strict` error (blame the draft).** Rejected
+- **Draft-vs-ceiling collisions → `admit` error (blame the draft).** Rejected
   at compose time, not resolve time: a draft `inject` whose column name, `primary_key`
   pin, `author_primary_key` Allow-vs-Forbid, or index name collides with a ceiling
   `inject` on **overlapping scope** fails composition (II.6). A draft can no longer
   weaponize a latent conflict against a ceiling-mandated migration.
-- **Draft `Validate` contradicting a ceiling `Inject` → `compose_strict` error.** e.g. a
+- **Draft `Validate` contradicting a ceiling `Inject` → `admit` error.** e.g. a
   draft `ForbiddenColumns`/`ColumnConstraint` that a ceiling-injected column can never
   satisfy on overlapping scope — rejected at compose time (else every in-scope table
   would fail validation post-injection).
-- **Ceiling-vs-ceiling collisions → `compose_clamp` error (loud operator error).** Two
-  trusted ceilings that inject conflicting columns/PKs on overlapping scope is an
-  operator misconfiguration surfaced when their chain is clamped, not silently merged.
+- **Ceiling-vs-ceiling collisions → `finalize_ceiling` error (loud operator error)
+  [H-3].** Two trusted ceilings that inject conflicting columns/PKs on overlapping scope
+  is an operator misconfiguration. It is **NOT** rejected inside `restrict`/`overlay` —
+  those stay **TOTAL** (they simply *union* the inject/validate lists), so the composition
+  algebra keeps its meet/last-wins laws. The conflict surfaces at the explicit fallible
+  **`finalize_ceiling`** gate (II.3.2) that every assembled ceiling passes before it may be
+  `admit`'s ceiling — as `CeilingInjectColumnConflict` / `CeilingPrimaryKeyConflict` /
+  `CeilingIndexNameConflict` / `CeilingInjectValidateContradiction`. Both operands are
+  trusted-side, so a collision is a misconfiguration (a loud operator error), never an
+  escalation.
 - **Resolve-time `InjectColumnConflict` is kept for exactly ONE case:** an
   *author-declared column* vs an *injected column* (the `SystemColumnCollision` path of
   II.4.3, modulo id-folding). This is a property of the specific migration's author
@@ -1517,7 +1890,7 @@ within a layer, document order.
 Equivalently: the effective inject list is the **concatenation** of each layer's
 inject rules in layer order (outermost first), each layer contributing its rules in
 document order. Concatenation is associative, so re-chaining ceilings does not perturb
-the order — the composed rule list is order-stable under `compose_clamp` re-association.
+the order — the composed rule list is order-stable under `restrict` re-association.
 Within a resolved table, columns are emitted rule-by-rule in this order, then
 author-declared columns (folded per II.4.3) in author order. This total order is
 therefore **part of the sealed payload** (II.7): a tamper that reorders inject rules
@@ -1525,8 +1898,9 @@ changes the canonical bytes and fails both the checksum and the seal MAC.
 
 Resolution per op (createTable; `alter`/`rename` per II.2.6d):
 
-1. **`inject` rules apply in the total order above** (already collision-free — cross-layer
-   conflicts were rejected at compose time; only author-vs-injected collisions remain
+1. **`inject` rules apply in the total order above** (already collision-free — ceiling-side
+   cross-layer conflicts were rejected by `finalize_ceiling` (H-3) and draft-vs-ceiling
+   conflicts by `admit`, both at compose time; only author-vs-injected collisions remain
    and error here per II.4.3).
 2. **`validate` rules then see the POST-injection table.** Every predicate whose scope
    covers the object evaluates against the fully-injected column/index/PK set — so
@@ -1570,16 +1944,151 @@ checksum. Resolution still happens before canonical bytes (the applied DDL must 
 was checksummed), but *which* injection produced it is now recorded explicitly. A
 consumer changing their inject rules gets a precise "injection digest changed"
 diagnostic instead of a mystifying checksum drift (G6). The digest is not consulted by
-`compose_strict`/`compose_clamp` except in the opaque-transform `Pinned` case above.
+`admit`/`restrict`/`overlay` except in the opaque-transform `Pinned` case above.
 
 ## II.5 Trust tiers, presets, and the root ceiling
+
+### II.5.0 The `base + env` two-phase model — assemble trusted, then bound untrusted
+
+An operator assembles a per-environment ceiling from their *own* co-authored profile
+fragments with the **trusted** combinators, THEN bounds the **untrusted** creator draft
+with the sole boundary operator:
+
+```
+env_ceiling = overlay(base, env)              # TRUSTED cascade: base is deny-by-default;
+                                              #   dev ENABLES; prod TIGHTENS / adds obligations
+effective   = admit(env_ceiling, creator_draft)   # UNTRUSTED boundary: the creator can only
+                                                  #   NARROW; it can never escalate
+```
+
+Phase 1 (`overlay`) is trusted-side: **both** `base` and `env` are operator-authored, so
+`overlay` may freely enable (dev) or tighten (prod) — last-wins, no `⊑` constraint. Between
+phase 1 and phase 2 the assembled ceiling passes **`finalize_ceiling`** (H-3), which lints
+it for inject/PK/index conflicts; only a finalized ceiling may be `admit`'s argument.
+Phase 2 (`admit`) is the *only* trust crossing: whatever ceiling phase 1 produced,
+`admit` guarantees the creator's effective policy is `⊑` it (II.3.2 theorem), so the
+creator can never exceed the assembled ceiling.
+
+**[M-5] Root-ceiling identity, catalog layers, and who may mark `mandatory`.** The
+`RootCeiling` and the `ProfileCatalog` play distinct roles and must be pinned down so
+`mandatory` and the creatable-lint have an unambiguous home:
+
+- **The `RootCeiling` is the ONE host-injected document that establishes the floor and the
+  `mandatory` injections** — the single document supplied to `Engine::builder().root_ceiling(…)`.
+  It is *always* the outermost layer of every assembled ceiling. In the two-phase model the
+  `RootCeiling` is **`base`** (the deny-by-default floor); each `env` fragment is a **catalog
+  entry** overlaid *inside* it. So the layer order is `[env] over [base = RootCeiling]`, and
+  the assembled `env_ceiling = finalize_ceiling(overlay(RootCeiling, env))` — `base` outermost,
+  `env` inner, draft innermost at `admit` time.
+- **`mandatory = true` is `RootCeiling`-only, and this is where II.4.2's rule bites.** An
+  `env` catalog entry is a NON-root layer, so it may **not** set `mandatory = true`
+  (`MandatoryInjectOnNonRootLayer`, II.4.2). Therefore **zeroship's 7-column mandatory
+  inject must live in zeroship's `RootCeiling` document, NOT in a catalog entry** — this
+  corrects the II.8 inventory (below), which previously placed it in "zeroship's catalog".
+  It carries `mandatory = true`, which drives the `creatable ⊑ inject` compose-time lint
+  (II.2.6a). Non-mandatory inject rules (audit columns, RLS-adjacent shape) may live in
+  catalog entries and still compose union-up (mandatory-by-composition for droppability),
+  but only a `RootCeiling` inject can carry the creatable-scope anchor.
+- **"RootCeiling-descended", given `overlay` may loosen past `base`.** An assembled ceiling
+  is **RootCeiling-descended** iff its outermost layer is *the* `RootCeiling` the engine was
+  built with — a structural property of the layer stack, checked by construction (the
+  combinators only ever place `TrustedDoc`s from this engine's `RootCeiling`+catalog into
+  layers, and `finalize_ceiling` preserves the stack). It does **not** mean "tighter than
+  `base` at every object": `overlay(base, dev)` legitimately *loosens* `base` (enables
+  `raw_sql` in dev), so descent is about **provenance of the layers**, not a `⊑`-relation to
+  `base`. The security guarantee that still holds is the *untrusted* one: `admit` proves
+  `effective ⊑ assembled_ceiling` regardless of how the trusted layers loosened each other.
+  `EffectivePolicy` is constructible only from a RootCeiling-descended, finalized ceiling —
+  that is the unforgeability anchor (II.3.2), not a claim that the ceiling is `⊑ base`.
+
+**Concrete fragments.** Three co-authored TOML fragments — deny-by-default `base`, plus
+one `env` overlay per environment:
+
+```toml
+# base.policy.toml — deny by default; the floor every environment starts from
+policy_version = 1
+default_scope = "all"                                                 # every scopeless rule inherits ⊤ (A3)
+[[grant]]  key = "core.raw_sql"              value = false            # scalar: no raw SQL (scope ⊤)
+[[grant]]  key = "pg.extension"  scope="all" value = false            # Global: extensions off (⊤ mandatory)
+[[grant]]  key = "op.statement_timeout_ms"   value = 30000            # scalar: 30s budget (scope ⊤)
+```
+
+```toml
+# dev.policy.toml — dev ENABLES (overlay is trusted, so loosening is allowed)
+policy_version = 1
+default_scope = "all"                                                 # scopeless rules inherit ⊤ (A3)
+[[grant]]  key = "core.raw_sql"              value = true             # ENABLE raw SQL
+[[grant]]  key = "pg.extension"  scope="all" value = true             # ENABLE extensions
+```
+
+```toml
+# prod.policy.toml — prod TIGHTENS a scalar + ADDS an obligation
+policy_version = 1
+default_scope = "all"                                                 # scopeless rules inherit ⊤ (A3)
+[[grant]]  key = "op.statement_timeout_ms"   value = 10000            # tighten 30s → 10s
+[[require]] key = "sec.require_approval"      value = "always"        # obligation: always approve (Require/DeclaredOnly, M-2)
+```
+
+**`overlay(base, dev)` result** — last-wins on the scalars `dev` sets, `base`
+pass-through otherwise:
+
+```
+core.raw_sql             = true      # dev wins (base false → dev true; loosened, legal — trusted)
+pg.extension @all        = true      # dev wins (ENABLED)
+op.statement_timeout_ms  = 30000     # base pass-through (dev is silent)
+```
+
+**`overlay(base, prod)` result** — last-wins tightening + obligation accumulation:
+
+```
+core.raw_sql             = false     # base pass-through (prod silent)
+pg.extension @all        = false     # base pass-through (prod silent)
+op.statement_timeout_ms  = 10000     # prod wins (30s → 10s; tightened)
+require sec.require_approval = always # obligation ADDED (require rules accumulate/union)
+```
+
+(If `base` and `env` each carried `inject`/`validate` rules, those **accumulate** — the
+union of both layers' rule lists — rather than last-wins; only the scalar knobs
+overwrite. See II.3.2 `overlay`.)
+
+**Profile-catalog resolution `base + {dev, prod}`.** The `ProfileCatalog` (below)
+resolves an environment name to its assembled ceiling by overlaying `base` with the
+named `env` fragment:
+
+```
+catalog.get("dev")  = finalize_ceiling(overlay(base, dev))?    # → the dev env_ceiling above, finalized
+catalog.get("prod") = finalize_ceiling(overlay(base, prod))?   # → the prod env_ceiling above, finalized
+```
+
+Here `base` is the host's `RootCeiling` (M-5) and `dev`/`prod` are trusted catalog `env`
+fragments; both are `TrustedDoc`s (H-1), so `overlay` type-checks. The `overlay` result is
+run through `finalize_ceiling` (H-3) so a colliding-inject misconfiguration surfaces loudly
+before enforcement. Each finalized ceiling is then the trusted `ceiling` argument to
+`admit(ceiling, creator_draft)` — and because `admit`'s `ceiling` param is the finalized
+`Ceiling` type, an un-finalized `overlay` result cannot reach it. (A tier that also chains a
+trust *gradient* — host ⊒ org ⊒ project — inserts `restrict` before finalize:
+`admit(finalize_ceiling(restrict(host_env, org_env))?, draft)`.)
+
+**The security argument, stated explicitly.** `overlay` may **enable** `raw_sql` and
+`pg.extension` in `dev` *because it is trusted* — the operator authors both `base` and
+`dev`, so there is no adversary on either input and loosening is the operator's own
+choice. The **untrusted creator is still bounded by `admit`**: no matter how the
+operator assembles the ceiling (which fragments they overlay, whether they enable or
+disable in any env), `admit` proves `effective ⊑ env_ceiling` for every key/object
+(II.3.2 theorem), so **the creator can never exceed whatever ceiling the operator
+assembled.** Enabling in a trusted phase does not weaken the untrusted boundary; it only
+sets *where that boundary sits*. The two phases are cleanly separated: trusted assembly
+(`overlay`/`restrict`, total, never rejects) then the single untrusted crossing
+(`admit`, the only fallible, security-bearing step).
 
 - **`TrustProfile` / `SealedPosture` are deleted as public policy surface.** A "tier"
   is nothing but a named policy document in the *consumer's* catalog:
 
   ```rust
   pub trait ProfileCatalog {
-      fn get(&self, name: &str) -> Option<PolicyDoc>;
+      // Catalog entries are HOST-injected, hence TrustedDoc (H-1): they may be
+      // `overlay`/`restrict` operands. A creator draft is never a catalog entry.
+      fn get(&self, name: &str) -> Option<TrustedDoc>;
   }
   ```
 
@@ -1587,6 +2096,17 @@ diagnostic instead of a mystifying checksum drift (G6). The digest is not consul
   the standalone CLI's catalog = `{local, trusted}`; a third tier ("staff") is one
   more document — extensibility score drops from 5 to 1. "There is deliberately no
   permissive" becomes a *zeroship catalog* property (G3), enforced where it belongs.
+
+  > **Catalog trust guidance (H-1).** Every catalog entry is a `TrustedDoc` and therefore
+  > an `overlay`/`restrict` operand that can *loosen* the assembled ceiling — so **an `env`
+  > fragment must NEVER be creator-sourced.** The host registers catalog entries at
+  > `Engine::builder().profile_catalog(…)` from documents *it* authors; a creator-supplied
+  > document is always a `draft` passed to `admit`, never a catalog entry and never a
+  > `TrustedDoc`. Wiring a creator-editable file into the catalog would let a creator loosen
+  > their own ceiling — the exact laundering H-1 forbids. The type (`TrustedDoc` is
+  > constructible only from host-injected sources) makes this a construction-site
+  > discipline, not a runtime check, but the guidance is stated so no consumer wires an
+  > untrusted source into `get()`.
 - **The guard becomes posture-free, scope-aware, and matcher-free (PEP).** It consumes
   `EffectivePolicy` only through the decision-query API (II.1): it parses an op into the
   `(key, object)` pairs it references and calls `grants(key, object)` /
@@ -1628,26 +2148,42 @@ diagnostic instead of a mystifying checksum drift (G6). The digest is not consul
   decision. The dbmate posture (G4) is now just the CLI's `trusted` document — reachable
   in production, still impossible to reach *accidentally* because the host must put it in
   its catalog and compose it under its root ceiling.
-- **The root ceiling replaces the token.** Whoever constructs the engine supplies a
-  `RootCeiling(PolicyDoc)` — once, at build. The `inject`/`validate` *rules* live in
-  the policy documents (root ceiling + catalog entries), so there is no separate shape
-  argument; the only shape input to the builder is the *optional* programmatic
-  `TableShapeTransform` escape hatch (II.4.5), omitted by almost everyone:
+- **The root ceiling replaces the token, and provenance is a TYPE (H-1).** Whoever
+  constructs the engine supplies a `RootCeiling` — once, at build. Trust is encoded in the
+  type system: the `overlay`/`restrict` combinators and the `admit` ceiling argument accept
+  only `TrustedDoc`, and a `TrustedDoc` is **constructible only from host-injected sources** —
+  the `RootCeiling` and catalog entries registered at `Engine::builder()`:
+
+  ```rust
+  /// A policy document of HOST provenance. Constructible ONLY here (crate-private
+  /// inner), from a RootCeiling or a builder-registered catalog entry — NEVER from a
+  /// creator-supplied string. This is the type-level encoding that keeps `overlay`/
+  /// `restrict` from ever seeing an untrusted operand (H-1). A creator draft is a
+  /// plain `PolicyDoc`; there is no `PolicyDoc -> TrustedDoc` conversion.
+  pub struct TrustedDoc(PolicyDoc);           // private field; no public constructor
+
+  pub struct RootCeiling(TrustedDoc);         // the outermost layer of every ceiling (M-5)
+  ```
+
+  The `inject`/`validate` *rules* live in the policy documents (root ceiling + catalog
+  entries), so there is no separate shape argument; the only shape input to the builder is
+  the *optional* programmatic `TableShapeTransform` escape hatch (II.4.5), omitted by almost
+  everyone:
 
   ```rust
   let engine = Engine::builder()
       .registry(registry)
-      .root_ceiling(root)               // grants + obligations + inject/validate rules
-      .profile_catalog(catalog)         // optional; catalog entries also carry rules
+      .root_ceiling(root)               // RootCeiling: grants + obligations + inject/validate rules
+      .profile_catalog(catalog)         // optional; catalog get() -> TrustedDoc (H-1)
       .shape_transform(dynamic)         // OPTIONAL escape hatch only; none by default
-      .build()?;
+      .build()?;                        // the builder is the sole TrustedDoc mint site
   ```
 
   This is exactly the direction already chosen for the server split ("OperatorCapability
   token dissolves; trust = who runs the engine + which config is injected"). The
   standalone embedder's root is typically all-grants (they own the DB); zeroship's
   server root is its platform ceiling. There is no ambient `::new()` to mint (E6) —
-  authority flows only through injected documents, and `compose_strict` makes
+  authority flows only through injected documents, and `admit` makes
   escalation a type-system impossibility rather than a code-review promise. The root
   ceiling is also where an operator marks an `inject` rule `mandatory = true` and pairs
   it with a bounded `core.create_table` grant + a `table_name_forbidden` predicate
@@ -1683,15 +2219,32 @@ scatter, E4):
 ## II.7 Cleanups the model forces
 
 - **`DestructiveOps` splits** (E3): the ordered enforcement knob
-  `sec.destructive_ops ∈ {forbid < warn < allow}` (Grant, OrderedEnum, Enforced) and a
-  separate server-side workflow flag `approval_required` that is *not a policy knob at
-  all* — it is consumer orchestration state that projects to `forbid`/`allow` before a
-  document ever reaches the engine. The guard's silent `RequireApproval → Forbid`
-  coercion (`guard/mod.rs:239-244`) becomes unrepresentable input.
-- **`extends` gets semantics or dies** (E5). Proposal: keep it, resolved by the
-  *document loader* against the injected `ProfileCatalog` via `compose_clamp` —
-  it finally means what `platform.toml:2` has been implying. If not implemented in the
-  same change, the field is removed from the schema.
+  `sec.destructive_ops ∈ {forbid < warn < allow}` (Grant, OrderedEnum, Enforced). The
+  approval workflow is **no longer a non-knob** [M-2]: `sec.require_approval` is now a
+  real, registered policy knob (`never ⊑ on_destructive ⊑ always`, OrderedEnum, **`Require`
+  polarity** — composes UP, un-lowerable — **`DeclaredOnly`** enforcement, default `never`;
+  registered as a builtin, resolved per-object, and read by the HOST via the sealed
+  decision query, not gated by the engine's own guard/apply). It appears in the II.2.1
+  builtin registry list. The old guard `RequireApproval → Forbid` silent coercion
+  (`guard/mod.rs:239-244`) is deleted — `sec.destructive_ops` and `sec.require_approval`
+  are now two separate, independently-authorable knobs, so the coercion is unrepresentable.
+- **`extends` gets safe semantics or dies** (E5, H-1). It resolves in the *document loader*
+  against the injected `ProfileCatalog`, via the trusted cascade **`overlay`** —
+  `resolved = overlay(catalog.get(base), this_doc)`. **But `extends` must NEVER launder an
+  untrusted operand into `overlay` (H-1).** So the loader is split by provenance:
+  - **Creator DRAFTS may NOT use `extends`** — a `draft` document carrying an `extends`
+    field is a **hard LOAD ERROR** (`ExtendsForbiddenInDraft`). (Chosen over "resolve draft
+    `extends` against trusted bases": a draft has no legitimate need to inherit a catalog
+    base — the ceiling it is admitted against already carries the operator's floor — and
+    forbidding it removes the whole class of untrusted-`extends` hazards outright.)
+  - **Trusted documents** (the `RootCeiling` and catalog entries, both `TrustedDoc`) may use
+    `extends`, resolved ONLY against **trusted catalog bases** (`catalog.get(base)` returns a
+    `TrustedDoc`; a `base` name not in the trusted catalog is a load error) with **cycle
+    detection** (a `base` chain that revisits a name → `ExtendsCycle`). The result is a
+    `TrustedDoc`, so `overlay` still sees two trusted operands — provenance is preserved by
+    construction, not by the loader remembering to check. This finally means what
+    `platform.toml:2` has been implying, without the laundering hole the earlier shared
+    loader opened. If not implemented in the same change, the field is removed from the schema.
 - **Silent fallback dies** (G2): `from_toml_or_confined` is replaced by
   `PolicyDoc::parse(&str) -> Result<…>` (loud) and `EffectivePolicy::deny_all(&registry)`
   (the engine-derived floor: the **empty rule list** — every Grant at its default-deny,
@@ -1705,9 +2258,14 @@ scatter, E4):
 - **Seal mechanics are kept, but the payload binds registry + matcher identity** (E6/Q7).
   MAC, nonce set, `issued_at` window, `ceiling_version` are kept as-is
   (`profile.rs:1287-1317` are sound). The MAC'd payload becomes:
-  1. the **canonical resolved scoped rule set** — grants + requires + injects +
-     validates, each with its `effective_scope`, in the sealed **cross-layer inject
-     total order** (II.4.4) so a reordering tamper fails the MAC;
+  1. the **canonical resolved scoped rule set, WITH its layer boundaries** (H-4) — grants +
+     requires + injects + validates, each with its `effective_scope` **and its layer tag**
+     (`draft` vs `ceiling`, and within the ceiling `env` vs `base`), in the sealed
+     **cross-layer inject total order** (II.4.4). Because `admit` produces a *layered*
+     `EffectivePolicy` whose `grants` query falls through top-down (II.3.2), a flattened
+     re-encoding that merged the layers into one loosest-covering set would change the policy's
+     meaning (an override where the draft is *narrower* than a ceiling rule would be lost). So
+     the seal binds the layer boundaries: a re-flatten OR a reorder tamper fails the MAC;
   2. a **registry digest** — the canonical `PolicyRegistry::digest()` (II.2.1) over the
      **full canonical `KnobDef` encoding** of every knob, i.e.
      `(key, kind, polarity, default, enforcement, object_model, requires_db_privilege)`.
@@ -1743,7 +2301,7 @@ scatter, E4):
 | Was (engine-embedded) | Becomes (zeroship-supplied) |
 |---|---|
 | `policy-profiles/confined.toml` / `platform.toml` (`profile.rs:34-39`) | documents in zeroship's repo, injected via `ProfileCatalog` |
-| 7-column `system_shape` in Rust/TOML/tests (`profile.rs:192-248`) | one **`inject` rule** in zeroship's own catalog, scoped `Of{ include = ["*"], exclude = [` system/journal tables `] }` (all app tables minus bookkeeping); mandatory by union-up composition (no digest pin needed), anchored by a `core.create_table` grant `⊑` the inject scope (II.2.6) and a `table_name_forbidden` predicate over the excluded names |
+| 7-column `system_shape` in Rust/TOML/tests (`profile.rs:192-248`) | one **`inject` rule** in zeroship's **`RootCeiling` document** (NOT a catalog entry — `mandatory = true` is `RootCeiling`-only, II.4.2/M-5), scoped `Of{ include = ["*"], exclude = [` system/journal tables `] }` (all app tables minus bookkeeping); carries `mandatory = true` (drives the `creatable ⊑ inject` lint, II.2.6a) — plus mandatory-by-union-up droppability; anchored by a `core.create_table` grant `⊑` the inject scope (II.2.6) and a `table_name_forbidden` predicate over the excluded names |
 | RLS obligation / hard-delete / sensitive columns | scoped **`require`**/**`validate`** rules (e.g. `require sec.require_rls scope tenant_*`, `validate has_primary_key scope app_*`) in zeroship's catalog |
 | `PLATFORM_*_CEILING_MS` constants (`profile.rs:30-31`) | values in zeroship's root-ceiling document |
 | "no permissive preset" (`profile.rs:115-124`) | zeroship's catalog simply doesn't contain one |
@@ -1785,11 +2343,79 @@ Pre-launch, no external engine users are known; favor the right shape.
     (the oracle's core assertion): for every `w` in a bounded universe, `w` matches BOTH
     inputs iff `w` matches some glob in `∩seg`'s output (no over- or under-approximation);
   - **excludes-aware `⊑`:** the counterexample `{app_*} ⋢ {app_*, exclude app_tmp_*}`;
-  - **pointwise grant:** `timeout=600s@app_*` rejected under ceiling
+  - **pointwise grant (`admit`):** `timeout=600s@app_*` rejected under ceiling
     `60s@app_* + 600s@staging` (multiple ceiling rules on one key), and its Bool/StrSet
     analogues;
-  - **algebra laws:** `strict(clamp(a,b), draft) ≡ strict-against-tightest-chain`
-    pointwise; `⊓`/`⊔` associativity & commutativity; join monotonicity;
+  - **the three operators — trust/fallibility contracts (the oracle asserts each over
+    the whole bounded universe):**
+    - **`overlay(base, over)` — TOTAL, last-wins (PRESENCE-based), no `⊑` constraint.**
+      Never returns an error (total over all pairs — even when `base`/`over` inject rules
+      collide; that surfaces at `finalize_ceiling`, not here). For every **scalar** knob and
+      object, the result value == `over`'s value where `over` has ANY covering rule
+      (presence), else `base`'s value — asserted by a DIRECT last-wins oracle, INCLUDING the
+      loosen case (`base=false, over=true ⇒ true`) to prove overlay is NOT bounded by `⊑`,
+      **and the presence-narrow case** (`base=true, over=false ⇒ false`, `over` wins by
+      presence even lowering to default). **Rule LISTS** (`inject`/`validate`) == the
+      **union** of both layers' rules (accumulate), NOT last-wins, in **base-then-over order**
+      [M-3] — assert both a base-only and an over-only inject/validate rule survive the
+      overlay, and that the effective inject order is base's rules before over's. Also assert
+      the II.5.0 worked results: `overlay(base,dev)` enables `raw_sql`+`pg.extension`,
+      `overlay(base,prod)` tightens the timeout `30000→10000` and accumulates the
+      `require sec.require_approval` obligation;
+    - **`finalize_ceiling(assembled)` — the fallible ceiling gate (H-3).** Assert a
+      collision-free assembled ceiling passes and is IDENTITY on the rule set; assert each
+      conflict class REJECTS: overlapping-scope inject/inject same-column
+      (`CeilingInjectColumnConflict`), PK-pin conflict (`CeilingPrimaryKeyConflict`),
+      duplicate index name (`CeilingIndexNameConflict`), inject-vs-validate contradiction
+      (`CeilingInjectValidateContradiction`). Assert `admit`'s `ceiling` param TYPE forbids an
+      un-finalized ceiling (a compile-time / constructor-level property, exercised by a
+      builder test);
+    - **`restrict(a, b)` — TOTAL, exact meet.** Never rejects; equals the pointwise value
+      meet with scope-meet domain; assert `restrict` associativity & commutativity and
+      `Objects(restrict) == meet` exactly (it is the old clamp — same oracle assertions);
+    - **`admit(ceiling, draft)` — the SOLE fallible operator.** `Ok` **iff** every grant the
+      draft RAISES ABOVE DEFAULT is `⊑` the ceiling pointwise (`∀o ∈ grantedScope(draft,k):
+      value(draft,k,o) ⊑ value(ceiling,k,o)`); every escalation case still REJECTS
+      (the `600s@app_*` case, uncovered-region non-default, `UncoveredRegionNotRepresentable`);
+    - **[C-1] uncovered region via ITERATED per-ceiling-rule subtraction, NOT `⊔`.** The
+      exact counterexample (ceiling rule with an exclude + a disjoint second rule): ceiling
+      grants `raw_sql` on `Of{[app_*], exclude=[app_secret]}` **and** on a disjoint `Of{[reports]}`;
+      draft `raw_sql@app_secret` **MUST REJECT** — assert that the fold
+      `R := grantedScope(draft) ; for each ceiling rule r: R := R ∖ r.effective_scope`
+      leaves `app_secret ∈ R` (non-empty, non-default) ⇒ reject. Assert the OLD
+      `grantedScope(draft) ∖ grantedScope(ceiling)` formula (which `⊔`-folds the ceiling,
+      dropping the `app_secret` exclude) would have WRONGLY ACCEPTED — a direct regression
+      pin on the escalation the C-1 fix closes;
+    - **[H-2] narrow-to-default is representable (presence vs non-default split):** a draft
+      `raw_sql = false` over a ceiling `raw_sql = true@app_*` — assert the effective value at
+      an `app_*` object is `false` (the draft WINS by presence, `coveredScope`), NOT the
+      inherited `true`; and assert this object is NOT escalation-checked (it is in
+      `coveredScope` ∖ `grantedScope`). Same for a Global narrow (`pg.extension = false` over
+      inherited `true`);
+    - **`admit` grants are CEILING-INHERITED + LAYERED (H-4):** effective grants =
+      **inherit-then-narrow** over a `[draft] over [ceiling]` layer stack — where the draft is
+      SILENT (`o ∉ coveredScope(draft,k)`), `value(effective,k,o) == value(ceiling,k,o)`
+      (assert a draft that OMITS a grant the ceiling allows still HAS it — the footgun-fix
+      regression); where the draft raises a grant, it must be `⊑` the ceiling (assert an
+      explicit narrow succeeds and an explicit widen rejects). **[H-4] the layered override**
+      the flat set cannot express: ceiling `timeout=30000@All` + draft `timeout=10000@app_*`
+      — assert the query on `app_main.t` returns `10000` (the draft's narrow, top layer),
+      NOT the flat-loosest `30000`; and on a non-`app_*` object returns `30000` (fall
+      through to the ceiling layer);
+    - **`effective ⊑ ceiling` for ALL keys/objects (the NEW no-escalation invariant):**
+      over the whole bounded (key × object) universe assert `value(effective,k,o) ⊑
+      value(ceiling,k,o)` on BOTH arms — the silent-inherit arm (equality) and the
+      explicit-narrow arm — so inherit-then-narrow provably never exceeds the ceiling;
+    - **obligations union-up survive:** a ceiling require/inject/validate is present in
+      `admit`'s output and un-droppable/un-narrowable by the draft (unchanged);
+  - **two-phase soundness (II.5.0):** `admit(overlay(base, env), draft)` is sound — even
+    where `env` **enabled** something in the trusted phase (`overlay(base,dev)` raised
+    `raw_sql` to true), the untrusted `draft` still cannot exceed `overlay(base,env)`:
+    assert `effective ⊑ overlay(base,env)` for every key/object, and that a draft grant
+    above the *assembled* ceiling rejects;
+  - **algebra laws:** `admit(restrict(a,b), draft) ≡ admit-against-tightest-chain`
+    pointwise (including the ceiling-inherited arm — a silent draft inherits the meet of
+    the chain's values); `⊓`/`⊔` associativity & commutativity; join monotonicity;
     scope-subset transitivity; inject union-up ⇒ ceiling-injection-un-droppable; validate
     accumulation; valued-Require per-object union;
   - **object_model:** Global knob refuses non-⊤ authored scope; Global knob is EXEMPT
@@ -1799,8 +2425,8 @@ Pre-launch, no external engine users are known; favor the right shape.
     under-approximates) the true difference — `Objects(A∖B) ⊇ Objects(A) \ Objects(B)`,
     proven by the oracle as "never a strict subset"; the settled counterexample
     `{app_*} ∖ {app_*, exclude app_tmp_*}` is **non-empty** (retains `app_tmp_*`), so the
-    strict uncovered-region check REJECTS the escalation; a non-representable `∖` returns
-    "not cleanly representable" and the strict grant check REJECTS
+    `admit` uncovered-region check REJECTS the escalation; a non-representable `∖` returns
+    "not cleanly representable" and the `admit` grant check REJECTS
     (`UncoveredRegionNotRepresentable`), never treats it as empty;
   - **normalization:** `App_x`≡`app_x` under `app_*`; `"App_x"` distinct; `"my.table"`
     is one segment;
@@ -1820,13 +2446,27 @@ Pre-launch, no external engine users are known; favor the right shape.
     immutable; `DROP CONSTRAINT <pk>` on a pinned-PK table → `InjectedPrimaryKeyImmutable`;
     `DROP INDEX` on an injected index → `InjectedIndexImmutable`; each waved only by
     `core.alter_injected_column`;
-  - **compose-time collisions:** draft-vs-ceiling inject collision → `compose_strict`
+  - **compose-time collisions:** draft-vs-ceiling inject collision → `admit`
     error; draft `ForbiddenColumns` vs ceiling `Inject` → error; ceiling-vs-ceiling →
-    `compose_clamp` error; author-vs-injected kept at resolve time; single-doc
-    self-contradiction (inject X + `ForbiddenColumns[X]` on overlapping scope) → LOAD-TIME
-    lint error;
+    **`finalize_ceiling` error** (H-3: `overlay`/`restrict` stay TOTAL — the conflict is
+    caught by the finalize gate, not by the combinator); author-vs-injected kept at resolve
+    time; single-doc self-contradiction (inject X + `ForbiddenColumns[X]` on overlapping
+    scope) → LOAD-TIME lint error;
+  - **provenance / `extends` (H-1):** `overlay`/`restrict` accept only `TrustedDoc` (a
+    creator `PolicyDoc` cannot be passed — type-level); a creator DRAFT with an `extends`
+    field → LOAD ERROR (`ExtendsForbiddenInDraft`); a trusted doc `extends` resolves only
+    against trusted catalog bases with cycle detection (`ExtendsCycle` on a revisit,
+    load error on a `base` absent from the trusted catalog);
+  - **root-ceiling identity (M-5):** `mandatory = true` on a catalog entry (non-root) →
+    `MandatoryInjectOnNonRootLayer` load error; zeroship's 7-column inject in the
+    `RootCeiling` carries `mandatory` and fires `CreatableEscapesMandatoryInject` when
+    `creatable ⋢ inject`; an assembled `overlay(base,dev)` that LOOSENS past `base` is still
+    RootCeiling-descended (descent is layer-provenance, not `⊑ base`);
   - **seal binding:** wrong registry digest (incl. a flipped `requires_db_privilege`),
-    wrong `dialect`, or wrong `matcher_version` → verifier hard-fail.
+    wrong `dialect`, or wrong `matcher_version` → verifier hard-fail; **[H-4] a re-flattened
+    layer stack** (the `[draft] over [ceiling]` layers merged into one loosest-covering rule
+    set) → verifier hard-fail, since the seal binds the layer boundaries and the flattened
+    set denotes a different policy.
   (2) The inject/validate rule evaluator (inject-then-validate ordering, cross-layer
   total order); move `table_shape.rs` collision/id-fold/author-PK logic into it; delete
   `system_shape` from policy; add the optional `TableShapeTransform` escape hatch. (3)
@@ -1847,19 +2487,48 @@ Pre-launch, no external engine users are known; favor the right shape.
    the only engine-internal floor is `deny_all` (the empty rule set — grants nothing,
    requires nothing, injects nothing, validates nothing). *Strictly stronger than
    today* (no silent zeroship-confined fallback, no surprise columns).
-2. **No escalation (pointwise over key × object):** `EffectivePolicy` unforgeable; for
-   every Grant key, `compose_strict` rejects any draft whose granted **value at any
-   object** exceeds the root-descended ceiling's value there —
-   `∀o: value(draft,k,o) ⊑ value(ceiling,k,o)` (II.3.2), catching the multi-rule
-   `60s@app_* + 600s@staging` escalation the old scope-only check missed. A draft can
-   widen neither value nor object set. Scope `⊓` is exact and disjoint-meet is `Nothing`
-   (never 𝒰 — II.3.1), so no meet ever escalates. Requires/injects/validates are
-   join-only (valued ones per-object union), so a draft can never drop or scope-narrow a
-   ceiling obligation/injection/validation. Pinned (opaque transform) digests are
-   equality-checked. A rule's scope can only *narrow* its policy's `default_scope`, by
-   the lattice law (II.2.4). An outside consumer *extending* the registry can only add
-   knobs whose defaults are their tightest value (enforced by `KnobDef` construction), so
-   extension can never widen an existing ceiling.
+2. **No escalation — `admit` is the SOLE trust boundary (pointwise over key × object):**
+   `EffectivePolicy` unforgeable and **layered** (`[draft] over [finalized ceiling]`, H-4).
+   `admit` is the **only** operator that crosses a trust boundary and the **only** place
+   *escalation* is checked; `overlay` and `restrict` are **trusted-side, `TrustedDoc`-only**
+   combinators (H-1: an untrusted `PolicyDoc` cannot be an operand — type-enforced) and carry
+   **no escalation constraint** — they are total, never reject, and may freely loosen or
+   tighten because there is no adversary on either input. Ceiling *misconfigurations*
+   (colliding injects/PKs) are caught by the trusted-side `finalize_ceiling` gate (H-3), a
+   loud operator error that is **not** a trust crossing; every assembled ceiling passes it
+   before it can be `admit`'s (type-enforced) argument. The invariant is: **the effective
+   policy produced by `admit` is `⊑` its ceiling for every key/object, whether the draft
+   INHERITED, NARROWED-TO-DEFAULT, or NARROWED-ABOVE-DEFAULT a grant.** Formally, for every
+   Grant key `k` and object `o`, `value(effective,k,o) ⊑ value(ceiling,k,o)` (II.3.2
+   theorem) — proven on all three arms: where the draft is silent (`o ∉ coveredScope(draft,k)`)
+   the effective value **is** the ceiling's (inherited, equality); where the draft narrows to
+   default it wins by presence at the tightest value (`⊑` trivially); where the draft raises
+   above default (`o ∈ grantedScope(draft,k)`) `admit` rejected unless it was `⊑` the ceiling.
+   The **inherit-vs-override decision is PRESENCE-based** (`coveredScope`, H-2) while the
+   **escalation check ranges over non-default grants only** (`grantedScope`, H-2) — the two
+   notions are split so a draft **narrowing to default** (`raw_sql=false` over a ceiling
+   `true`) actually takes effect instead of silently inheriting the looser ceiling value.
+   Grants are **ceiling-inherited** (inherit-then-narrow), so a draft that *omits* a grant
+   keeps the ceiling's — it can neither widen a value nor a scope, and it can no longer
+   silently *lose* a ceiling grant (the old draft-authoritative footgun). The
+   **uncovered-region check uses ITERATED per-ceiling-rule `∖` subtraction, never a
+   `⊔`-materialized ceiling** (C-1) — a `⊔`-folded ceiling drops excludes and would
+   under-approximate the uncovered region (the escalation direction), so the fold subtracts
+   each ceiling rule's own excludes-intact `effective_scope` individually and stays
+   fail-closed. This catches the multi-rule `60s@app_* + 600s@staging` escalation the old
+   scope-only check missed **and** the exclude-drop escalation the old `∖`-of-`⊔` formula
+   admitted (ceiling `raw_sql@Of{[app_*],exclude=[app_secret]} + Of{[reports]}` denies a
+   draft `raw_sql@app_secret`). Scope `⊓` is exact and disjoint-meet is `Nothing` (never 𝒰 —
+   II.3.1), so no meet ever escalates. Requires/injects/validates are join-only (valued ones per-object
+   union), so a draft can never drop or scope-narrow a ceiling obligation/injection/
+   validation. Pinned (opaque transform) digests are equality-checked. A rule's scope can
+   only *narrow* its policy's `default_scope`, by the lattice law (II.2.4). An outside
+   consumer *extending* the registry can only add knobs whose defaults are their tightest
+   value (enforced by `KnobDef` construction), so extension can never widen an existing
+   ceiling. **Two-phase (II.5.0):** no matter how the operator assembles a ceiling with the
+   trusted `overlay`/`restrict` (even enabling `raw_sql` in dev), `admit` still proves the
+   untrusted creator's `effective ⊑ overlay(base,env)`, so trusted assembly never weakens
+   the untrusted boundary — it only sets where the boundary sits.
 2b. **Namespace can't be escaped (II.2.6):** objects come into existence only where
    `core.create_table`/`core.create_schema` grant; a mandatory-inject scope forces
    `creatable ⊑ inject` at compose time, so a tenant cannot create outside the injection;
@@ -1884,9 +2553,12 @@ Pre-launch, no external engine users are known; favor the right shape.
 3. **No unenforced authority:** `DeclaredOnly` knobs cannot reach an enforced path at
    non-default values — the generalized `validate_for_seal`.
 4. **Replay/freshness/ceiling-version + identity binding (II.7):** seal mechanics
-   unchanged; the sealed payload covers the full scoped rule set **in the cross-layer
-   inject total order** (a tampered scope or reorder fails the MAC), plus the **registry
-   digest** over the full `KnobDef` encoding (`requires_db_privilege` included) and the
+   unchanged; the sealed payload covers the full scoped rule set **with its layer boundaries
+   (H-4) in the cross-layer inject total order** (a tampered scope, a reorder, OR a
+   re-flatten that merges the `[draft] over [ceiling]` layers into one loosest-covering set
+   fails the MAC — the layered query means the flattened set is a *different policy*), plus
+   the **registry digest** over the full `KnobDef` encoding (`requires_db_privilege`
+   included) and the
    **`(dialect, matcher_version)`** matcher-semantics pair — the verifier hard-fails a
    seal replayed against a different registry, dialect, or matcher algorithm, so a key's
    meaning cannot drift between mint and verify. The `TableShapeTransform.digest()` is
