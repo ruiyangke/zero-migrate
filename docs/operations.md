@@ -86,9 +86,10 @@ the migration.
 Validation and planning may evaluate the module more than once. A deterministic
 module produces the same reviewed change every time.
 
-Use database-side expressions such as `now()` and `genRandomUuid()` when the
-value should be chosen during execution. `lintDeterminism(source)` can flag some
-common mistakes, but it is a review aid rather than a security boundary.
+Use database-side expressions such as `now()`, `uuidV4()`, and supported
+`uuidV7()` when the value should be chosen during execution.
+`lintDeterminism(source)` can flag some common mistakes, but it is a review aid
+rather than a security boundary.
 
 ### 2. Preview the migration
 

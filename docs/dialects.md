@@ -353,13 +353,20 @@ The following expression features are suitable for all three targets:
 - searched `CASE`;
 - `extract` for year, month, day, hour, minute, and day-of-week;
 - `count`, `sum`, `avg`, `min`, `max`, and `countStar`;
-- `now`, generated UUIDs, and `concatWs` with a literal separator;
+- `now`, capability-gated exact RFC 9562 UUIDv4 generation with `uuidV4()`,
+  and `concatWs` with a literal separator;
 - `splitPart` with a one-character ASCII delimiter and a part from 1 through 8.
 
 An expression may still be invalid in a particular location. Aggregates belong
 in view projections or `having`. Defaults cannot reference columns. Generated
 columns, checks, domains, and index expressions must not use volatile values or
 aggregates.
+
+Database UUID generation is capability-gated at apply: `uuidV4()` requires
+PostgreSQL 13 or newer, or MySQL 8.0.13 or newer with InnoDB and both global and
+session `binlog_format` set to `ROW`. SQLite uses the engine's exact synthesized
+expression and needs no server-version probe. `uuidV7()` additionally requires
+PostgreSQL 18 or newer.
 
 Target-specific expressions:
 
@@ -373,6 +380,7 @@ Target-specific expressions:
 | `stringAgg`, `arrayAgg`, `boolAnd`, `boolOr` | Yes | No | No |
 | `concatWs` with computed separator | Yes | No | Yes |
 | Wider `splitPart` delimiter or part above 8 | Yes | No | No |
+| `uuidV7()` database generation | PostgreSQL 18+ | No | No |
 
 There is no raw expression escape. Use a supported structured expression or
 write explicit target branches.

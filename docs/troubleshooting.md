@@ -106,8 +106,8 @@ new forward migration when a deployed schema needs correction.
 
 A migration may be evaluated more than once. Do not use `Date.now()`,
 `Math.random()`, environment-dependent branches, network reads, or mutable
-module state inside `up()`. Use database expression helpers such as `now()` and
-`genRandomUuid()` when you need values at apply time.
+module state inside `up()`. Use database expression helpers such as `now()`,
+`uuidV4()`, and supported `uuidV7()` when you need values at apply time.
 
 Run preview repeatedly while investigating:
 

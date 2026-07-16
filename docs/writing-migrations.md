@@ -237,7 +237,7 @@ Use JavaScript literals or the package's value constructors:
 ```ts
 table("jobs").create({
   columns: {
-    id: t.uuid().notNull().default(genRandomUuid()),
+    id: t.uuid().notNull().default(uuidV4()),
     attempts: t.int().notNull().default(0),
     queued_at: t.timestamp().notNull().default(now()),
     tags: t.textArray().notNull().default([]),
@@ -270,9 +270,11 @@ well-formed base64 and is decoded into database bytes; the base64 text itself is
 not stored. You can also pass a `Uint8Array` directly wherever a scalar value is
 accepted, including compatible column defaults and backfill assignments.
 
-Use `now()` and `genRandomUuid()` when the database should choose the value at
-apply time. JavaScript `bigint` values are not accepted. A string default is
-always a string literal; it is never interpreted as SQL.
+Use `now()`, `uuidV4()`, and (on PostgreSQL 18+) `uuidV7()` when the database
+should choose the value at apply time. `genRandomUuid()` remains as a deprecated
+source alias for `uuidV4()` and records the same exact expression. JavaScript
+`bigint` values are not accepted. A string default is always a string literal;
+it is never interpreted as SQL.
 
 PostgreSQL sequences can supply integer defaults through
 `nextval("sequence_name")`. Sequence defaults are not portable to SQLite or
@@ -665,7 +667,7 @@ The common expression vocabulary includes:
 | Date/string helpers | `extract`, `splitPart` |
 | Aggregates | `count`, `sum`, `avg`, `min`, `max` |
 
-Top-level helpers include `lit`, `now`, `genRandomUuid`, `concatWs`,
+Top-level helpers include `lit`, `now`, `uuidV4`, `uuidV7`, `concatWs`,
 `countStar`, `interval`, `currentSetting`, and `currentUser`. Several are
 PostgreSQL-only; see [Expression compatibility](dialects.md#expressions).
 
@@ -955,7 +957,7 @@ because they receive stronger portability and safety checks.
 Migration files should produce the same plan every time they are loaded:
 
 - Use `now()` instead of `Date.now()`.
-- Use `genRandomUuid()` instead of calling a random UUID function.
+- Use `uuidV4()` or supported `uuidV7()` instead of calling a random UUID function.
 - Do not read environment variables, files, network responses, or the live
   clock to decide which operations to add.
 - Keep database values inside structured expressions.
