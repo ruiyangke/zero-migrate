@@ -134,11 +134,11 @@ jobs:
       - name: zero-migrate test
         run: pnpm --filter zero-migrate test
 
-      - name: zero-migrate-engine typecheck
-        run: pnpm --filter zero-migrate-engine typecheck
+      - name: zero-migrate-cli typecheck
+        run: pnpm --filter zero-migrate-cli typecheck
 
-      - name: zero-migrate-engine test:docs
-        run: pnpm --filter zero-migrate-engine test:docs
+      - name: zero-migrate-cli test:docs
+        run: pnpm --filter zero-migrate-cli test:docs
 
   # ---------------------------------------------------------------------------
   # napi: build the shipped release `.node` addon to prove it links + loads. A
@@ -155,12 +155,16 @@ jobs:
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # The addon build uses npm (bundled with Node), not pnpm — the napi crate is
-      # not a pnpm workspace member, so no pnpm setup / pnpm cache is needed here.
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Install Node 22
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          cache: pnpm
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4
@@ -173,17 +177,16 @@ jobs:
           restore-keys: |
             cargo-napi-${{ runner.os }}-
 
-      # The napi crate is NOT a pnpm workspace member (pnpm-workspace.yaml only
-      # globs `sdks/*`); it carries its own `@napi-rs/cli` devDep, installed with
-      # npm inside the crate dir. `napi build --platform --release` (the crate's
-      # `build` script) then emits the loadable `zero-migrate-node.linux-x64-gnu.node`
-      # for the runner's linux-x64 triple, proving the shipped addon compiles +
-      # links under the release profile (workspace-root lto + strip).
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # `zero-migrate-node` is a pnpm workspace member; its `build` script runs
+      # `napi build --platform --release`, emitting the loadable
+      # `zero-migrate-node.linux-x64-gnu.node` for the runner's triple under the
+      # release profile (workspace-root lto + strip). This proves the shipped addon
+      # compiles and links; the full cross-target matrix is a release concern.
       - name: build release addon
-        working-directory: crates/zero-migrate-node
-        run: |
-          npm install
-          npm run build
+        run: pnpm --filter zero-migrate-node build
 
   # ---------------------------------------------------------------------------
   # host: the engine host e2e suite (`test:host`), which drives the REAL napi
@@ -265,21 +268,19 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
 
-      # The host tests load the built addon via ZERO_MIGRATE_ADDON_PATH (default:
+      # The host tests load the built addon (resolved through the `zero-migrate-node`
+      # workspace package, or via ZERO_MIGRATE_ADDON_PATH ->
       # crates/zero-migrate-node/zero-migrate-node.linux-x64-gnu.node), so build it
-      # first. The napi crate is not a pnpm workspace member — it carries its own
-      # `@napi-rs/cli` devDep, installed with npm inside the crate dir.
+      # first. `zero-migrate-node` is a pnpm workspace member; its `build` script
+      # runs `napi build`.
       - name: build release addon
-        working-directory: crates/zero-migrate-node
-        run: |
-          npm install
-          npm run build
+        run: pnpm --filter zero-migrate-node build
 
-      # Build the SDK dist (zero-migrate DSL + engine host) the host tests import.
+      # Build the SDK dist (zero-migrate DSL + zero-migrate-cli host) the host tests import.
       - name: pnpm -w build
         run: pnpm -w build
 
       # Runs tests/host/*.test.ts: the live-PG `authoring` + `e2e-pg` suites AND the
       # live-MySQL `mysql-authoring` suite, all against the service containers above.
-      - name: zero-migrate-engine test:host (live PG + MySQL)
-        run: pnpm --filter zero-migrate-engine test:host
+      - name: zero-migrate-cli test:host (live PG + MySQL)
+        run: pnpm --filter zero-migrate-cli test:host

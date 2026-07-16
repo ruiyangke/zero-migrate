@@ -1,0 +1,192 @@
+name: Release
+
+# Publish the JS packages to npm on a version tag (for example v0.1.0):
+#   1. build the native addon for every target (one job per platform), and
+#   2. assemble the per-platform packages and publish everything.
+#
+# Auth is npm Trusted Publishing (OIDC): no NPM_TOKEN secret in this workflow.
+# One-time bootstrap is required first: OIDC cannot create a brand-new package, and
+# a trusted publisher can only be configured on a package that already exists. So
+# the very first publish of each of the eight names (zero-migrate, zero-migrate-cli,
+# zero-migrate-node, and the five zero-migrate-node-<triple> packages) must be done
+# once by hand with a granular npm token (or as 0.0.0 placeholders). Then register
+# this repository + this workflow as each package's trusted publisher on npmjs.com.
+# After that this tag-triggered workflow publishes with no token, and provenance is
+# generated automatically.
+#
+# First automated run: tag a prerelease (for example v0.1.0-rc.1) to validate.
+# The linux-arm64 build cross-compiles the C dependencies (libpg_query via pg_query,
+# bundled SQLite via rusqlite) and is the step most likely to need adjustment.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both Linux targets build against napi's glibc 2.17 sysroot (sysroot:
+          # true) so the .node loads on older distros, not just ubuntu-latest.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            sysroot: true
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-latest
+            sysroot: true
+          # macOS: pin the deployment floor so the C deps do not follow the SDK.
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            deployment: "10.13"
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            deployment: "11.0"
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install stable Rust (with target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # Native build (macOS and Windows). MACOSX_DEPLOYMENT_TARGET pins the macOS
+      # floor so the C deps (pg_query, bundled SQLite via cc-rs) do not follow the
+      # runner SDK; the env var is ignored off macOS.
+      - name: build addon (native)
+        if: ${{ !matrix.sysroot }}
+        working-directory: crates/zero-migrate-node
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment }}
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }}
+
+      # Linux build against napi's glibc 2.17 sysroot via --use-napi-cross (a gcc
+      # cross toolchain, used for x64 and arm64 alike). This gives the widest glibc
+      # compatibility and also compiles the C dependencies. These are the targets to
+      # watch on the first release run.
+      - name: build addon (linux sysroot)
+        if: ${{ matrix.sysroot }}
+        working-directory: crates/zero-migrate-node
+        run: pnpm exec napi build --platform --release --target ${{ matrix.target }} --use-napi-cross
+
+      - name: Upload built .node
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: crates/zero-migrate-node/*.node
+          if-no-files-found: error
+
+  publish:
+    name: publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for OIDC trusted publishing and automatic provenance.
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # Deliberately no registry-url: it writes a placeholder NODE_AUTH_TOKEN
+          # into .npmrc that can shadow OIDC trusted publishing. npm publish
+          # defaults to registry.npmjs.org and authenticates via the OIDC id-token.
+
+      # OIDC trusted publishing needs a recent npm; Node 22 ships an older one.
+      - name: Update npm (for OIDC trusted publishing)
+        run: npm install -g npm@latest
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      # Build the JS dist for the DSL and the CLI packages.
+      - name: Build JS packages
+        run: pnpm -w build
+
+      # Collect every target's .node into crates/zero-migrate-node/artifacts/.
+      - name: Download built binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: crates/zero-migrate-node/artifacts
+          pattern: bindings-*
+          merge-multiple: true
+
+      # Regenerate the per-platform npm/<triple>/ dirs from the addon package.json
+      # (so they are never stale), then distribute each downloaded .node into its
+      # dir. Both flags are the napi defaults; kept explicit.
+      - name: Assemble platform packages
+        working-directory: crates/zero-migrate-node
+        run: |
+          pnpm exec napi create-npm-dirs
+          pnpm exec napi artifacts --npm-dir npm --output-dir artifacts
+
+      # Fail loudly if any target's binary is missing: pre-publish would otherwise
+      # skip it silently and publish an addon whose optionalDependencies point at
+      # never-published platform packages.
+      - name: Verify all five platform binaries are present
+        working-directory: crates/zero-migrate-node
+        run: |
+          count=$(ls npm/*/*.node 2>/dev/null | wc -l)
+          test "$count" -eq 5 || { echo "expected 5 platform binaries, found $count"; ls -R npm; exit 1; }
+
+      # Publish the five zero-migrate-node-<triple> platform packages. OIDC auth is
+      # picked up from the id-token permission. --no-gh-release: pre-publish tries to
+      # cut a GitHub release by default, which needs GITHUB_TOKEN + contents: write
+      # (neither is granted here).
+      - name: Publish platform packages
+        working-directory: crates/zero-migrate-node
+        run: pnpm exec napi pre-publish -t npm --no-gh-release
+
+      # Publish the main addon package (index.js loader + index.d.ts + the platform
+      # packages as optionalDependencies). It has no workspace: deps, so npm can
+      # publish it directly.
+      - name: Publish zero-migrate-node
+        working-directory: crates/zero-migrate-node
+        run: npm publish --access public
+
+      # The DSL and CLI packages carry workspace:* deps. `pnpm pack` rewrites those
+      # to the real 0.1.0 versions inside the tarball; `npm publish <tarball>` then
+      # publishes it under OIDC. Publish the DSL before the CLI that depends on it.
+      - name: Publish zero-migrate and zero-migrate-cli
+        run: |
+          set -euo pipefail
+          out="${RUNNER_TEMP}/tarballs"
+          mkdir -p "$out"
+          dsl=$(cd packages/zero-migrate && pnpm pack --pack-destination "$out" | tail -n1)
+          cli=$(cd packages/zero-migrate-cli && pnpm pack --pack-destination "$out" | tail -n1)
+          npm publish "$dsl" --access public
+          npm publish "$cli" --access public
