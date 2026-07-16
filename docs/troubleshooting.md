@@ -48,7 +48,7 @@ Rebuild after changing Node, Rust, the operating system, or CPU architecture.
 
 ### `Unknown file extension ".ts"`
 
-Run the source-checkout CLI with the TypeScript loader from `sdks/engine`:
+Run the source-checkout CLI with the TypeScript loader from `packages/zero-migrate-cli`:
 
 ```bash
 pnpm exec tsx dist/cli-bin.js preview --dir ./migrations
@@ -238,7 +238,7 @@ Review the actual destructive change, then pass approval from trusted deployment
 code:
 
 ```typescript
-import { apply } from "zero-migrate-engine";
+import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715120000_remove_legacy_field.js";
 
 await apply({

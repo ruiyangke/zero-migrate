@@ -30,7 +30,17 @@ export default defineConfig([
       cli: "src/cli.ts",
       "cli-bin": "src/cli-bin.ts",
     },
-    external: ["pg", "mysql2", "mysql2/promise", "zero-migrate"],
+    // `tsx` is an optionalDependency the CLI lazily `import()`s to load `.ts`
+    // migrations; keep it external so esbuild never inlines the loader.
+    external: [
+      "pg",
+      "mysql2",
+      "mysql2/promise",
+      "zero-migrate",
+      "zero-migrate-node",
+      "tsx",
+      "tsx/esm/api",
+    ],
     clean: true,
   },
 ]);

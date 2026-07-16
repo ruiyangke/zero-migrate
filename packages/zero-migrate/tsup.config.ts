@@ -14,10 +14,10 @@ export default defineConfig([
   {
     ...shared,
     // The public DSL entry (`.`) + the framework-internal pure-JS recorder
-    // (`./internal/recorder`) exposed to the `zero-migrate-engine` host
+    // (`./internal/recorder`) exposed to the `zero-migrate-cli` host
     // package via a documented subpath export. This package carries ZERO native
     // code and ZERO runtime deps; the host/addon/drivers live in the separate
-    // `zero-migrate-engine` package.
+    // `zero-migrate-cli` package.
     entry: {
       index: "src/index.ts",
       "internal/recorder": "src/internal/recorder.ts",

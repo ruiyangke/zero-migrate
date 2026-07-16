@@ -119,7 +119,7 @@ and must be audited before rollout. See the
 | Package | Use it for |
 | --- | --- |
 | `zero-migrate` | Writing typed migration modules |
-| `zero-migrate-engine` | Validating and applying ordered schema/data migrations, resolving PostgreSQL online renames, and reading status from Node or the CLI |
+| `zero-migrate-cli` | Validating and applying ordered schema/data migrations, resolving PostgreSQL online renames, and reading status from Node or the CLI |
 
 The package names are reserved by this workspace but are not published to npm
 for this release.
@@ -157,11 +157,10 @@ the project internals.
 
 ## Project status
 
-zero-migrate is pre-release. The Rust workspace is version `0.1.0` and the
-JavaScript workspaces are version `0.0.0`. Expect API changes until the first
-stable release, pin the exact revision you deploy, and review the documented
-limitations before production use.
+zero-migrate is pre-release. The Rust workspace and the JavaScript packages are
+version `0.1.0`. Expect API changes until the first stable release, pin the exact
+revision you deploy, and review the documented limitations before production use.
 
 ## License
 
-Apache-2.0.
+MIT. See [LICENSE](LICENSE).

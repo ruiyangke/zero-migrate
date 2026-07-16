@@ -1,5 +1,10 @@
 packages:
-  - "sdks/*"
+  - "packages/*"
+  # The N-API addon crate is a first-class publishable npm package
+  # (`zero-migrate-node`) so `zero-migrate-cli` resolves it as `workspace:*`
+  # in the monorepo and pnpm links the built `.node`. It uses `napi build`, not
+  # tsup, but is otherwise an ordinary workspace member.
+  - "crates/zero-migrate-node"
 
 onlyBuiltDependencies:
   - esbuild

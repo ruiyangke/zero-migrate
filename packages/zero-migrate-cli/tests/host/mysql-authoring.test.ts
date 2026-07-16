@@ -24,7 +24,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { apply } from "zero-migrate-engine";
+import { apply } from "zero-migrate-cli";
 import { byteValue, decimal, table, t } from "zero-migrate";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

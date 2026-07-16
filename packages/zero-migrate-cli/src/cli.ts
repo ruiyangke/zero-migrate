@@ -24,10 +24,12 @@
 // point it at pre-built `.js`/`.mjs`.
 
 import { readdir, mkdir, writeFile, access, readFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import { join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   apply,
+  history,
   plan,
   resolvePending,
   status,
@@ -47,6 +49,53 @@ const DEFAULT_DIR = "./migrations";
 const DEFAULT_SCHEMA = "public";
 /** The default deploying app id when none is given. */
 const DEFAULT_OWNER_APP = "app_cli";
+
+/** This package's version, read from its own `package.json`. `new URL("../package.json",
+ *  import.meta.url)` resolves to the package root whether the CLI runs from published
+ *  `dist/` or a bundled dev chunk. */
+function packageVersion(): string {
+  try {
+    const pkg = readFileSync(new URL("../package.json", import.meta.url), "utf8");
+    return (JSON.parse(pkg) as { version?: string }).version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+/** Lazily activate a TypeScript loader so `.ts`/`.mts`/`.cts` migrations can be
+ *  dynamically `import()`ed under plain Node. No-op when the set is pure `.js`, when a
+ *  parent loader (tsx / ts-node via `--import` or `NODE_OPTIONS`) already handles TS, or
+ *  on Bun (native TS). Registers `tsx` once if resolvable; otherwise fails with
+ *  actionable guidance. */
+let tsLoaderReady = false;
+async function ensureTsLoader(files: readonly MigrationFile[]): Promise<void> {
+  if (tsLoaderReady) return;
+  const needsTs = files.some((f) => /\.(ts|mts|cts)$/i.test(f.path));
+  if (!needsTs) {
+    tsLoaderReady = true;
+    return;
+  }
+  const parentLoaderActive =
+    process.versions.bun !== undefined ||
+    process.execArgv.some((a) => a.includes("tsx") || a.includes("ts-node")) ||
+    (process.env.NODE_OPTIONS ?? "").includes("tsx");
+  if (parentLoaderActive) {
+    tsLoaderReady = true;
+    return;
+  }
+  try {
+    const tsx = (await import("tsx/esm/api")) as { register: () => unknown };
+    tsx.register();
+    tsLoaderReady = true;
+  } catch {
+    throw new CliError(
+      "these migrations are TypeScript (.ts) but no TypeScript loader is active. Install " +
+        "`tsx` (it ships as an optional dependency of zero-migrate-cli) so the CLI can load " +
+        "them, run the CLI under `npx tsx zero-migrate ...` or Bun, or point --dir at compiled " +
+        ".js migrations.",
+    );
+  }
+}
 
 /** A migration source file + its dynamic-import URL. */
 interface MigrationFile {
@@ -98,6 +147,7 @@ function parseArgs(argv: string[]): Args {
     resolveAbort: false,
   };
   let helpRequested = false;
+  let versionRequested = false;
   const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -161,6 +211,10 @@ function parseArgs(argv: string[]): Args {
         rejectInlineVal();
         args.resolveAbort = true;
         break;
+      case "version":
+        rejectInlineVal();
+        versionRequested = true;
+        break;
       case "help":
         rejectInlineVal();
         helpRequested = true;
@@ -168,6 +222,10 @@ function parseArgs(argv: string[]): Args {
       default:
         throw new CliError(`unknown flag --${key}`);
     }
+  }
+  if (versionRequested) {
+    args.command = "version";
+    return args;
   }
   if (helpRequested) {
     args.command = "help";
@@ -399,6 +457,7 @@ interface PlanLine {
 async function runPreview(args: Args): Promise<number> {
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
   const irVersion = currentIrVersion();
   const envelopes = [];
   for (const f of files) {
@@ -429,6 +488,7 @@ async function runApply(args: Args): Promise<number> {
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
   const migrations = await importMigrations(files);
   assertUniqueMigrationNames(migrations);
   for (const { file, migration } of migrations) {
@@ -458,6 +518,7 @@ async function runStatus(args: Args): Promise<number> {
   const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
   const migrations = await Promise.all(files.map((file) => importMigration(file.path)));
   const reply = await status({
     ownerApp: args.ownerApp,
@@ -509,6 +570,36 @@ async function runResolvePending(args: Args): Promise<number> {
   return 0;
 }
 
+/** `history` prints the append-only migration audit trail over the
+ *  `--database-url` driver. PostgreSQL only (the journal history verb is PG-backed). */
+async function runHistory(args: Args): Promise<number> {
+  if (!args.databaseUrl) {
+    throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
+  }
+  const driver = driverFor(args.databaseUrl);
+  if (driver.kind !== "postgres") {
+    throw new CliError("history supports only PostgreSQL");
+  }
+  const reply = await history({
+    ownerApp: args.ownerApp,
+    projectSchema: args.projectSchema,
+    driver,
+  });
+  if (args.json) {
+    process.stdout.write(
+      JSON.stringify(reply, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2) + "\n",
+    );
+  } else {
+    for (const e of reply.events) {
+      process.stdout.write(
+        `#${e.eventSeq} ${e.kind} ${e.name} (${e.version}) by ${e.appliedBy} at ${e.at}\n`,
+      );
+    }
+    if (reply.events.length === 0) process.stdout.write("history: (no recorded events)\n");
+  }
+  return 0;
+}
+
 /** The `--help` / usage text. */
 const USAGE = `zero-migrate: database migrations from JavaScript
 
@@ -518,7 +609,9 @@ Usage:
   zero-migrate preview [--dir <dir>] [--json]
   zero-migrate apply   [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
   zero-migrate status  [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate history [--database-url <url>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
+  zero-migrate --version
 
 Flags:
   --dir <dir>           Migration directory (default ./migrations)
@@ -531,10 +624,13 @@ Flags:
   --apply               Complete an online rename and keep the new column
   --abort               Abort an online rename and keep the old column
   --json                Machine-readable output where supported
+  --version             Print the zero-migrate version
   --help                This help
 
-new/plan/preview are offline and do not connect to a database. apply/status
-support PostgreSQL and MySQL 8. Use the Rust API to apply SQLite migrations.
+new/plan/preview are offline and do not connect to a database. apply/status/history
+support PostgreSQL (history is PostgreSQL only); apply/status also support MySQL 8.
+Use the Rust API to apply SQLite migrations. TypeScript (.ts) migrations load via
+tsx (an optional dependency) -- install it, or run under "npx tsx" or Bun.
 `;
 
 /** Entry point: parse, dispatch, map thrown `CliError` to a clean non-zero exit. */
@@ -545,6 +641,10 @@ export async function main(argv: string[]): Promise<number> {
   } catch (e) {
     process.stderr.write(`zero-migrate: ${(e as Error).message}\n`);
     return 1;
+  }
+  if (args.command === "version") {
+    process.stdout.write(`${packageVersion()}\n`);
+    return 0;
   }
   if (args.command === "" || args.command === "help") {
     process.stdout.write(USAGE);
@@ -562,6 +662,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runApply(args);
       case "status":
         return await runStatus(args);
+      case "history":
+        return await runHistory(args);
       case "resolve-pending":
         return await runResolvePending(args);
       default:
@@ -579,6 +681,7 @@ export async function main(argv: string[]): Promise<number> {
 async function runPlanResolved(args: Args): Promise<number> {
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  await ensureTsLoader(files);
   const registry = await loadRegistry(args.registryPath);
   const migrations = await importMigrations(files);
   assertUniqueMigrationNames(migrations);

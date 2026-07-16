@@ -22,7 +22,7 @@ default-members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 
 # ---------------------------------------------------------------------------
 # Shared dependency versions (single source of truth)

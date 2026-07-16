@@ -33,7 +33,7 @@ import type {
   StatusReply,
   HistoryReply,
   LoadVerifyReply,
-} from "../../../crates/zero-migrate-node/index.js";
+} from "zero-migrate-node";
 
 export type {
   ApplyRequest,
@@ -104,59 +104,47 @@ export interface MigrateAddon {
 let cached: MigrateAddon | null = null;
 
 /**
- * Load the prebuilt `.node`. Resolution order (napi-rs prebuild convention):
- *  1. `ZERO_MIGRATE_ADDON_PATH` env override (an explicit `.node` path — used in dev
- *     / by the oracle to point at the freshly-`napi build`'d artifact).
- *  2. the bundled `native/migrate.<platform>.node` shipped with this package.
+ * Load the native addon. Resolution order:
+ *  1. `ZERO_MIGRATE_ADDON_PATH` env override: an explicit `.node` path, used in
+ *     dev / CI to point at a freshly-`napi build`'d artifact without a publish.
+ *  2. the `zero-migrate-node` package: its generated loader (`index.js`) picks the
+ *     correct prebuilt binary for `process.platform`/`arch`/libc, whether that is a
+ *     sibling `.node` (monorepo dev) or one of the `zero-migrate-node-<triple>`
+ *     optionalDependencies (published install).
  *
- * There is deliberately NO hard-coded sibling-crate fallback: this is a standalone
- * npm package with no monorepo-relative build layout to assume. In dev, point
- * `ZERO_MIGRATE_ADDON_PATH` at the `napi build` output.
+ * `zero-migrate-node` is a real `dependency` of this package, so the platform
+ * resolution and the "npm optional-deps bug" guidance all live in its generated
+ * loader; we never re-implement triple math here.
  *
- * @throws if no `.node` can be resolved/loaded (with the tried paths).
+ * @throws if neither the override nor `zero-migrate-node` yields a usable addon.
  */
 export function loadAddon(): MigrateAddon {
   if (cached) return cached;
   const require = createRequire(import.meta.url);
-  const tried: string[] = [];
-
-  const candidates = addonCandidates();
-  for (const p of candidates) {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require(p) as MigrateAddon;
-      if (mod && typeof mod.irVersion === "function") {
-        cached = mod;
-        return mod;
-      }
-      tried.push(`${p} (loaded but missing irVersion)`);
-    } catch (e) {
-      tried.push(`${p} (${(e as Error).message})`);
-    }
-  }
-  throw new Error(
-    "zero-migrate-engine: could not load the native addon (.node). Tried:\n  " +
-      tried.join("\n  ") +
-      "\nSet ZERO_MIGRATE_ADDON_PATH to an explicit .node path, or run `napi build` in " +
-      "crates/zero-migrate-node and ship native/.",
-  );
-}
-
-/** The ordered `.node` candidate paths (see {@link loadAddon}). */
-function addonCandidates(): string[] {
-  const out: string[] = [];
   const override = process.env.ZERO_MIGRATE_ADDON_PATH;
-  if (override) out.push(override);
-  const { platform, arch } = process;
-  // The napi-rs default triple spelling (linux-x64-gnu, darwin-arm64, win32-x64, …).
-  const abi = platform === "linux" ? "-gnu" : "";
-  const triple = `${platform}-${arch}${abi}`;
-  // Bundled with the package (populated by the prebuild step). `import.meta.url` is
-  // the compiled `dist/index.js`, so the package root is `../` and `native/` sits
-  // beside `dist/`.
-  out.push(new URL(`../native/migrate.${triple}.node`, import.meta.url).pathname);
-  out.push(new URL(`../native/index.node`, import.meta.url).pathname);
-  return out;
+  const target = override ?? "zero-migrate-node";
+  let mod: MigrateAddon;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    mod = require(target) as MigrateAddon;
+  } catch (e) {
+    throw new Error(
+      `zero-migrate-cli: could not load the native addon from ${JSON.stringify(target)}: ` +
+        `${(e as Error).message}\n` +
+        (override
+          ? "The ZERO_MIGRATE_ADDON_PATH override does not point at a loadable .node."
+          : "Install the platform binary (it ships as an optionalDependency of " +
+            "zero-migrate-node), or set ZERO_MIGRATE_ADDON_PATH to a `napi build` output."),
+    );
+  }
+  if (!mod || typeof mod.irVersion !== "function") {
+    throw new Error(
+      `zero-migrate-cli: the native addon loaded from ${JSON.stringify(target)} is missing ` +
+        "irVersion(): it is not a zero-migrate-node build.",
+    );
+  }
+  cached = mod;
+  return mod;
 }
 
 /** The addon's IR-format version — the single source of truth. */

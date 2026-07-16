@@ -1,10 +1,10 @@
-// `zero-migrate-engine` — the creator-facing HOST runtime.
+// `zero-migrate-cli` — the creator-facing HOST runtime.
 //
 // A thin async layer over the prebuilt N-API addon (`crates/zero-migrate-node`).
 // The creator never sees N-API, `driver::Row`, or the `hostDriver`
 // callback:
 //
-//   import { apply, plan, status, history, validate } from "zero-migrate-engine";
+//   import { apply, plan, status, history, validate } from "zero-migrate-cli";
 //   await apply({ migration, ownerApp, projectSchema, driver: { kind:"postgres", url } });
 //
 // The flow for `apply`:
@@ -76,7 +76,7 @@ async function openSession(
     return { hostDriver: s.hostDriver, close: s.close };
   }
   throw new Error(
-    `zero-migrate-engine: unsupported driver ${JSON.stringify((driver as { kind: string }).kind)}`,
+    `zero-migrate-cli: unsupported driver ${JSON.stringify((driver as { kind: string }).kind)}`,
   );
 }
 
@@ -167,12 +167,12 @@ export async function resolvePending(
 ): Promise<ApplyOutcome> {
   if (opts.driver.kind !== "postgres") {
     throw new Error(
-      "zero-migrate-engine: pending-contract resolution supports only PostgreSQL online renames",
+      "zero-migrate-cli: pending-contract resolution supports only PostgreSQL online renames",
     );
   }
   if (opts.approved !== true) {
     throw new Error(
-      "zero-migrate-engine: pending-contract resolution requires explicit approval",
+      "zero-migrate-cli: pending-contract resolution requires explicit approval",
     );
   }
   const addon = loadAddon();
@@ -297,7 +297,7 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
         opts.nameFallbacks.length !== opts.migrations.length
       ) {
         throw new Error(
-          "zero-migrate-engine: status nameFallbacks must match migrations length",
+          "zero-migrate-cli: status nameFallbacks must match migrations length",
         );
       }
       const envelopes = opts.migrations.map((migration, index) =>
@@ -331,7 +331,7 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
  *  typed `HistoryReply` (no JSON parse; `eventSeq` is a `bigint`). */
 export async function history(opts: HostStatusOptions): Promise<HistoryReply> {
   if (opts.driver.kind !== "postgres") {
-    throw new Error("zero-migrate-engine: history supports only PostgreSQL");
+    throw new Error("zero-migrate-cli: history supports only PostgreSQL");
   }
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);

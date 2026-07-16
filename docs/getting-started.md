@@ -5,7 +5,7 @@ zero-migrate migration. The live example uses PostgreSQL. MySQL and SQLite
 differences are covered at the end.
 
 zero-migrate is currently pre-release: `zero-migrate` and
-`zero-migrate-engine` are not published to npm yet. For now, use this repository
+`zero-migrate-cli` are not published to npm yet. For now, use this repository
 checkout.
 
 ## Before you begin
@@ -59,7 +59,7 @@ The source-checkout CLI lives in the engine workspace. Run the rest of this
 walkthrough from there:
 
 ```bash
-cd sdks/engine
+cd packages/zero-migrate-cli
 pnpm exec tsx dist/cli-bin.js --help
 ```
 
@@ -290,7 +290,7 @@ Applications and deployment tools can validate and apply an imported migration
 directly:
 
 ```ts
-import { apply, plan } from "zero-migrate-engine";
+import { apply, plan } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_users.js";
 
 const report = plan({
@@ -346,7 +346,7 @@ When a migration touches a table created by an earlier file, the host must
 provide the trusted ownership registry:
 
 ```typescript
-import { apply } from "zero-migrate-engine";
+import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715100000_add_user_timezone.js";
 
 await apply({
@@ -532,7 +532,7 @@ Node and CLI status support MySQL when supplied with the migration set. Public
 The Node API can validate for SQLite:
 
 ```typescript
-import { plan } from "zero-migrate-engine";
+import { plan } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_users.js";
 
 const report = plan({

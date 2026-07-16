@@ -33,7 +33,7 @@ Most users work with two packages:
 | Package | Use it for |
 | --- | --- |
 | `zero-migrate` | Write migrations with `table`, `view`, `t`, expressions, and related helpers |
-| `zero-migrate-engine` | Preview, validate, plan, apply, resolve PostgreSQL online renames, inspect status/history, and run the CLI |
+| `zero-migrate-cli` | Preview, validate, plan, apply, resolve PostgreSQL online renames, inspect status/history, and run the CLI |
 
 A migration module is ordinary TypeScript:
 
@@ -83,7 +83,7 @@ complete public JavaScript option set, including a migration role and audit
 actor:
 
 ```ts
-import { apply } from "zero-migrate-engine";
+import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_projects.js";
 
 await apply({

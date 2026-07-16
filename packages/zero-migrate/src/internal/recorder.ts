@@ -24,7 +24,7 @@
 // (the migration's `table()`/`t.*`) and this recorder module import — so they
 // resolve to the SAME ambient recorder singleton, which is the load-bearing
 // requirement (a duplicated module would drain an empty op list). It is exposed to
-// the `zero-migrate-engine` host package via the documented `./internal/recorder`
+// the `zero-migrate-cli` host package via the documented `./internal/recorder`
 // subpath export (the ONE sanctioned consumer) — NOT part of the public `.` API.
 import { __abort, __begin, __drain } from "../ops.js";
 

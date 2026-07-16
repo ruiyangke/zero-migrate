@@ -127,7 +127,7 @@ zero-migrate plan \
 The Node API exposes the same choice programmatically:
 
 ```ts
-import { plan } from "zero-migrate-engine";
+import { plan } from "zero-migrate-cli";
 
 const report = plan({
   migration,
@@ -313,7 +313,7 @@ The approved initial `apply()` returns the outstanding obligation in
 `pendingContracts`:
 
 ```ts
-import { apply } from "zero-migrate-engine";
+import { apply } from "zero-migrate-cli";
 import * as renameUsersDisplayName from "./migrations/20260716120000_rename_users_display_name.js";
 
 const result = await apply({
@@ -367,7 +367,7 @@ the rollout.
 Complete a successful rollout from Node:
 
 ```ts
-import { resolvePending } from "zero-migrate-engine";
+import { resolvePending } from "zero-migrate-cli";
 
 await resolvePending({
   ownerApp: "app_demo",

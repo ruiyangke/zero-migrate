@@ -1,7 +1,31 @@
 {
   "name": "zero-migrate",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "The zero-migrate authoring DSL: fluent table() / view() builders, the t.* column-type lexicon, the closed Expr AST, and the pure-JS recorder. Zero native code, zero runtime deps.",
+  "keywords": [
+    "database",
+    "migration",
+    "migrations",
+    "schema",
+    "postgres",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "dsl",
+    "ddl",
+    "typescript"
+  ],
+  "author": "Ruiyang Ke <me@ry.ke>",
+  "license": "MIT",
+  "homepage": "https://github.com/ruiyangke/zero-migrate#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ruiyangke/zero-migrate.git",
+    "directory": "packages/zero-migrate"
+  },
+  "bugs": {
+    "url": "https://github.com/ruiyangke/zero-migrate/issues"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -16,7 +40,14 @@
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "src"],
+  "files": ["dist", "src", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "gen:ir-types": "node scripts/gen-ir-types.mjs",
     "gen:dialect-table": "node scripts/gen-dialect-table.mjs",

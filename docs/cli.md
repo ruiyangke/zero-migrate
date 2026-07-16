@@ -23,7 +23,7 @@ PostgreSQL column renames, and reconciles migration status.
 
 ## Run from this checkout
 
-`zero-migrate` and `zero-migrate-engine` are not published to npm yet. Do not
+`zero-migrate` and `zero-migrate-cli` are not published to npm yet. Do not
 follow an `npm install` or `pnpm add` workflow for this release. Build and run the
 repository checkout by following [Getting started](getting-started.md#1-prepare-the-checkout).
 

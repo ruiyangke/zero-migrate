@@ -66,10 +66,10 @@ function extractTsBlocks(md: string): string[] {
   while ((m = re.exec(md)) !== null) {
     const block = m[1];
     if (/\/\/\s*(ops|types)\.ts:/.test(block)) continue; // skip signature listings
-    // A block importing `zero-migrate-engine` (the host package) is gated in the
+    // A block importing `zero-migrate-cli` (the host package) is gated in the
     // engine package's own doc-typecheck, not here — this DSL package cannot
     // resolve the host package. Skip those blocks in the `zero-migrate` gate.
-    if (/from\s+["']zero-migrate-engine["']/.test(block)) continue;
+    if (/from\s+["']zero-migrate-cli["']/.test(block)) continue;
     blocks.push(block);
   }
   return blocks;
@@ -169,7 +169,7 @@ test("doc-gate: every typed example in writing-migrations.md typechecks against 
 
 test("doc-gate: every DSL example in getting-started.md typechecks against the real package", () => {
   // The step-by-step guide's `zero-migrate` (DSL) examples ride the SAME
-  // harness as writing-migrations.md. Its `zero-migrate-engine` (host) snippet is excluded
+  // harness as writing-migrations.md. Its `zero-migrate-cli` (host) snippet is excluded
   // here — `extractTsBlocks` skips engine-import blocks — and is gated instead
   // by the engine package's own doc-typecheck.
   const md = readFileSync(GETTING_STARTED_DOC, "utf8");

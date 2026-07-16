@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { apply, status, history, currentIrVersion } from "zero-migrate-engine";
+import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
 import { table, t } from "zero-migrate";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

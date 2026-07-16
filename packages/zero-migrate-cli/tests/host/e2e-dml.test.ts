@@ -9,7 +9,7 @@ import {
   status,
   type DriverConfig,
   type MigrationModule,
-} from "zero-migrate-engine";
+} from "zero-migrate-cli";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

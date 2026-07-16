@@ -28,7 +28,7 @@ import { dirname, join } from "node:path";
 
 import { table, t } from "zero-migrate";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
-import { currentIrVersion, apply, plan, resolvePending, status } from "zero-migrate-engine";
+import { currentIrVersion, apply, plan, resolvePending, status } from "zero-migrate-cli";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 

@@ -1,6 +1,6 @@
 # Node API
 
-`zero-migrate-engine` is the JavaScript/TypeScript API for validating migration
+`zero-migrate-cli` is the JavaScript/TypeScript API for validating migration
 modules, applying ordered PostgreSQL or MySQL schema and data changes, resolving
 PostgreSQL online column renames, and reading migration state.
 
@@ -24,7 +24,7 @@ PostgreSQL online column renames, and reading migration state.
 
 ## Run from this checkout
 
-`zero-migrate` and `zero-migrate-engine` are not published to npm yet. The only
+`zero-migrate` and `zero-migrate-cli` are not published to npm yet. The only
 working installation path for this release is the repository checkout. Follow
 [Getting started](getting-started.md#1-prepare-the-checkout) to install
 workspace dependencies, build the JavaScript packages, and configure the
@@ -61,7 +61,7 @@ export function up() {
 Validate it and apply it:
 
 ```ts
-import { apply, plan } from "zero-migrate-engine";
+import { apply, plan } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715153045_create_users.js";
 
 const check = plan({
@@ -106,7 +106,7 @@ import {
   resolvePending,
   status,
   validate,
-} from "zero-migrate-engine";
+} from "zero-migrate-cli";
 
 import type {
   ApplyOutcome,
@@ -118,7 +118,7 @@ import type {
   MigrationModule,
   PlanReport,
   ResolvePendingOptions,
-} from "zero-migrate-engine";
+} from "zero-migrate-cli";
 ```
 
 | Function | PostgreSQL | MySQL | SQLite | Opens a database? |
@@ -503,7 +503,7 @@ The first `apply()` prepares and backfills the destination column. It requires
 `approved: true` because it changes existing row data:
 
 ```ts
-import { apply, resolvePending } from "zero-migrate-engine";
+import { apply, resolvePending } from "zero-migrate-cli";
 import * as renameUsersDisplayName from "./migrations/20260716120000_rename_users_display_name.js";
 
 const outcome = await apply({
