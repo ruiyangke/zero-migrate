@@ -166,6 +166,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-host-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-host-${{ runner.os }}-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
       # The host tests load the addon resolved through the zero-migrate-node
       # workspace package; build it first.
       - name: build release addon
