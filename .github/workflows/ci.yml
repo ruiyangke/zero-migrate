@@ -4,40 +4,37 @@ on:
   push:
   pull_request:
 
-# Cancel superseded in-progress runs on the same ref (a new push to a PR/branch
-# supersedes the older one). Keeps the queue short without dropping main history.
+# Cancel superseded in-progress runs on the same ref.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  CARGO_TERM_COLOR: always
-  # Fail fast on any Rust warning in build/test compilation (clippy has its own
-  # `-D warnings` gate below; this covers rustc warnings in the non-clippy steps).
-  RUSTFLAGS: "-D warnings"
+defaults:
+  run:
+    # Run every step inside the Nix dev shell so the pinned toolchain
+    # (rustc/clippy/rustfmt 1.97.1, the C/libclang/bindgen setup for pg_query and
+    # rusqlite, Node 22, pnpm) all come from flake.nix. The ghr_ec2_nix runner has
+    # Nix preinstalled, so no installer action is needed. One environment for CI and
+    # local dev; a moving `stable` can never change CI.
+    shell: nix develop --command bash {0}
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Rust: fmt + clippy + build + the full workspace test suite against a LIVE
-  # Postgres service container, so the env-gated live-PG tests actually RUN in CI
-  # (rather than skipping as they do in a DB-free checkout). No MySQL service here:
-  # no in-crate Rust test reads ZERO_MIGRATE_MYSQL_URL (the live-MySQL e2e lives in
-  # the engine host suite — see the `host` job below).
+  # rust: fmt + clippy + build + the full workspace test suite against a LIVE
+  # Postgres service container (the env-gated pg_* tests actually RUN in CI).
   # ---------------------------------------------------------------------------
   rust:
     name: rust (fmt/clippy/build/test + live PG)
-    runs-on: ubuntu-latest
+    runs-on: ghr_ec2_nix
 
     services:
-      # Live Postgres for the in-crate `pg_*` tests (gated on ZERO_MIGRATE_TEST_PG_URL).
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: zero_migrate
           POSTGRES_DB: zero_migrate_test
         ports:
           - 5432:5432
-        # Wait for the server to accept connections before the job's steps run.
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -45,19 +42,11 @@ jobs:
           --health-retries 10
 
     env:
-      # The env-gated live-PG tests read this; set at job scope so every step sees
-      # it. `127.0.0.1` (not `localhost`) forces TCP — the mapped service port is
-      # only reachable over TCP from the runner host.
+      RUSTFLAGS: "-D warnings"
       ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install stable Rust (+ clippy, rustfmt)
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
@@ -71,101 +60,52 @@ jobs:
 
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
-
-      # `--workspace --all-targets` DOES include zero-migrate-node: `cargo clippy`
-      # only compiles it (the napi_build link args resolve at `.node` load time),
-      # so clippy over the whole workspace is safe and covers all four crates.
       - name: cargo clippy (-D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
-
       - name: cargo build (workspace)
         run: cargo build --workspace
-
-      # The napi cdylib is kept out of the default build/test flow (default-members),
-      # so build it explicitly to prove the addon crate compiles.
+      # The napi cdylib is kept out of default-members; build it explicitly.
       - name: cargo build (napi cdylib)
         run: cargo build -p zero-migrate-node
-
-      # Full workspace test against the live PG service (the pg_* tests read
-      # ZERO_MIGRATE_TEST_PG_URL and now RUN instead of skipping). zero-migrate-node
-      # is excluded here because its default features link against the Node ABI
-      # (`napi build` supplies the allow-undefined args); a bare `cargo test` of it
-      # link-fails — it is tested separately with --no-default-features below.
       - name: cargo test (workspace, live PG)
         run: cargo test --workspace --exclude zero-migrate-node
-
-      # The addon crate's pure-Rust core + marshal/session bridge + mock-apply
-      # integration test, WITHOUT the Node ABI (default features link-fail off a
-      # `napi build`); --no-default-features drops the `#[napi]` entrypoints.
+      # The addon crate WITHOUT the Node ABI (default features link-fail off a napi build).
       - name: cargo test (zero-migrate-node, no napi ABI)
         run: cargo test -p zero-migrate-node --no-default-features
 
   # ---------------------------------------------------------------------------
-  # Node: the JS SDKs — build both packages, typecheck, and run the DB-free test
-  # suites (authoring DSL tests + the engine doc-example gate).
+  # node: build the JS packages, typecheck, and run the DB-free test suites.
+  # node + pnpm come from the flake.
   # ---------------------------------------------------------------------------
   node:
-    name: node (SDK build/check/test)
-    runs-on: ubuntu-latest
+    name: node (packages build/check/test)
+    runs-on: ghr_ec2_nix
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Install Node 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
       - name: pnpm install
         run: pnpm install --frozen-lockfile
-
       - name: pnpm -w build
         run: pnpm -w build
-
       - name: zero-migrate check (tsc x2)
         run: pnpm --filter zero-migrate check
-
       - name: zero-migrate test
         run: pnpm --filter zero-migrate test
-
       - name: zero-migrate-cli typecheck
         run: pnpm --filter zero-migrate-cli typecheck
-
       - name: zero-migrate-cli test:docs
         run: pnpm --filter zero-migrate-cli test:docs
 
   # ---------------------------------------------------------------------------
-  # napi: build the shipped release `.node` addon to prove it links + loads. A
-  # single linux-x64 target is sufficient in CI (the full cross-target matrix is a
-  # release concern). Uses the release profile (workspace-root lto + strip).
+  # napi: build the shipped release `.node` addon to prove it links + loads (a
+  # single linux-x64 target; the full cross-target matrix is a release concern).
   # ---------------------------------------------------------------------------
   napi:
     name: napi (release .node build)
-    runs-on: ubuntu-latest
+    runs-on: ghr_ec2_nix
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Install Node 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
@@ -179,31 +119,20 @@ jobs:
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
-
-      # `zero-migrate-node` is a pnpm workspace member; its `build` script runs
-      # `napi build --platform --release`, emitting the loadable
-      # `zero-migrate-node.linux-x64-gnu.node` for the runner's triple under the
-      # release profile (workspace-root lto + strip). This proves the shipped addon
-      # compiles and links; the full cross-target matrix is a release concern.
       - name: build release addon
         run: pnpm --filter zero-migrate-node build
 
   # ---------------------------------------------------------------------------
-  # host: the engine host e2e suite (`test:host`), which drives the REAL napi
-  # addon over the pg + mysql2 driver adapters against LIVE Postgres AND MySQL
-  # service containers. This is the job that runs the env-gated live-MySQL e2e
-  # (`tests/host/mysql-authoring.test.ts`, gated on ZERO_MIGRATE_MYSQL_URL) plus
-  # the live-PG host tests (`authoring` + `e2e-pg`, gated on ZERO_MIGRATE_TEST_PG_URL).
-  # It builds the release addon first (the host tests load
-  # `zero-migrate-node.linux-x64-gnu.node` via ZERO_MIGRATE_ADDON_PATH).
+  # host: the CLI host e2e suite (test:host), which drives the REAL napi addon
+  # over the pg + mysql2 driver adapters against LIVE Postgres AND MySQL.
   # ---------------------------------------------------------------------------
   host:
-    name: host (engine e2e — live PG + MySQL over the napi addon)
-    runs-on: ubuntu-latest
+    name: host (cli e2e - live PG + MySQL over the napi addon)
+    runs-on: ghr_ec2_nix
 
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: zero_migrate
           POSTGRES_DB: zero_migrate_test
@@ -214,7 +143,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-
       mysql:
         image: mysql:8
         env:
@@ -222,7 +150,6 @@ jobs:
           MYSQL_DATABASE: zero_migrate_test
         ports:
           - 3306:3306
-        # `mysqladmin ping` succeeds once the server answers the handshake.
         options: >-
           --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pzero_migrate --silent"
           --health-interval 5s
@@ -230,57 +157,16 @@ jobs:
           --health-retries 20
 
     env:
-      # The host suite reads both — live-PG host tests read the PG URL, the
-      # live-MySQL host test reads the MySQL URL. `127.0.0.1` forces TCP to the
-      # mapped service ports. The MySQL test creates fresh throwaway databases per
-      # run (root can CREATE DATABASE), so the URL's db only needs to exist to log in.
       ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
       ZERO_MIGRATE_MYSQL_URL: mysql://root:zero_migrate@127.0.0.1:3306/zero_migrate_test
 
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Install Node 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-host-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-host-${{ runner.os }}-
-
-      - name: pnpm install
-        run: pnpm install --frozen-lockfile
-
-      # The host tests load the built addon (resolved through the `zero-migrate-node`
-      # workspace package, or via ZERO_MIGRATE_ADDON_PATH ->
-      # crates/zero-migrate-node/zero-migrate-node.linux-x64-gnu.node), so build it
-      # first. `zero-migrate-node` is a pnpm workspace member; its `build` script
-      # runs `napi build`.
+      # The host tests load the addon resolved through the zero-migrate-node
+      # workspace package; build it first.
       - name: build release addon
         run: pnpm --filter zero-migrate-node build
-
-      # Build the SDK dist (zero-migrate DSL + zero-migrate-cli host) the host tests import.
       - name: pnpm -w build
         run: pnpm -w build
-
-      # Runs tests/host/*.test.ts: the live-PG `authoring` + `e2e-pg` suites AND the
-      # live-MySQL `mysql-authoring` suite, all against the service containers above.
       - name: zero-migrate-cli test:host (live PG + MySQL)
         run: pnpm --filter zero-migrate-cli test:host
