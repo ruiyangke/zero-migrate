@@ -13,9 +13,9 @@ defaults:
   run:
     # Run every step inside the Nix dev shell so the pinned toolchain
     # (rustc/clippy/rustfmt 1.97.1, the C/libclang/bindgen setup for pg_query and
-    # rusqlite, Node 22, pnpm) all come from flake.nix. The ghr_ec2_nix runner has
-    # Nix preinstalled, so no installer action is needed. One environment for CI and
-    # local dev; a moving `stable` can never change CI.
+    # rusqlite, Node 22, pnpm) all come from flake.nix. Each job installs Nix first
+    # (nix-installer-action), then every run step uses the flake shell. One
+    # environment for CI and local dev; a moving `stable` can never change CI.
     shell: nix develop --command bash {0}
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
   # ---------------------------------------------------------------------------
   rust:
     name: rust (fmt/clippy/build/test + live PG)
-    runs-on: ghr_ec2_nix
+    runs-on: ubuntu-latest
 
     services:
       postgres:
@@ -47,6 +47,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
@@ -79,10 +80,11 @@ jobs:
   # ---------------------------------------------------------------------------
   node:
     name: node (packages build/check/test)
-    runs-on: ghr_ec2_nix
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
       - name: pnpm install
         run: pnpm install --frozen-lockfile
       - name: pnpm -w build
@@ -102,10 +104,11 @@ jobs:
   # ---------------------------------------------------------------------------
   napi:
     name: napi (release .node build)
-    runs-on: ghr_ec2_nix
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
       - name: Cache cargo registry + target
         uses: actions/cache@v4
         with:
@@ -128,7 +131,7 @@ jobs:
   # ---------------------------------------------------------------------------
   host:
     name: host (cli e2e - live PG + MySQL over the napi addon)
-    runs-on: ghr_ec2_nix
+    runs-on: ubuntu-latest
 
     services:
       postgres:
@@ -162,6 +165,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
       # The host tests load the addon resolved through the zero-migrate-node
       # workspace package; build it first.
       - name: build release addon
