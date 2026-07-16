@@ -127,6 +127,9 @@ must_use_candidate = "allow"
 future_not_send = "allow"
 # Stylistic structure / idiom opinions with no behavioural weight here.
 use_self = "allow"
+# The suggested "larger unit" rewrite (`from_mins`/`from_hours`) is still unstable,
+# so it is not applicable on stable; the explicit seconds read fine.
+duration_suboptimal_units = "allow"
 missing_const_for_fn = "allow"
 match_same_arms = "allow"
 redundant_pub_crate = "allow"
