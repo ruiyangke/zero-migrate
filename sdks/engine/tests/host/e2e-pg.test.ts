@@ -3,7 +3,7 @@
 // The SAME multi-op golden migration (`mig/20260712000001_create_gadgets.ts`:
 // createTable + addColumn + createIndex) runs THROUGH the shipped host path — the
 // pure-JS recorder → the napi addon's Rust lower (owner_app stamp + Checksum::of_ir
-// fold + confined system-shape fold) → `executor::apply` over the real `pg` npm
+// fold) → `executor::apply` over the real `pg` npm
 // driver seam — and we assert the applied SCHEMA and the JOURNAL match the engine's
 // expectation. This is the Node-side peer of the in-crate live-PG regression suite
 // both drive the identical shipped PostgresBackend-over-seam apply, one
@@ -160,7 +160,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     );
 
     // ---- Schema oracle: all three op kinds physically landed ---------------
-    // 1. createTable — the `gadgets` table exists with author + folded system cols.
+    // 1. createTable: the `gadgets` table exists with only its authored columns.
     const cols = await client.query(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = 'gadgets'`,
@@ -173,7 +173,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     // 2. addColumn — the ALTER-added `price` column is present.
     assert.ok(colNames.has("price"), "addColumn `price` present (ALTER add landed)");
     for (const c of ["id", "created_at", "updated_at", "version"]) {
-      assert.ok(colNames.has(c), `folded system column ${c} present`);
+      assert.ok(!colNames.has(c), `no policy-managed system column ${c} is injected`);
     }
     // 3. createIndex — the authored `gadgets_sku_idx` index physically exists.
     const idx = await client.query(
@@ -186,8 +186,7 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     // ---- Journal oracle: rows + strict event_seq ordering + one anchor -----
     const journal = await readJournal(client, schema);
     assert.ok(journal.length > 0, "journal has applied rows");
-    // Every applied version id is journaled (the journal is a superset — the addon's
-    // system-shape fold also journals confined system indexes).
+    // Every applied version id is journaled.
     assert.ok(
       journal.length >= outcome.applied.length,
       `journal (${journal.length}) covers every applied id (${outcome.applied.length})`,
@@ -219,20 +218,26 @@ test("e2e-pg: multi-op apply + journal + status/history + drift, real addon + pg
     assert.ok(/^[0-9a-f]{64}$/.test(anchor), "checksum anchor is a 64-hex digest");
 
     // ---- status()/history() typed verbs over the host driver ---------------
-    const st = await status({ ownerApp: OWNER_APP, projectSchema: schema, driver: DRIVER });
-    // The read-path status reconciles the journal: applied set == the apply outcome,
-    // nothing pending / rolled back, currentVersion is the last applied id.
+    const st = await status({
+      ownerApp: OWNER_APP,
+      projectSchema: schema,
+      driver: DRIVER,
+      migrations: [mig as never],
+      nameFallbacks: ["create_gadgets"],
+    });
+    // Plan-aware status reports one logical plan while retaining the actual
+    // journal identities as its ordered steps.
+    assert.equal(st.plans?.length, 1, "one supplied plan reconciled");
+    assert.equal(st.plans?.[0]?.state, "applied", "complete plan is applied");
     assert.deepEqual(
-      [...st.applied].sort(),
+      (st.plans?.[0]?.steps.map((step) => step.version) ?? []).sort(),
       [...outcome.applied].sort(),
-      "status.applied == apply outcome",
+      "status plan steps == apply outcome",
     );
+    assert.deepEqual(st.applied, [st.plans?.[0]?.version], "logical plan is applied");
     assert.equal(st.pending.length, 0, "status.pending empty");
     assert.equal(st.rolledBack.length, 0, "status.rolledBack empty");
-    assert.ok(
-      st.currentVersion && outcome.applied.includes(st.currentVersion),
-      `status.currentVersion (${st.currentVersion}) is an applied id`,
-    );
+    assert.equal(st.currentVersion, st.plans?.[0]?.version, "currentVersion is the plan id");
 
     const hist = await history({ ownerApp: OWNER_APP, projectSchema: schema, driver: DRIVER });
     assert.equal(hist.events.length, journal.length, "history has one event per journal row");

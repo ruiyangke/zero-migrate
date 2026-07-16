@@ -63,6 +63,13 @@ export async function openMysqlSession(
     multipleStatements: true, // the engine issues multi-statement DDL batches.
   });
 
+  // The Rust backend repeats this before every author DDL/data step. Pin it at
+  // connection creation as well so every host-side parameterized verb shares
+  // the same literal semantics from its first request onward.
+  await connection.query(
+    "SET SESSION sql_mode = CONCAT_WS(',', @@SESSION.sql_mode, 'NO_BACKSLASH_ESCAPES')",
+  );
+
   const hostDriver: MysqlHostDriver = ([request, done]) => {
     runVerb(connection, request, opts.queryTimeoutMs).then(
       (reply) => done(null, reply),
@@ -90,7 +97,7 @@ async function runVerb(
       return { rows: [], rowCount: undefined };
     }
     case "execute": {
-      const [result] = await connection.query(
+      const [result] = await connection.execute(
         { sql: request.sql, timeout: timeoutMs },
         cellsToParams(request.binds),
       );
@@ -99,12 +106,12 @@ async function runVerb(
     case "executeTextParams": {
       // Text-format params: cross verbatim; null → SQL NULL. mysql2 binds strings.
       const values = request.textParams.map((v) => (v === null || v === undefined ? null : v));
-      const [result] = await connection.query({ sql: request.sql, timeout: timeoutMs }, values);
+      const [result] = await connection.execute({ sql: request.sql, timeout: timeoutMs }, values);
       return { rows: [], rowCount: affectedRows(result) };
     }
     case "query":
     case "queryOne": {
-      const [rows, fields] = await connection.query({
+      const [rows, fields] = await connection.execute({
         sql: request.sql,
         timeout: timeoutMs,
         rowsAsArray: true,
@@ -131,7 +138,11 @@ function affectedRows(result: unknown): number | undefined {
   return undefined;
 }
 
-function cellsToParams(binds: JsCell[]): unknown[] {
+/** Convert exact engine cells to mysql2 parameters. Exported for the driver
+ * conformance test; it is not part of the package's public root API. */
+export function cellsToParams(
+  binds: JsCell[],
+): Array<string | number | bigint | boolean | null> {
   return binds.map((cell) => {
     switch (cell.kind) {
       case "null":
@@ -139,7 +150,13 @@ function cellsToParams(binds: JsCell[]): unknown[] {
       case "text":
         return cell.text ?? null;
       case "int":
-        return cell.intStr ?? cell.int ?? null;
+        // mysql2 quotes JavaScript strings. That is harmless for most numeric
+        // columns but invalid in syntax-sensitive numeric positions such as
+        // `LIMIT ?`. BigInt stays exact and mysql2 formats it as an unquoted
+        // integer token.
+        return cell.intStr !== undefined && cell.intStr !== null
+          ? BigInt(cell.intStr)
+          : cell.int ?? null;
       case "bool":
         return cell.bool ?? null;
       case "textArray":

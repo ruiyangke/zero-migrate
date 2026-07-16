@@ -596,6 +596,96 @@ test("insert normalizes decimal() to {decimal} and Uint8Array to {bytes:base64}"
   assert.doesNotThrow(() => JSON.stringify(ops[0]));
 });
 
+test("DML number scalars reject non-finite and unsafe integer values before serialization", () => {
+  for (const value of [NaN, Infinity, -Infinity]) {
+    assert.throws(
+      () => record(() => table("t").insert({ rows: { value } })),
+      (e: any) => e.code === "OP_INVALID" && /must be finite/.test(e.message),
+    );
+  }
+
+  assert.throws(
+    () => record(() => table("t").update({ set: { value: Number.MAX_SAFE_INTEGER + 1 } })),
+    (e: any) =>
+      e.code === "OP_INVALID" &&
+      /safe integer/.test(e.message) &&
+      /decimal/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").insert({
+          rows: { id: 1 },
+          onConflict: {
+            columns: ["id"],
+            doUpdate: { value: Number.MIN_SAFE_INTEGER - 1 },
+          },
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /safe integer/.test(e.message),
+  );
+});
+
+test("DML number scalars expand scientific notation into valid decimal carriers", () => {
+  const author = (tableApi: typeof table) =>
+    tableApi("t").insert({
+      rows: {
+        small: 1e-7,
+        negative: -1.25e-7,
+        smallest: Number.MIN_VALUE,
+      },
+    });
+  const ops = record(() => author(table));
+  const engineOps = recordEngine(({ table }) => author(table));
+
+  assert.deepEqual(ops[0].rows[0], [
+    { decimal: "0.0000001" },
+    { decimal: "-0.000000125" },
+    { decimal: `0.${"0".repeat(323)}5` },
+  ]);
+  assert.deepEqual(engineOps, ops);
+});
+
+test("DML scalars reject JavaScript values that JSON would silently rewrite", () => {
+  const cases: Array<[unknown, RegExp]> = [
+    [undefined, /cannot be undefined/],
+    [Symbol("value"), /symbol is not a supported scalar/],
+    [new Date("2020-01-01T00:00:00.000Z"), /scalar value must be/],
+    [{ nested: true }, /scalar value must be/],
+    [[1, 2, 3], /scalar value must be/],
+  ];
+
+  for (const [value, message] of cases) {
+    for (const recordValue of [
+      () => record(() => table("t").insert({ rows: { value } } as any)),
+      () =>
+        recordEngine(({ table }) =>
+          table("t").insert({ rows: { value } } as any),
+        ),
+    ]) {
+      assert.throws(
+        recordValue,
+        (e: any) => e.code === "OP_INVALID" && message.test(e.message),
+      );
+    }
+  }
+
+  assert.throws(
+    () => record(() => table("t").update({ set: { value: undefined } } as any)),
+    (e: any) => e.code === "OP_INVALID" && /cannot be undefined/.test(e.message),
+  );
+  assert.throws(
+    () =>
+      record(() =>
+        table("t").insert({
+          rows: { id: 1 },
+          onConflict: { columns: ["id"], doUpdate: { value: Symbol("value") } as any },
+        }),
+      ),
+    (e: any) => e.code === "OP_INVALID" && /symbol is not a supported scalar/.test(e.message),
+  );
+});
+
 test("update set records scalar RHS as IrValue scalar and callback RHS as IrValue expr", () => {
   const ops = record(() => {
     table("t").insert({ rows: [{ a: 1 }] });
@@ -898,6 +988,30 @@ test("non-empty JSON defaults record as IrDefault::Json with sorted keys", () =>
   );
 });
 
+test("JSON defaults preserve own __proto__ keys at every nesting level", () => {
+  const hostile = {
+    ["__proto__"]: {
+      ["__proto__"]: "nested",
+    },
+  };
+  const ops = record(() =>
+    table("t").create({
+      columns: {
+        payload: t.json().default(hostile),
+      },
+    }),
+  );
+
+  const json = ops[0].columns[0].default.json;
+  assert.equal(Object.hasOwn(json, "__proto__"), true);
+  assert.equal(Object.hasOwn(json.__proto__, "__proto__"), true);
+  assert.equal(json.__proto__.__proto__, "nested");
+  assert.equal(
+    JSON.stringify(json),
+    '{"__proto__":{"__proto__":"nested"}}',
+  );
+});
+
 test("JSON default float values are rejected", () => {
   const message = "json default values support integers only (floats not yet supported)";
   assert.throws(
@@ -967,6 +1081,36 @@ test("onConflict.doUpdate normalizes decimal()/Uint8Array scalar assignments", (
   });
 });
 
+test("DML values preserve an own __proto__ column name", () => {
+  const ownProto = <T>(value: T): Record<string, T> => ({ ["__proto__"]: value });
+  const ops = record(() => {
+    table("t").insert({
+      rows: [{ id: 1, ...ownProto("inserted") }],
+      onConflict: {
+        columns: ["id"],
+        doUpdate: ownProto("upserted"),
+      },
+    });
+    table("t").update({
+      set: ownProto("updated"),
+      where: (col) => col("id").eq(1),
+    });
+    table("t").backfill({
+      set: ownProto("backfilled"),
+      cursorColumn: "id",
+    });
+  });
+
+  assert.deepEqual(ops[0].columns, ["id", "__proto__"]);
+  assert.deepEqual(ops[0].rows, [[1, "inserted"]]);
+  assert.equal(Object.hasOwn(ops[0].onConflict.doUpdate, "__proto__"), true);
+  assert.equal(ops[0].onConflict.doUpdate.__proto__, "upserted");
+  assert.equal(Object.hasOwn(ops[1].set, "__proto__"), true);
+  assert.equal(ops[1].set.__proto__, "updated");
+  assert.equal(Object.hasOwn(ops[2].set, "__proto__"), true);
+  assert.equal(ops[2].set.__proto__, "backfilled");
+});
+
 test("update records a plain one-shot op with no batch field", () => {
   const ops = record(() =>
     table("t").update({
@@ -997,6 +1141,74 @@ test("del records the 'delete' wire tag and requires where", () => {
   assert.equal(ops[0].op, "delete");
   assert.equal(ops[0].limit, 5);
   assert.throws(() => record(() => table("t").delete({} as any)), /where is mandatory/);
+});
+
+test("complete DML surface records identically and preserves authored order", () => {
+  const author = (tableApi: typeof table) => {
+    const widgets = tableApi("widgets");
+    widgets.insert({ rows: [{ id: 1, label: "new" }] });
+    widgets.update({
+      set: { label: "updated" },
+      where: (col) => col("id").eq(1),
+    });
+    widgets.delete({ where: (col) => col("id").eq(2), limit: 1 });
+    widgets.backfill({
+      set: { label: "filled" },
+      where: (col) => col("label").isNull(),
+    });
+  };
+
+  const publicOps = record(() => author(table));
+  const engineOps = recordEngine(({ table }) => author(table));
+
+  assert.deepEqual(publicOps, engineOps, "the public and shipped engine recorders must agree");
+  assert.deepEqual(
+    publicOps,
+    [
+      {
+        op: "insert",
+        table: "widgets",
+        columns: ["id", "label"],
+        rows: [[1, "new"]],
+      },
+      {
+        op: "update",
+        table: "widgets",
+        set: { label: "updated" },
+        where: {
+          node: "binOp",
+          op: "eq",
+          lhs: { node: "colRef", name: "id" },
+          rhs: { node: "literal", value: 1 },
+        },
+      },
+      {
+        op: "delete",
+        table: "widgets",
+        where: {
+          node: "binOp",
+          op: "eq",
+          lhs: { node: "colRef", name: "id" },
+          rhs: { node: "literal", value: 2 },
+        },
+        limit: 1,
+      },
+      {
+        op: "backfill",
+        table: "widgets",
+        cursorColumn: "id",
+        batchSize: 1000,
+        set: { label: "filled" },
+        filter: {
+          node: "unaryOp",
+          op: "isNull",
+          operand: { node: "colRef", name: "label" },
+        },
+        name: "backfill_widgets",
+      },
+    ],
+    "insert, update, delete, and backfill must stay in authored order",
+  );
 });
 
 test("the (col) => Expr builder constructs the closed AST", () => {

@@ -26,6 +26,8 @@ import type {
   JsError as GenJsError,
   ApplyRequest,
   StatusRequest,
+  StatusIrRequest,
+  ResolvePendingRequest,
   HistoryRequest,
   ApplyReply,
   StatusReply,
@@ -36,6 +38,8 @@ import type {
 export type {
   ApplyRequest,
   StatusRequest,
+  StatusIrRequest,
+  ResolvePendingRequest,
   HistoryRequest,
   ApplyReply,
   StatusReply,
@@ -71,6 +75,7 @@ export interface MigrateAddon {
     deployingApp: string,
     dialect: string,
     registry: Record<string, string>,
+    projectSchema: string,
   ): LoadVerifyReply;
 
   /** HOST-AUTHORING apply: take a typed `ApplyRequest` (the IR envelope
@@ -81,6 +86,16 @@ export interface MigrateAddon {
 
   /** `status` over the host driver. Resolves to a typed `StatusReply`. */
   status(hostDriver: AddonHostDriver, req: StatusRequest): Promise<StatusReply>;
+
+  /** Plan-aware status over authored IR envelopes. The addon lowers complete
+   *  plans in Rust, retaining DML and backfill step identities. */
+  statusIr(hostDriver: AddonHostDriver, req: StatusIrRequest): Promise<StatusReply>;
+
+  /** Complete or abort one outstanding PostgreSQL online rename. */
+  resolvePending(
+    hostDriver: AddonHostDriver,
+    req: ResolvePendingRequest,
+  ): Promise<ApplyReply>;
 
   /** `history` over the host driver. Resolves to a typed `HistoryReply`. */
   history(hostDriver: AddonHostDriver, req: HistoryRequest): Promise<HistoryReply>;

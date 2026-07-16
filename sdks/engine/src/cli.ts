@@ -23,13 +23,21 @@
 // Node cannot import `.ts` — run the CLI under a `.ts` loader (e.g. `tsx`/`bun`) or
 // point it at pre-built `.js`/`.mjs`.
 
-import { readdir, mkdir, writeFile, access } from "node:fs/promises";
+import { readdir, mkdir, writeFile, access, readFile } from "node:fs/promises";
 import { join, resolve, isAbsolute } from "node:path";
 import { pathToFileURL } from "node:url";
-import { apply, plan, status, currentIrVersion, type DriverConfig } from "./index.js";
+import {
+  apply,
+  plan,
+  resolvePending,
+  status,
+  currentIrVersion,
+  type DriverConfig,
+} from "./index.js";
 import {
   buildEnvelope,
   deriveNameFromPath,
+  resolveMigrationName,
   type MigrationModule,
 } from "zero-migrate/internal/recorder";
 
@@ -47,6 +55,12 @@ interface MigrationFile {
   label: string;
 }
 
+/** An imported migration paired with its filename-derived fallback identity. */
+interface LoadedMigration {
+  file: MigrationFile;
+  migration: MigrationModule;
+}
+
 /** The parsed CLI invocation. */
 interface Args {
   command: string;
@@ -54,13 +68,24 @@ interface Args {
   positional?: string;
   dir: string;
   databaseUrl?: string;
+  /** Dialect selected for offline plan validation. Defaults to PostgreSQL. */
+  dialect?: "postgres" | "mysql" | "sqlite";
+  /** Path to the trusted JSON table-ownership registry. */
+  registryPath?: string;
   ownerApp: string;
   projectSchema: string;
   /** `--json` — machine-readable output where a verb supports it. */
   json: boolean;
+  /** `--approve` grants operator approval for reviewed destructive/data-rewrite steps. */
+  approved: boolean;
+  /** Resolve the pending rename by keeping the new column. */
+  resolveApply: boolean;
+  /** Resolve the pending rename by keeping the old column. */
+  resolveAbort: boolean;
 }
 
-/** Parse `--flag value` / `--flag=value` / positionals. Unknown flags error. */
+/** Parse value-taking flags, valueless boolean flags, and positionals. Unknown
+ * flags and inline values on valueless flags error. */
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     command: "",
@@ -68,7 +93,11 @@ function parseArgs(argv: string[]): Args {
     ownerApp: process.env.ZERO_MIGRATE_OWNER_APP ?? DEFAULT_OWNER_APP,
     projectSchema: process.env.ZERO_MIGRATE_SCHEMA ?? DEFAULT_SCHEMA,
     json: false,
+    approved: false,
+    resolveApply: false,
+    resolveAbort: false,
   };
+  let helpRequested = false;
   const positionals: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
@@ -85,12 +114,30 @@ function parseArgs(argv: string[]): Args {
       if (next === undefined) throw new CliError(`flag --${key} needs a value`);
       return next;
     };
+    const rejectInlineVal = (): void => {
+      if (inlineVal !== undefined) {
+        throw new CliError(`flag --${key} does not take a value`);
+      }
+    };
     switch (key) {
       case "dir":
         args.dir = takeVal();
         break;
       case "database-url":
         args.databaseUrl = takeVal();
+        break;
+      case "dialect": {
+        const value = takeVal();
+        if (value !== "postgres" && value !== "mysql" && value !== "sqlite") {
+          throw new CliError(
+            `flag --dialect must be postgres, mysql, or sqlite; got ${JSON.stringify(value)}`,
+          );
+        }
+        args.dialect = value;
+        break;
+      }
+      case "registry":
+        args.registryPath = takeVal();
         break;
       case "owner-app":
         args.ownerApp = takeVal();
@@ -99,19 +146,63 @@ function parseArgs(argv: string[]): Args {
         args.projectSchema = takeVal();
         break;
       case "json":
+        rejectInlineVal();
         args.json = true;
         break;
+      case "approve":
+        rejectInlineVal();
+        args.approved = true;
+        break;
+      case "apply":
+        rejectInlineVal();
+        args.resolveApply = true;
+        break;
+      case "abort":
+        rejectInlineVal();
+        args.resolveAbort = true;
+        break;
       case "help":
-        args.command = "help";
+        rejectInlineVal();
+        helpRequested = true;
         break;
       default:
         throw new CliError(`unknown flag --${key}`);
     }
   }
+  if (helpRequested) {
+    args.command = "help";
+    return args;
+  }
   if (!args.command) args.command = positionals.shift() ?? "";
   args.positional = positionals.shift();
-  // `DATABASE_URL` fallback (empty-is-unset).
-  if (!args.databaseUrl) {
+  if (positionals.length > 0) {
+    throw new CliError(`unexpected positional argument ${JSON.stringify(positionals[0])}`);
+  }
+  if (
+    args.command !== "new" &&
+    args.command !== "resolve-pending" &&
+    args.positional !== undefined
+  ) {
+    throw new CliError(
+      `command ${JSON.stringify(args.command)} does not accept positional arguments; use --dir`,
+    );
+  }
+  if (args.dialect !== undefined && args.command !== "plan") {
+    throw new CliError("flag --dialect is only valid with the plan command");
+  }
+  if ((args.resolveApply || args.resolveAbort) && args.command !== "resolve-pending") {
+    throw new CliError("flags --apply and --abort are only valid with resolve-pending");
+  }
+  if (
+    args.registryPath !== undefined &&
+    args.command !== "plan" &&
+    args.command !== "apply" &&
+    args.command !== "status"
+  ) {
+    throw new CliError("flag --registry is only valid with plan, apply, or status");
+  }
+  // Fall back only when the flag was absent. An explicitly empty flag is an error.
+  if (args.databaseUrl === undefined) {
     const env = process.env.DATABASE_URL;
     if (env && env.length > 0) args.databaseUrl = env;
   }
@@ -121,27 +212,66 @@ function parseArgs(argv: string[]): Args {
 /** A CLI-level failure with a clean message (mapped to a non-zero exit, no stack). */
 class CliError extends Error {}
 
-/** Derive the driver seam config from a DB URL scheme. SQLite is NOT a host driver
- *  (it runs in-process in the addon, not over the seam) — a `sqlite:` URL is refused
- *  here with a clear message. */
+/** Read and validate an authoritative table-to-owner registry from JSON. */
+async function loadRegistry(path: string | undefined): Promise<Record<string, string>> {
+  if (path === undefined) return {};
+  if (path.length === 0) throw new CliError("flag --registry needs a non-empty file path");
+
+  let source: string;
+  try {
+    source = await readFile(path, "utf8");
+  } catch (error) {
+    throw new CliError(`read registry file ${path}: ${(error as Error).message}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch (error) {
+    throw new CliError(
+      `registry file ${path} must contain valid JSON: ${(error as Error).message}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new CliError(
+      `registry file ${path} must contain a JSON object mapping table names to owner app IDs`,
+    );
+  }
+
+  const registry: Record<string, string> = {};
+  for (const [table, owner] of Object.entries(parsed)) {
+    if (table.length === 0 || typeof owner !== "string" || owner.length === 0) {
+      throw new CliError(
+        `registry file ${path} must map each non-empty table name to a non-empty owner app ID`,
+      );
+    }
+    Object.defineProperty(registry, table, {
+      value: owner,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+  return registry;
+}
+
+/** Select the supported Node driver from a database URL scheme. */
 function driverFor(databaseUrl: string): DriverConfig {
   const lower = databaseUrl.trimStart().toLowerCase();
   if (lower.startsWith("postgres://") || lower.startsWith("postgresql://")) {
     return { kind: "postgres", url: databaseUrl };
   }
-  if (lower.startsWith("mysql://") || lower.startsWith("mariadb://")) {
+  if (lower.startsWith("mysql://")) {
     return { kind: "mysql", url: databaseUrl };
   }
   if (lower.startsWith("sqlite:") || lower.endsWith(".sqlite") || lower.endsWith(".db")) {
     throw new CliError(
-      "sqlite runs in-process, not over the host driver seam — the CLI host verbs " +
-        "(apply/status) target the network dialects (postgres/mysql). Use a " +
-        "postgres:// or mysql:// database URL.",
+      "SQLite is not supported by the Node CLI. Use the Rust API for SQLite, or " +
+        "provide a postgres:// or mysql:// database URL.",
     );
   }
   throw new CliError(
-    `could not infer a driver from the database URL (expected a postgres:// or ` +
-      `mysql:// scheme): ${JSON.stringify(databaseUrl)}`,
+    "could not infer a driver from the database URL (expected a postgres:// or mysql:// scheme)",
   );
 }
 
@@ -166,6 +296,32 @@ async function discover(dir: string): Promise<MigrationFile[]> {
 async function importMigration(path: string): Promise<MigrationModule> {
   const url = isAbsolute(path) ? pathToFileURL(path).href : path;
   return (await import(url)) as MigrationModule;
+}
+
+/** Import the complete ordered migration set without executing any `up()` body. */
+async function importMigrations(files: readonly MigrationFile[]): Promise<LoadedMigration[]> {
+  const loaded: LoadedMigration[] = [];
+  for (const file of files) {
+    loaded.push({ file, migration: await importMigration(file.path) });
+  }
+  return loaded;
+}
+
+/** Reject ambiguous plan identities before planning or opening a database session. */
+function assertUniqueMigrationNames(migrations: readonly LoadedMigration[]): void {
+  const firstFileByName = new Map<string, MigrationFile>();
+  for (const { file, migration } of migrations) {
+    const name = resolveMigrationName(migration, file.label);
+    const first = firstFileByName.get(name);
+    if (first !== undefined) {
+      throw new CliError(
+        `duplicate migration name ${JSON.stringify(name)}: ` +
+          `${first.label} and ${file.label} resolve to the same plan identity; ` +
+          "export a unique name from each migration",
+      );
+    }
+    firstFileByName.set(name, file);
+  }
 }
 
 /** `new <name>` — scaffold a fresh op-DSL migration. Validates the name, refuses to
@@ -270,18 +426,22 @@ async function runApply(args: Args): Promise<number> {
     );
   }
   const driver = driverFor(args.databaseUrl);
+  const registry = await loadRegistry(args.registryPath);
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
-  for (const f of files) {
-    const migration = await importMigration(f.path);
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
+  for (const { file, migration } of migrations) {
     const outcome = await apply({
       migration,
       ownerApp: args.ownerApp,
       projectSchema: args.projectSchema,
       driver,
-      nameFallback: f.label,
+      registry,
+      nameFallback: file.label,
+      approved: args.approved,
     });
-    process.stdout.write(`apply ${f.label}: ${JSON.stringify(outcome)}\n`);
+    process.stdout.write(`apply ${file.label}: ${JSON.stringify(outcome)}\n`);
   }
   return 0;
 }
@@ -295,10 +455,17 @@ async function runStatus(args: Args): Promise<number> {
     );
   }
   const driver = driverFor(args.databaseUrl);
+  const registry = await loadRegistry(args.registryPath);
+  const files = await discover(args.dir);
+  if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  const migrations = await Promise.all(files.map((file) => importMigration(file.path)));
   const reply = await status({
     ownerApp: args.ownerApp,
     projectSchema: args.projectSchema,
     driver,
+    registry,
+    migrations,
+    nameFallbacks: files.map((file) => file.label),
   });
   if (args.json) {
     process.stdout.write(JSON.stringify(reply, null, 2) + "\n");
@@ -308,26 +475,66 @@ async function runStatus(args: Args): Promise<number> {
   return 0;
 }
 
+/** Complete or abort one outstanding PostgreSQL online rename. */
+async function runResolvePending(args: Args): Promise<number> {
+  const pendingVersion = args.positional;
+  if (!pendingVersion) {
+    throw new CliError(
+      "`resolve-pending` needs a pending version: zero-migrate resolve-pending <pending-version>",
+    );
+  }
+  if (args.resolveApply === args.resolveAbort) {
+    throw new CliError("choose exactly one of --apply or --abort");
+  }
+  if (!args.approved) {
+    throw new CliError("resolve-pending requires --approve after reviewing the column drop");
+  }
+  if (!args.databaseUrl) {
+    throw new CliError("missing database URL (pass --database-url or set DATABASE_URL)");
+  }
+  const driver = driverFor(args.databaseUrl);
+  if (driver.kind !== "postgres") {
+    throw new CliError("resolve-pending supports only PostgreSQL online renames");
+  }
+  const outcome = await resolvePending({
+    ownerApp: args.ownerApp,
+    projectSchema: args.projectSchema,
+    pendingVersion,
+    action: args.resolveApply ? "apply" : "abort",
+    driver,
+    approved: true,
+    appliedBy: "cli",
+  });
+  process.stdout.write(`resolve-pending ${pendingVersion}: ${JSON.stringify(outcome)}\n`);
+  return 0;
+}
+
 /** The `--help` / usage text. */
-const USAGE = `zero-migrate — the zero-migrate host CLI
+const USAGE = `zero-migrate: database migrations from JavaScript
 
 Usage:
   zero-migrate new <name> [--dir <dir>]
-  zero-migrate plan    [--dir <dir>] [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate plan    [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
   zero-migrate preview [--dir <dir>] [--json]
-  zero-migrate apply   [--dir <dir>] --database-url <url> [--owner-app <app>] [--schema <schema>]
-  zero-migrate status  --database-url <url> [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate apply   [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
+  zero-migrate status  [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+  zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
 
 Flags:
   --dir <dir>           Migration directory (default ./migrations)
   --database-url <url>  postgres:// or mysql:// DSN (or the DATABASE_URL env)
+  --dialect <name>      plan dialect: postgres, mysql, or sqlite (default postgres)
+  --registry <file>     Trusted JSON map of table names to owner app IDs
   --owner-app <app>     Deploying app id stamped as owner_app (default app_cli)
   --schema <schema>     Confined project schema (default public)
+  --approve             Approve reviewed destructive changes and backfills
+  --apply               Complete an online rename and keep the new column
+  --abort               Abort an online rename and keep the old column
   --json                Machine-readable output where supported
   --help                This help
 
-new/plan/preview are OFFLINE (no DB). apply/status target the network dialects
-(postgres/mysql) over the host driver seam; SQLite runs in-process in the addon.
+new/plan/preview are offline and do not connect to a database. apply/status
+support PostgreSQL and MySQL 8. Use the Rust API to apply SQLite migrations.
 `;
 
 /** Entry point: parse, dispatch, map thrown `CliError` to a clean non-zero exit. */
@@ -355,6 +562,8 @@ export async function main(argv: string[]): Promise<number> {
         return await runApply(args);
       case "status":
         return await runStatus(args);
+      case "resolve-pending":
+        return await runResolvePending(args);
       default:
         process.stderr.write(`zero-migrate: unknown command ${JSON.stringify(args.command)}\n`);
         process.stdout.write(USAGE);
@@ -370,17 +579,21 @@ export async function main(argv: string[]): Promise<number> {
 async function runPlanResolved(args: Args): Promise<number> {
   const files = await discover(args.dir);
   if (files.length === 0) throw new CliError(`no migrations found in ${args.dir}`);
+  const registry = await loadRegistry(args.registryPath);
+  const migrations = await importMigrations(files);
+  assertUniqueMigrationNames(migrations);
   const reports: PlanLine[] = [];
-  for (const f of files) {
-    const mod = await importMigration(f.path);
+  for (const { file, migration } of migrations) {
     const report = plan({
-      migration: mod,
+      migration,
       ownerApp: args.ownerApp,
-      dialect: "postgres",
-      nameFallback: f.label,
+      projectSchema: args.projectSchema,
+      dialect: args.dialect ?? "postgres",
+      registry,
+      nameFallback: file.label,
     });
     reports.push({
-      label: report.envelope.name || f.label,
+      label: report.envelope.name || file.label,
       ok: report.ok,
       opCount: report.op_count ?? report.envelope.ops.length,
       irVersion: report.ir_version,

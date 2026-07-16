@@ -1,18 +1,18 @@
 # CLI reference
 
 The `zero-migrate` command creates migration files, previews and validates them,
-applies schema changes to PostgreSQL or MySQL, and reads PostgreSQL journal
-status.
+applies ordered schema and data changes to PostgreSQL or MySQL, resolves staged
+PostgreSQL column renames, and reconciles migration status.
 
 [Documentation home](README.md) · [Getting started](getting-started.md) ·
 [Writing migrations](writing-migrations.md) · [Node API](node-api.md) ·
 [Troubleshooting](troubleshooting.md)
 
-> **DDL-only apply:** the current CLI apply path executes schema/DDL migrations
-> only. Authored inserts, updates, deletes, and backfills may appear in preview or
-> pass the fast plan check, but they are not executed. A data-only migration can
-> therefore report success without changing data. Do not use the CLI for data
-> migrations or backfills in this release.
+> **Complete ordered apply:** the CLI executes DDL, insert, update, delete, and
+> backfill steps on PostgreSQL and MySQL 8 in authored order. Pending deletes
+> and backfills require the explicit `--approve` flag after operator review.
+> Approval is preflighted across each complete file plan before its first
+> authored step.
 
 > **Trusted modules only:** the CLI imports and executes migration JavaScript or
 > TypeScript directly in its host process, with no sandbox. Top-level module code
@@ -39,25 +39,29 @@ setup before using commands other than `new`.
 
 ```text
 zero-migrate new <name> [--dir <dir>]
-zero-migrate plan [--dir <dir>] [--owner-app <app>] [--schema <schema>] [--json]
+zero-migrate plan [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
 zero-migrate preview [--dir <dir>] [--json]
-zero-migrate apply [--dir <dir>] --database-url <url> [--owner-app <app>] [--schema <schema>]
-zero-migrate status --database-url <url> [--owner-app <app>] [--schema <schema>] [--json]
+zero-migrate apply [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
+zero-migrate status [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
 ```
 
-There are no short flags. Both `--flag value` and `--flag=value` work. Unknown
-flags fail.
+There are no short flags. For flags that take a value, both `--flag value` and
+`--flag=value` work. Boolean flags such as `--approve` and `--json` must be
+passed without a value. Unknown flags fail.
 
-Always use `--dir`. A positional directory after `plan`, `preview`, `apply`, or
-`status` is currently ignored.
+Use `--dir` for every command that reads or creates migration files. The CLI
+rejects a positional directory after `plan`, `preview`, `apply`, or `status`.
+`resolve-pending` takes a pending version instead of a migration directory.
 
 | Command | Database | Purpose |
 | --- | --- | --- |
 | `new` | None | Create a timestamped TypeScript migration |
 | `preview` | None | Print the generated migration changes |
-| `plan` | None | Run a fast PostgreSQL-oriented validation check |
-| `apply` | PostgreSQL or MySQL | Apply DDL migrations in filename order |
-| `status` | PostgreSQL | Read net journal state |
+| `plan` | None | Validate migrations for PostgreSQL, MySQL, or SQLite |
+| `apply` | PostgreSQL or MySQL | Apply complete migrations in filename and authored-step order |
+| `status` | PostgreSQL or MySQL | Reconcile the migration directory with journal state |
+| `resolve-pending` | PostgreSQL | Complete or abort one outstanding online column rename |
 
 There is no CLI command for history, rollback, rendered SQL, SQLite apply, or a
 full database-backed dry run.
@@ -66,15 +70,21 @@ full database-backed dry run.
 
 | Flag | Commands | Meaning |
 | --- | --- | --- |
-| `--dir <dir>` | `new`, `plan`, `preview`, `apply` | Migration directory; default `./migrations` |
-| `--database-url <url>` | `apply`, `status` | PostgreSQL or MySQL connection URL |
-| `--owner-app <app>` | `plan`, `apply`, `status` | Deploying application ID; default `app_cli` |
-| `--schema <schema>` | `plan`, `apply`, `status` | Project schema/database; default `public` |
+| `--dir <dir>` | `new`, `plan`, `preview`, `apply`, `status` | Migration directory; default `./migrations` |
+| `--database-url <url>` | `apply`, `status`, `resolve-pending` | PostgreSQL or MySQL connection URL; rename resolution requires PostgreSQL |
+| `--dialect <name>` | `plan` | Validation target: `postgres`, `mysql`, or `sqlite`; default `postgres` |
+| `--registry <file>` | `plan`, `apply`, `status` | Trusted JSON map of existing table names to owner application IDs |
+| `--owner-app <app>` | `plan`, `apply`, `status`, `resolve-pending` | Deploying application ID; default `app_cli` |
+| `--schema <schema>` | `plan`, `apply`, `status`, `resolve-pending` | Project schema/database; default `public` |
+| `--approve` | `apply`, `resolve-pending` | Approve the exact reviewed destructive work |
+| `--apply` | `resolve-pending` | Keep the destination column and drop the source column |
+| `--abort` | `resolve-pending` | Keep the source column and drop the destination column |
 | `--json` | `plan`, `preview`, `status` | Machine-readable output |
 | `--help` | all | Print help and exit 0 |
 
-Two accepted flags currently have no effect: `--schema` on `plan`, and
-`--owner-app` on `status`.
+On the offline `plan` command, `--schema` sets the project confinement boundary
+used to check explicit schema references. Pass the same value to plan, apply, and
+status.
 
 | Environment variable | Used when the flag is absent | Default |
 | --- | --- | --- |
@@ -125,11 +135,15 @@ Importing the module runs its top-level code, and the CLI calls `up()` with the
 full permissions of the CLI process. There is no in-process isolation. Keep
 trusted modules deterministic and free of I/O, timers, randomness, and clock
 reads so results are reproducible; this is authoring guidance, not a security
-control. `up()` is not awaited, and `plan` currently invokes it twice. A
+control. Async `up()` functions and returned promises are rejected. `plan`
+invokes `up()` exactly once and validates the same operation list it displays. A
 `down()` export is not used by the public CLI, which has no rollback command.
 
 The displayed migration name comes from the named `name` export,
 `default.name`, the filename without its extension, or finally `migration`.
+That name is durable identity. Keep it unique within the project and never
+rename it after apply. The timestamped filename fallback is stable as long as
+the file itself is not renamed.
 
 ## `new`
 
@@ -175,13 +189,17 @@ preview create_users: ir_version=1 ops=2
 ]
 ```
 
-Preview opens no database and does not print rendered SQL. It can show data
-operations that the current public apply path will not execute.
+Preview opens no database and does not print rendered SQL. Its operation order
+is the order apply uses, including inserts, updates, deletes, and backfills.
 
 ## `plan`
 
 ```bash
-zero-migrate plan --dir ./migrations --owner-app app_demo
+zero-migrate plan \
+  --dir ./migrations \
+  --owner-app app_demo \
+  --schema app_demo \
+  --dialect postgres
 ```
 
 Text output gives one verdict per file:
@@ -204,27 +222,46 @@ command exit 1. `--json` returns:
 ]
 ```
 
-This is a fast, database-free check of the generated changes, supported
-PostgreSQL operation forms, and ownership against an empty table registry. It
-does not inspect the target database, render SQL, account for the requested
-schema, or prove that apply will succeed. It also does not warn that data
-operations will be omitted by public apply.
+This is a fast, database-free check of the generated changes, operation forms
+for the selected dialect, project-schema confinement, and ownership against the
+supplied registry. It does not inspect the target database, render SQL, or prove
+that apply will succeed. Runtime approval, cursor, lock, and database conditions
+are checked during apply.
 
-CLI plan always checks the PostgreSQL dialect. Use the Node `plan()` API to check
-MySQL or SQLite syntax.
+Pass `--dialect postgres`, `--dialect mysql`, or `--dialect sqlite` for every
+target you deploy. PostgreSQL is the default when `--dialect` is omitted.
 
-### Ownership limitation
+### Ownership registry
 
-The CLI always uses an empty table-owner registry. A create-first module can
-create a table and then add its columns or indexes in the same module. A later
-module that changes that existing table normally fails with an `<unregistered>`
-ownership error.
+Without `--registry`, the CLI uses an empty table-owner registry. A create-first
+module can create a table and then add its columns or indexes in the same
+module. A later module that changes that existing table normally fails with an
+`<unregistered>` ownership error.
 
-For follow-up schema migrations, use the Node API and pass a trusted registry:
+For follow-up migrations, create a JSON file from your platform's authoritative
+table ownership data:
 
-```ts
-registry: { users: "app_demo" }
+```json
+{
+  "users": "app_demo",
+  "orders": "app_orders"
+}
 ```
+
+Then pass it to every related command:
+
+```bash
+zero-migrate plan \
+  --dir ./migrations \
+  --dialect postgres \
+  --owner-app app_demo \
+  --schema app_demo \
+  --registry ./table-owners.json
+```
+
+Do not generate this file from the migration being checked. The registry is the
+independent source used to prevent one application from changing another
+application's tables.
 
 ## `apply`
 
@@ -234,6 +271,7 @@ PostgreSQL:
 zero-migrate apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
 ```
@@ -244,9 +282,34 @@ MySQL:
 zero-migrate apply \
   --dir ./migrations \
   --database-url "$MYSQL_URL" \
+  --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
 ```
+
+The MySQL migration account must be able to read Performance Schema transaction
+state. Enable the `transaction` instrument and
+`events_transactions_current` consumer. Apply and status fail before migration
+work if zero-migrate cannot verify that its dedicated session is idle.
+
+For a reviewed delete or backfill, add approval explicitly:
+
+```bash
+zero-migrate apply \
+  --dir ./migrations \
+  --database-url "$DATABASE_URL" \
+  --schema app_demo \
+  --owner-app app_demo \
+  --approve
+```
+
+`--approve` is a non-interactive operator decision for the exact source being
+run. It does not weaken validation, ownership, cursor, or database checks.
+An unchanged completed delete or backfill skips on a repeat run without
+`--approve`; an interrupted backfill still requires `--approve` before it
+resumes. Approval is preflighted across the complete plan for each file before
+its first authored step executes. A later unapproved delete or backfill cannot
+leave an earlier step from that same plan committed.
 
 The PostgreSQL project schema or MySQL project database must already exist. The
 connection also needs permission to create and use the journal namespace
@@ -255,8 +318,12 @@ connection also needs permission to create and use the journal namespace
 The CLI applies files in filename order and prints one outcome per file:
 
 ```text
-apply 20260715153045_create_users: {"applied":["mig_..."],"skipped":[],"recovered":[]}
+apply 20260715153045_create_users: {"applied":["mig_..."],"skipped":[],"recovered":[],"pendingContracts":[]}
 ```
+
+Every outcome also includes `pendingContracts`. It is empty unless PostgreSQL
+has an outstanding online column rename. See `resolve-pending` below for the
+complete workflow.
 
 Each file is a separate apply call. If file three fails, files one and two stay
 committed. Always check the final exit code rather than treating partial output
@@ -265,37 +332,169 @@ as directory-wide success.
 A single file can also produce several database changes that commit separately.
 If a later change in that file fails, earlier changes from the same file can
 remain committed. Inspect the database and migration history before retrying.
+This partial state can follow a runtime database error after execution begins;
+the whole-plan approval preflight itself runs before authored steps.
 
 Current CLI defaults are:
 
 | Setting | Value |
 | --- | --- |
-| ownership registry | `{}` |
+| ownership registry | `{}` unless `--registry` is supplied |
 | destructive approval | `false` |
 | PostgreSQL migrator role | none |
-| audit actor | `host` |
+| audit actor | `host` for apply; `cli` for rename resolution |
 
-Use the Node API when you need a registry, destructive approval, a PostgreSQL
-migrator role, or a custom audit actor.
+Use the Node API when you need a PostgreSQL migrator role or a custom audit
+actor.
 
-Important apply boundaries:
+Important apply behavior:
 
-- only DDL/schema migrations are executed; inserts, updates, deletes, and
-  backfills are omitted;
-- the target is not introspected before work is generated, so this path is best
-  suited to create-first schema changes;
+- DDL, insert, update, delete, and backfill steps execute in authored order;
+- inserts and updates run without destructive approval, while pending deletes
+  and backfills require `--approve`;
+- every step has a stable journal identity. Unchanged completed work is skipped,
+  while edited applied content stops with checksum drift;
+- every MySQL insert, update, delete, and backfill target must use InnoDB and
+  have no user triggers;
+- PostgreSQL backfills reject pre-existing enabled user triggers; the managed
+  online rename workflow remains supported;
+- a backfill cursor must be the table's complete, non-null, single-column primary
+  key with a supported orderable type. The backfill commits bounded batches and
+  resumes after its last committed cursor within a fixed terminal boundary
+  captured before the first batch. Rows inserted after capture are not
+  guaranteed to be included and need a later migration;
+- apply reads the current target catalog before preparing work, so checks that
+  depend on existing tables, columns, and indexes use the current database
+  shape. This is not a complete structural-drift check or database-backed dry
+  run;
 - no platform-managed columns, indexes, or primary key are added automatically;
-- the CLI cannot approve destructive work;
-- stable same-file IDs are not guaranteed across repeated DDL apply calls, so a
-  second call may try the DDL again instead of returning `skipped`; and
 - the whole directory is not one transaction or one lock interval.
 
 Test migrations against a disposable database before production use.
 
+## `resolve-pending`
+
+A PostgreSQL column rename is completed across multiple deployments. Author it
+with the ordinary JavaScript API:
+
+```ts
+table("users").column("display_name").rename({
+  to: "full_name",
+  type: t.text(),
+});
+```
+
+For PostgreSQL validation, this rename must be the only operation in the
+migration that targets `users`. Operations on different tables may remain in
+the same file. Move every other schema or data operation on `users` into a later
+migration, and apply it only after the rename is resolved.
+
+The live source column must exist, the destination must not exist, and the
+declared `type` must match the source column's current PostgreSQL type. The table
+must have `id` as its complete, non-null, single-column primary key with a
+supported orderable cursor type. It must have no pre-existing enabled user
+triggers, and row-level policy must allow every selected backfill row to be
+updated.
+
+Supported PostgreSQL `id` cursor families are small integers, integers, big
+integers, numeric or decimal, text or character strings, dates, timestamps, and
+UUIDs. Floating-point, JSON, binary, and geometric types are not supported
+backfill cursors.
+
+The destination is nullable but otherwise keeps the source's exact live
+PostgreSQL type, including modifiers. Equivalent built-in spellings such as
+`timestamptz` and `timestamp with time zone`, or `decimal(20,4)` and
+`numeric(20,4)`, are accepted. A modifier change is refused during resolution.
+`NOT NULL`, defaults, unique or primary-key rules, indexes, comments, and
+dependent objects do not transfer to it. Review those semantics and schedule
+separate follow-up migrations after resolution. Do not use this workflow to
+rename the `id` primary key. Dependencies on the source can block resolution,
+so audit them before rollout.
+
+Run the initial apply with approval because it includes a bounded backfill:
+
+```bash
+zero-migrate apply \
+  --dir ./migrations \
+  --database-url "$DATABASE_URL" \
+  --registry ./table-owners.json \
+  --schema app_demo \
+  --owner-app app_demo \
+  --approve
+```
+
+Its result includes the outstanding rename and its stable resolution key:
+
+```text
+apply 20260716120000_rename_users_display_name: {"applied":["mig_..."],"skipped":[],"recovered":[],"pendingContracts":[{"table":"users","fromColumn":"display_name","toColumn":"full_name","pendingVersion":"mig_..."}]}
+```
+
+At this point both columns coexist. A write through either name keeps their
+values aligned; if one statement supplies different values for both, the
+destination value wins. Avoid writing both names in one statement. Deploy the
+application version that uses `full_name`, wait for every application instance
+and other database consumer to stop using `display_name`, and verify the
+rollout. Other migration changes to `users` remain blocked until you resolve
+this obligation.
+
+After the application cutover, complete the rename:
+
+```bash
+zero-migrate resolve-pending "mig_..." \
+  --apply \
+  --approve \
+  --database-url "$DATABASE_URL" \
+  --schema app_demo \
+  --owner-app app_demo
+```
+
+`--apply` keeps `full_name` and drops `display_name`. If the rollout must be
+reversed, move the application back to `display_name` first, then abort the
+rename:
+
+```bash
+zero-migrate resolve-pending "mig_..." \
+  --abort \
+  --approve \
+  --database-url "$DATABASE_URL" \
+  --schema app_demo \
+  --owner-app app_demo
+```
+
+`--abort` keeps `display_name` and drops `full_name`. Exactly one of `--apply`
+and `--abort` is required. Both actions drop a column and therefore require
+`--approve`. Use the same `--owner-app` and `--schema` that opened the pending
+rename. This command accepts PostgreSQL URLs only.
+
+On success, the command prints an `ApplyOutcome` whose `pendingContracts` no
+longer contains that version. Run `status --json` to confirm the table is no
+longer blocked.
+
+If the initial apply is interrupted, rerun the unchanged file with the same
+identity and `--approve`. Completed work skips, and the backfill resumes from
+its saved cursor. If the pending rename was already opened, apply returns the
+same obligation again without resolving it.
+
+Resolution cleanup is all-or-nothing. If `resolve-pending` fails, both columns
+and the managed rename trigger remain intact, the pending obligation remains,
+and the table stays blocked. Correct the reported cause, then retry the same
+action and pending version.
+
+After either action succeeds, the original rename is terminal. Replaying the
+exact migration file does not open another obligation. Apply stays applied and
+abort stays aborted. To try the rename again after abort, create a new migration
+with a new exported name. Resolving the settled version again reports that it is
+not pending.
+
 ## `status`
 
 ```bash
-zero-migrate status --database-url "$DATABASE_URL" --schema app_demo
+zero-migrate status \
+  --dir ./migrations \
+  --database-url "$DATABASE_URL" \
+  --registry ./table-owners.json \
+  --schema app_demo \
+  --owner-app app_demo
 ```
 
 Text mode prints `status: ` followed by a compact object. `--json` prints:
@@ -305,16 +504,89 @@ Text mode prints `status: ` followed by a compact object. `--json` prints:
   "currentVersion": "mig_...",
   "applied": ["mig_..."],
   "pending": [],
-  "rolledBack": []
+  "aborted": [],
+  "rolledBack": [],
+  "pendingContracts": [],
+  "blocked": [],
+  "unexpectedJournal": [],
+  "plans": [
+    {
+      "version": "mig_...",
+      "name": "create_users",
+      "state": "applied",
+      "steps": [
+        {
+          "version": "mig_...",
+          "name": "create_table_users",
+          "kind": "ddl",
+          "state": "applied"
+        },
+        {
+          "version": "mig_...",
+          "name": "insert users",
+          "kind": "dml",
+          "state": "applied"
+        }
+      ],
+      "missingDependencies": []
+    }
+  ]
 }
 ```
 
-Status is currently supported only for PostgreSQL. It reads net-applied and
-rolled-back journal versions, but it does not compare the migration directory
-with the journal, so `pending` is always empty.
+Status is supported for PostgreSQL and MySQL. It loads the ordered migration
+directory and reconciles every schema, insert, update, delete, and backfill step
+with the journal. Migration states are `applied`, `aborted`, `pending`,
+`partial`, `drifted`, `blocked`, or `unknownDependency`; step states are
+`pending`, `inflight`, `applied`, `aborted`, or `drifted`. Top-level `applied`,
+`pending`, and `aborted` values are logical migration IDs, while
+`plans[].steps[].version` values are the journaled step IDs. Saved backfill
+progress without a final completion event reports an `inflight` step in a
+`partial` plan.
 
-On a fresh project, status may create the journal schema and tables before
-returning an empty state. It is therefore not a strictly read-only probe.
+The complete status reply also includes:
+
+- `pendingContracts`: `{ table, pendingVersion, orphaned }` entries for
+  outstanding PostgreSQL online renames. `orphaned` means the migration that
+  opened the obligation is missing from the supplied directory.
+- `blocked`: `{ blocked, dependency, pendingVersion }` entries for plans waiting
+  on a dependency's outstanding rename.
+- `aborted`: terminal logical plan IDs whose online rename was explicitly
+  aborted. They are not included in `applied` or `pending`.
+- `unexpectedJournal`: `{ version, state, journalChecksum, journalKind? }`
+  entries for completed or inflight identities absent from the migration
+  directory. Investigate an incomplete directory or changed identity before
+  applying.
+
+Plan states are `applied`, `aborted`, `pending`, `partial`, `drifted`, `blocked`,
+or `unknownDependency`. Step kinds are `ddl`, `dml`, `backfill`,
+`onlineExpand`, `onlineContract`, or `sqliteRebuild`. Step states are `pending`,
+`inflight`, `applied`, `aborted`, or `drifted`. Unexpected journal state is
+`applied` or `inflight`; when present, `journalKind` is `apply`, `baseline`,
+`squash`, or `repeatable`.
+
+`currentVersion` is the last fully applied supplied plan in dependency and input
+order.
+`applied` lists fully applied supplied plan IDs, `aborted` lists terminal aborted
+plan IDs, and `pending` lists supplied plan IDs in neither terminal list.
+`rolledBack` lists versions whose latest event is a rollback. An expanded but
+unresolved rename normally appears as a `partial` plan with applied
+`onlineExpand` steps and pending `onlineContract` steps. After abort, the plan
+and its deferred `onlineContract` steps report `aborted`; completed expansion
+steps remain `applied`. `orphaned` is evaluated relative to the migration
+directory supplied to status.
+
+An aborted plan does not satisfy `dependsOn`. A dependent supplied plan remains
+`blocked`, and apply refuses to run it. Author a new replacement migration and
+update the dependency to its new identity before continuing.
+
+Use the same `--owner-app`, `--schema`, migration names, and source used for
+apply. Changing identity inputs or editing an applied migration can make status
+report a different plan or checksum drift.
+
+On a fresh database, status may create the journal schema and tables before
+reporting the discovered migrations as pending. It is therefore not a strictly
+read-only probe.
 
 Use the Node `history()` function for full PostgreSQL journal events; there is no
 CLI history command.
@@ -324,7 +596,7 @@ CLI history command.
 | Result | Exit code |
 | --- | --- |
 | `help` or `--help` | 0 |
-| successful `new`, `preview`, `apply`, or `status` | 0 |
+| successful `new`, `preview`, `apply`, `status`, or `resolve-pending` | 0 |
 | every `plan` result is valid | 0 |
 | any validation, import, runtime, configuration, or database error | 1 |
 
@@ -333,16 +605,21 @@ command also prints usage.
 
 ## Practical limitations
 
-- Apply is DDL-only; data operations and backfills are not executed.
-- PostgreSQL and MySQL apply are available; SQLite apply is not.
-- Status is PostgreSQL-only and does not calculate pending files.
-- Plan is a fast PostgreSQL-oriented structural check, not a live plan.
-- Plan invokes `up()` twice, so authoring must be deterministic.
-- Follow-up migrations need a registry that the CLI cannot supply.
-- Apply is create-first and does not inspect the existing schema before
-  preparing the database changes.
-- Destructive approval, migrator role, and audit actor are not configurable.
-- Repeating the same DDL file is not yet an idempotent-skip guarantee.
+- PostgreSQL and MySQL apply execute schema changes and all structured data
+  operations; SQLite apply is available only through the Rust API.
+- PostgreSQL and MySQL status reconcile the supplied migration directory;
+  PostgreSQL history still requires the Node API.
+- Online column rename and `resolve-pending` are PostgreSQL-only. In the rename
+  migration, no other operation may target that table. Operations on different
+  tables are allowed. Later same-table work remains blocked until completion or
+  abort.
+- Plan is a fast structural check for the selected dialect, not a live plan.
+- Apply and status read the target catalog before preparing live-dependent work;
+  they do not perform a complete structural-drift check.
+- `--approve` approves reviewed destructive changes and backfills for the run;
+  migrator role and audit actor are not configurable.
+- Migration names are durable identity. Unchanged completed steps skip, while
+  changes to applied content stop with checksum drift.
 - Rollback, history, rendered SQL, and a full database-backed dry run are absent.
 
 ## Troubleshooting
@@ -352,13 +629,17 @@ command also prints usage.
 | Required runtime cannot load | Repeat the source setup for this OS/architecture, then set the absolute `ZERO_MIGRATE_ADDON_PATH` shown in Getting started |
 | `Unknown file extension ".ts"` | Start Node with a TypeScript loader, or compile migrations to JavaScript |
 | `no migrations found` | Pass `--dir`, keep files at its top level, and use a supported extension |
-| `<unregistered>` ownership error | Use Node `apply()` with the authoritative `{ table: ownerApp }` registry |
-| Destructive change is refused | Review it, then use trusted Node code with `approved: true`; the CLI cannot approve |
+| `<unregistered>` ownership error | Pass the authoritative JSON mapping with `--registry` |
+| Destructive change or backfill is refused | Review the exact migration, then repeat `apply` with `--approve` |
 | Plan passes but apply fails | Plan is offline and does not inspect the target or run every apply-time check |
-| Data migration reports success but rows do not change | Public apply is DDL-only; move data separately and verify it explicitly |
-| MySQL status fails | Use status only with PostgreSQL |
+| PostgreSQL rename validation reports another operation on the table | Keep the rename as that table's only operation; move same-table schema and data work to a later migration and apply it after resolution |
+| Data step is skipped | Run `status --dir ...`; an unchanged applied step skips by design, while edited content reports checksum drift |
+| MySQL data step is refused | Use an InnoDB target without user triggers; zero-migrate refuses data migrations whose transactional side effects cannot be proven |
+| Backfill cursor is refused | Use the table's complete, non-null, single-column primary key with a supported orderable type |
+| MySQL history is needed | The public history API is PostgreSQL-only; use plan-aware MySQL `status` for current migration state |
 | Project schema/database is missing | Create it first and grant access to it and its journal namespace |
-| Repeated DDL does not skip | Do not rely on repeat apply for idempotency in this release |
+| Reapplying an edited migration reports drift | Restore the applied source and add a new uniquely named migration for the change |
+| A table is blocked by a pending rename | Finish the application cutover and run `resolve-pending <version> --apply --approve`, or return the application to the source column and use `--abort --approve` |
 
 See [Troubleshooting](troubleshooting.md) for longer diagnostic flows.
 

@@ -79,16 +79,15 @@ function rejectFunctionValue(value) {
   }
 }
 var active = null;
-var deferredUpOps = [];
 function structuredError(code, message, extra) {
   const err = new Error(message);
   err.code = code;
   if (extra) Object.assign(err, extra);
   return err;
 }
-function __begin(phase = "up") {
+function __begin(_phase = "up") {
   active = {
-    ops: phase === "up" ? deferredUpOps.map((op) => structuredClone(op)) : [],
+    ops: [],
     pending: /* @__PURE__ */ new Map(),
     nextSelectorId: 0
   };
@@ -116,8 +115,8 @@ function recorder() {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      "op authoring called outside an active migration recorder; the table() handle may only be used synchronously inside up()/down()",
-      { suggested_fix: "move the table()/selector calls inside the migration's up()/down() body" }
+      "migration operations may only be authored synchronously inside up()/down()",
+      { suggested_fix: "move the operation call inside the migration's up()/down() body" }
     );
   }
   return active;
@@ -126,23 +125,13 @@ function push(op) {
   recorder().ops.push(op);
   return op;
 }
-function pushOrDeferUp(op) {
-  if (active === null) {
-    deferredUpOps.push(op);
-    return op;
-  }
-  active.ops.push(op);
-  return op;
-}
 function __pgPush(op) {
   return push(op);
 }
 var tier1Producers = [];
-function defineOp(kind, producer = kind, opts = {}) {
-  const deferrable = opts.deferrable === true;
-  tier1Producers.push({ kind, producer, deferrable });
-  const sink = deferrable ? pushOrDeferUp : push;
-  return (payload) => sink(compact({ op: kind, ...payload }));
+function defineOp(kind, producer = kind) {
+  tier1Producers.push({ kind, producer });
+  return (payload) => push(compact({ op: kind, ...payload }));
 }
 function opProducers() {
   return tier1Producers;
@@ -156,11 +145,11 @@ function opProducerRegistry() {
   }
   return byKind;
 }
-var emitCreateEnum = defineOp("createEnum", "createEnum", { deferrable: true });
+var emitCreateEnum = defineOp("createEnum");
 var emitDropEnum = defineOp("dropEnum");
-var emitCreateDomain = defineOp("createDomain", "createDomain", { deferrable: true });
+var emitCreateDomain = defineOp("createDomain");
 var emitDropDomain = defineOp("dropDomain");
-var emitCreateSequence = defineOp("createSequence", "createSequence", { deferrable: true });
+var emitCreateSequence = defineOp("createSequence");
 var emitAlterSequence = defineOp("alterSequence");
 var emitDropSequence = defineOp("dropSequence");
 var emitCreateSchema = defineOp("createSchema");
@@ -232,6 +221,14 @@ function compact(obj) {
     if (obj[k] === void 0) delete obj[k];
   }
   return obj;
+}
+function setOwn(target, key, value) {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true
+  });
 }
 function requireString(v, what) {
   if (typeof v !== "string") {
@@ -573,6 +570,29 @@ function rejectNestedFunctionValues(value) {
     for (const item of Object.values(value)) rejectNestedFunctionValues(item);
   }
 }
+function finiteNumberDecimalString(value) {
+  const rendered = String(value);
+  if (!/[eE]/.test(rendered)) return rendered;
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(rendered);
+  if (match === null) {
+    throw structuredError(
+      "OP_INVALID",
+      'number scalar could not be represented exactly; use decimal("<n>")'
+    );
+  }
+  const [, sign, whole, fraction = "", exponentText] = match;
+  const digits = whole + fraction;
+  const decimalAt = whole.length + Number(exponentText);
+  let expanded;
+  if (decimalAt <= 0) {
+    expanded = `${sign}0.${"0".repeat(-decimalAt)}${digits}`;
+  } else if (decimalAt >= digits.length) {
+    expanded = `${sign}${digits}${"0".repeat(decimalAt - digits.length)}`;
+  } else {
+    expanded = `${sign}${digits.slice(0, decimalAt)}.${digits.slice(decimalAt)}`;
+  }
+  return requireDecimalString(expanded);
+}
 function toIrScalar(value) {
   rejectNestedFunctionValues(value);
   if (isDecimalValue(value)) return { decimal: requireDecimalString(value.decimal) };
@@ -586,11 +606,38 @@ function toIrScalar(value) {
   if (isRemovedBytesCarrier(value)) {
     throw structuredError("OP_INVALID", "the { bytes } carrier is removed \u2014 use byteValue(...)");
   }
-  if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
-    return { decimal: String(value) };
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw structuredError("OP_INVALID", "number scalar must be finite");
+    }
+    if (Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
+        throw structuredError(
+          "OP_INVALID",
+          'integer scalar must be a JS safe integer; use decimal("<n>") for exact large values'
+        );
+      }
+    } else {
+      return { decimal: finiteNumberDecimalString(value) };
+    }
   }
   if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
-  return value;
+  if (value === null || typeof value === "string" || typeof value === "boolean" || typeof value === "number") {
+    return value;
+  }
+  if (value === void 0) {
+    throw structuredError(
+      "OP_INVALID",
+      "scalar value cannot be undefined; use null explicitly"
+    );
+  }
+  if (typeof value === "symbol") {
+    throw structuredError("OP_INVALID", "symbol is not a supported scalar value");
+  }
+  throw structuredError(
+    "OP_INVALID",
+    "scalar value must be null, a string, boolean, finite number, decimal(...), byteValue(...), or Uint8Array"
+  );
 }
 function toIrValue(value) {
   const synth = nativeFnSynthNode(value);
@@ -616,7 +663,7 @@ function toIrJsonValue(value) {
     }
     const out = {};
     for (const key of Object.keys(value).sort()) {
-      out[key] = toIrJsonValue(value[key]);
+      setOwn(out, key, toIrJsonValue(value[key]));
     }
     return out;
   }
@@ -1848,7 +1895,7 @@ function resolveSet(set) {
     throw structuredError("OP_INVALID", "`set` must be an object of column \u2192 DML value");
   }
   const out = {};
-  for (const col of Object.keys(set)) out[col] = resolveSetValue(set[col]);
+  for (const col of Object.keys(set)) setOwn(out, col, resolveSetValue(set[col]));
   return out;
 }
 function ifNotExistsGuard(v) {
@@ -2616,7 +2663,7 @@ function normalizeInsertRows(rows, what) {
   const normalized = arr.map((r) => {
     const keys = Object.keys(r);
     const values = {};
-    for (const key of keys) values[key] = toIrValue(r[key]);
+    for (const key of keys) setOwn(values, key, toIrValue(r[key]));
     return { keys, values };
   });
   for (let i = 0; i < normalized.length; i++) {
@@ -2646,7 +2693,9 @@ function normalizeOnConflict(oc) {
   if (oc === void 0 || oc === null) return void 0;
   if (oc.doUpdate === void 0) return { columns: oc.columns };
   const doUpdate = {};
-  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrValue(oc.doUpdate[col]);
+  for (const col of Object.keys(oc.doUpdate)) {
+    setOwn(doUpdate, col, toIrValue(oc.doUpdate[col]));
+  }
   return { columns: oc.columns, doUpdate };
 }
 function recordUpdate(table2, args) {

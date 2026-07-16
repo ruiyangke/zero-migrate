@@ -4,9 +4,9 @@ Policy lets a platform operator decide what a migration may do, where it may do
 it, and which safety requirements it must satisfy.
 
 > Custom policy can currently drive Rust planning, table-shape, and host
-> decisions. The public JavaScript API uses a confined, no-injection policy and
-> does not accept a policy document. A general end-to-end custom-policy apply
-> configuration is not exposed yet.
+> decisions. JavaScript `apply()` and plan-aware `status()` accept an optional
+> trusted table-shape ceiling through `policyCeiling`. That option is not a
+> general custom executor policy, which is not exposed yet.
 
 ## The model
 
@@ -216,7 +216,7 @@ Current injection support is intentionally narrow:
 - injected index columns are applied, but the configured index name is not
   preserved in the resolved migration.
 
-Test the resolved migration—not only whether the TOML parses—before deploying a
+Test the resolved migration, not only whether the TOML parses, before deploying a
 shape policy.
 
 ## Approval
@@ -231,7 +231,23 @@ This is a host obligation. The host must determine whether approval is required,
 show the exact migration/checksum for review, store the decision, and pass
 `Approval::Approved` only when that identity still matches.
 
+During apply, pending approval-gated identities are reconciled across the
+complete plan before any authored step executes. Approval refusal therefore
+cannot partially apply that plan; runtime database failures after execution
+begins can still leave earlier completed steps.
+
 The policy document does not store or grant approval by itself.
+
+A PostgreSQL online rename has two separate approval decisions. The initial
+apply approves its bounded backfill. A later apply or abort resolution approves
+dropping the source or destination column for the returned `pendingVersion`.
+Approval for one action does not imply approval for the other. Failed cleanup
+is all-or-nothing and leaves both columns and the managed rename trigger intact.
+After a resolution succeeds, that migration identity is terminal; retrying an
+aborted rename requires a newly named migration and a fresh approval decision.
+Approval does not override PostgreSQL rename isolation: the rename must be its
+table's only operation in that migration, and same-table follow-up work belongs
+in a later migration applied after resolution.
 
 ## Sealing
 

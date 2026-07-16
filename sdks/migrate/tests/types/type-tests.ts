@@ -660,6 +660,14 @@ export function decimalValueShapes(): void {
     rows: { id: 1, amount: decimal("0.00") },
     onConflict: { columns: ["id"], doUpdate: { amount: decimal("1.25") } },
   });
+  table("ledger").insert({
+    rows: { id: 1 },
+    onConflict: {
+      columns: ["id"],
+      // A conflict update may assign a column that was not part of the insert row.
+      doUpdate: { amount: decimal("1.25") },
+    },
+  });
   lit(decimal("0.00"));
 
   // @ts-expect-error — bigint is not an authored scalar; use decimal("<n>").

@@ -25,6 +25,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 import { apply } from "zero-migrate-engine";
+import { byteValue, decimal, table, t } from "zero-migrate";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -112,7 +113,7 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
       "widgets table was created in the project database",
     );
 
-    // The author columns AND the addon-folded confined system columns are present.
+    // With no policy ceiling, the host preserves the author-owned table shape.
     const [colRows] = await admin.query(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = ? AND table_name = 'widgets'`,
@@ -127,7 +128,7 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
       assert.ok(colNames.has(col), `author column ${col} present (got ${JSON.stringify([...colNames])})`);
     }
     for (const col of ["id", "created_at", "updated_at", "version"]) {
-      assert.ok(colNames.has(col), `folded system column ${col} present`);
+      assert.ok(!colNames.has(col), `no policy-managed system column ${col} is injected`);
     }
 
     // The MySQL journal (in the `<database>_migrations` meta database) recorded the
@@ -157,6 +158,235 @@ test("Live MySQL apply: napi addon lowers + applies the authored IR over the mys
     const lo = Number((seqRows as Array<{ lo: number | string }>)[0].lo);
     const hi = Number((seqRows as Array<{ hi: number | string }>)[0].hi);
     assert.ok(hi >= lo && lo >= 1, "event_seq is a positive monotonic native total order");
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+test("Live MySQL onConflict updates only the authored target and journals only committed steps", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; live MySQL onConflict test skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueDatabase("mysql_conflict");
+  const meta = `${database}_migrations`;
+  const migration = {
+    name: "mysql_conflict_target",
+    default: {
+      up() {
+        const items = table("conflict_items");
+        items.create({
+          columns: {
+            id: t.int().primaryKey(),
+            code: t.char({ length: 32 }).notNull().unique(),
+            nullable_key: t.char({ length: 32 }).unique(),
+            label: t.text().notNull(),
+            amount: t.numeric({ precision: 30, scale: 10 }).notNull(),
+            payload: t.bytes().notNull(),
+          },
+        });
+        items.insert({
+          rows: {
+            id: 1,
+            code: "original",
+            nullable_key: null,
+            label: "seed",
+            amount: decimal("1.0000000000"),
+            payload: byteValue(new Uint8Array([1])),
+          },
+        });
+        items.insert({
+          rows: {
+            id: 1,
+            code: "different",
+            label: "incoming",
+            amount: decimal("2.0000000000"),
+            payload: byteValue(new Uint8Array([2])),
+          },
+          onConflict: {
+            columns: ["id"],
+            doUpdate: {
+              label: "target-updated",
+              amount: decimal("12345678901234567890.1234567890"),
+              payload: byteValue(new Uint8Array([0, 0x80, 0xff])),
+            },
+          },
+        });
+        items.insert({
+          rows: {
+            id: 2,
+            code: "original",
+            nullable_key: null,
+            label: "wrong-row",
+            amount: decimal("3.0000000000"),
+            payload: byteValue(new Uint8Array([3])),
+          },
+          onConflict: {
+            columns: ["nullable_key"],
+            doUpdate: { label: "must-not-apply" },
+          },
+        });
+      },
+    },
+  };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+
+    await assert.rejects(
+      apply({
+        migration: migration as never,
+        ownerApp: "app_mysql_conflict",
+        projectSchema: database,
+        driver: { kind: "mysql", url: MYSQL_URL },
+        registry: {},
+        approved: false,
+        appliedBy: "on-conflict-test",
+        nameFallback: migration.name,
+      }),
+      /Invalid JSON|JSON_EXTRACT|3141/i,
+      "NULL values on a nullable UNIQUE target must not match a different-key collision",
+    );
+
+    const [amountColumns] = await admin.query(
+      `SELECT column_type FROM information_schema.columns
+        WHERE table_schema = ? AND table_name = 'conflict_items' AND column_name = 'amount'`,
+      [database],
+    );
+    const amountColumn = (amountColumns as Array<Record<string, unknown>>)[0] ?? {};
+    assert.equal(
+      String(amountColumn.column_type ?? amountColumn.COLUMN_TYPE),
+      "decimal(30,10)",
+      "t.numeric({ precision, scale }) creates a fixed-precision MySQL column",
+    );
+
+    const [rows] = await admin.query(
+      `SELECT id, code, label, CAST(amount AS CHAR) AS amount, HEX(payload) AS payload
+         FROM \`${database}\`.conflict_items ORDER BY id`,
+    );
+    const visible = (rows as Array<Record<string, unknown>>).map((row) => ({
+      id: Number(row.id ?? row.ID),
+      code: String(row.code ?? row.CODE),
+      label: String(row.label ?? row.LABEL),
+      amount: String(row.amount ?? row.AMOUNT),
+      payload: String(row.payload ?? row.PAYLOAD),
+    }));
+    assert.deepEqual(visible, [
+      {
+        id: 1,
+        code: "original",
+        label: "target-updated",
+        amount: "12345678901234567890.1234567890",
+        payload: "0080FF",
+      },
+    ]);
+
+    const [journal] = await admin.query(
+      `SELECT name FROM \`${meta}\`.schema_migrations
+        WHERE event_kind = 'applied' ORDER BY event_seq`,
+    );
+    const journalNames = (journal as Array<{ name: string }>).map((row) => row.name);
+    assert.equal(
+      journalNames.filter((name) => name === "insert conflict_items").length,
+      2,
+      "the failed non-target conflict has no applied journal event",
+    );
+  } finally {
+    await admin
+      .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)
+      .catch(() => {});
+    await admin.end().catch(() => {});
+  }
+});
+
+test("Live MySQL onConflict rejects a non-unique authored target before mutation", async (ctx) => {
+  if (!MYSQL_URL) {
+    ctx.skip("ZERO_MIGRATE_MYSQL_URL unset; live MySQL onConflict target proof skipped");
+    return;
+  }
+
+  const mysql = (await import("mysql2/promise")).default;
+  const admin = await mysql.createConnection({
+    uri: MYSQL_URL,
+    multipleStatements: true,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+  });
+  const database = uniqueDatabase("mysql_conflict_nonunique");
+  const meta = `${database}_migrations`;
+  const migration = {
+    name: "mysql_conflict_nonunique_target",
+    default: {
+      up() {
+        const items = table("nonunique_items");
+        items.create({
+          columns: {
+            id: t.int().primaryKey(),
+            group_id: t.int().notNull(),
+            label: t.text().notNull(),
+          },
+        });
+        items.insert({ rows: { id: 1, group_id: 7, label: "seed" } });
+        items.insert({
+          rows: { id: 1, group_id: 7, label: "incoming" },
+          onConflict: {
+            columns: ["group_id"],
+            doUpdate: { label: "must-not-apply" },
+          },
+        });
+      },
+    },
+  };
+
+  try {
+    await admin.query(`CREATE DATABASE \`${database}\``);
+
+    await assert.rejects(
+      apply({
+        migration: migration as never,
+        ownerApp: "app_mysql_conflict_nonunique",
+        projectSchema: database,
+        driver: { kind: "mysql", url: MYSQL_URL },
+        registry: {},
+        approved: false,
+        appliedBy: "on-conflict-target-proof",
+        nameFallback: migration.name,
+      }),
+      /does not exactly match the full columns of one UNIQUE or PRIMARY index/,
+    );
+
+    const [rows] = await admin.query(
+      `SELECT id, group_id, label FROM \`${database}\`.nonunique_items ORDER BY id`,
+    );
+    assert.deepEqual(
+      (rows as Array<Record<string, unknown>>).map((row) => ({
+        id: Number(row.id ?? row.ID),
+        group_id: Number(row.group_id ?? row.GROUP_ID),
+        label: String(row.label ?? row.LABEL),
+      })),
+      [{ id: 1, group_id: 7, label: "seed" }],
+    );
+
+    const [journal] = await admin.query(
+      `SELECT name FROM \`${meta}\`.schema_migrations
+        WHERE event_kind = 'applied' AND name = 'insert nonunique_items'`,
+    );
+    assert.equal(
+      (journal as Array<unknown>).length,
+      1,
+      "only the seed insert is journaled; the unproven target step never runs",
+    );
   } finally {
     await admin
       .query(`DROP DATABASE IF EXISTS \`${database}\`; DROP DATABASE IF EXISTS \`${meta}\``)

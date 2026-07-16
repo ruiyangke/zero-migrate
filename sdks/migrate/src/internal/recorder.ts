@@ -26,7 +26,7 @@
 // requirement (a duplicated module would drain an empty op list). It is exposed to
 // the `zero-migrate-engine` host package via the documented `./internal/recorder`
 // subpath export (the ONE sanctioned consumer) — NOT part of the public `.` API.
-import { __begin, __drain } from "../ops.js";
+import { __abort, __begin, __drain } from "../ops.js";
 
 /** The pure-JS IR envelope the addon lowers. Note: NO `owner_app`,
  *  NO `checksum` — both are Rust-owned provenance/integrity fields. */
@@ -53,7 +53,7 @@ export interface MigrationModule {
  * Resolve the migration's `up()` (mandatory) from either
  * `export function up()` or `export default { up }`.
  */
-function resolveUp(mod: MigrationModule): () => void {
+function resolveUp(mod: MigrationModule): () => unknown {
   const def = mod && mod.default;
   let up = typeof mod.up === "function" ? mod.up : undefined;
   if (!up && def && typeof def === "object" && typeof def.up === "function") {
@@ -72,7 +72,7 @@ function resolveUp(mod: MigrationModule): () => void {
  * Resolve the migration name: explicit `name` export → `default.name` → the
  * caller-supplied fallback (typically a filename-derived label).
  */
-function resolveName(mod: MigrationModule, fallback: string): string {
+export function resolveMigrationName(mod: MigrationModule, fallback: string): string {
   if (typeof mod.name === "string" && mod.name.length > 0) return mod.name;
   const def = mod && mod.default;
   if (def && typeof def.name === "string" && def.name.length > 0) return def.name;
@@ -90,10 +90,32 @@ function resolveName(mod: MigrationModule, fallback: string): string {
  * singleton). A bundler that duplicates the module would drain an empty list; the
  * facade/oracle imports the migration through the same resolution as this module.
  */
-function recordUp(up: () => void): unknown[] {
+function recordUp(up: () => unknown): unknown[] {
   __begin("up");
-  up();
-  return __drain();
+  try {
+    const result = up();
+    if (
+      result !== null &&
+      (typeof result === "object" || typeof result === "function") &&
+      typeof (result as { then?: unknown }).then === "function"
+    ) {
+      // The promise cannot be cancelled. Observe any eventual rejection so a
+      // post-await authoring call does not become an unhandled rejection after
+      // this synchronous validation error has already been reported.
+      void Promise.resolve(result).catch(() => undefined);
+      const error = new Error(
+        "migration up() must be synchronous; promises and async functions are not supported",
+      ) as Error & { code: string; suggested_fix: string };
+      error.code = "ASYNC_UP_UNSUPPORTED";
+      error.suggested_fix =
+        "remove async/await and author every migration operation synchronously inside up()";
+      throw error;
+    }
+    return __drain();
+  } catch (error) {
+    __abort();
+    throw error;
+  }
 }
 
 /** Options for {@link buildEnvelope}. */
@@ -111,9 +133,9 @@ export interface BuildEnvelopeOptions {
  * and stamps the caller-supplied `irVersion` (from the addon). Does NOT set
  * `owner_app` or fold a checksum — the addon does both in Rust.
  *
- * @throws the structured recorder errors (`OP_OUTSIDE_RECORDER`,
- *         `SELECTOR_NOT_TERMINATED`) verbatim, and a plain `Error` for a missing
- *         `up()`.
+ * @throws structured recorder errors (`OP_OUTSIDE_RECORDER`,
+ *         `SELECTOR_NOT_TERMINATED`, `ASYNC_UP_UNSUPPORTED`) verbatim, and a
+ *         plain `Error` for a missing `up()`.
  */
 export function buildEnvelope(
   mod: MigrationModule,
@@ -123,7 +145,7 @@ export function buildEnvelope(
   const ops = recordUp(up);
   return {
     ir_version: opts.irVersion,
-    name: resolveName(mod, opts.nameFallback ?? "migration"),
+    name: resolveMigrationName(mod, opts.nameFallback ?? "migration"),
     ops,
   };
 }

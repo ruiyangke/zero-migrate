@@ -11,9 +11,11 @@ from the longer-term platform direction.
 > API or CLI. Run trusted modules only. Isolate untrusted or generated source
 > outside the deployment process.
 
-> The current Node API and CLI execute schema changes only. They do not execute
-> inserts, updates, deletes, or backfills, even when those operations appear in a
-> preview.
+> On PostgreSQL and MySQL 8, Node and CLI execute schema changes, inserts,
+> updates, deletes, and backfills in authored order. Pending deletes and
+> backfills need explicit approval. Apply checks the complete plan before any
+> authored step runs; matching completed steps skip on retry without renewed
+> approval. SQLite supports all four data operations through its Rust backend.
 
 ## Choose your path
 
@@ -49,11 +51,11 @@ from the longer-term platform direction.
 
 | Guide | What it helps you do |
 | --- | --- |
-| [Getting started](getting-started.md) | Set up this pre-release and complete the first schema migration |
+| [Getting started](getting-started.md) | Set up this pre-release and complete the first ordered schema/data migration |
 | [Writing migrations](writing-migrations.md) | Use the TypeScript API for tables, columns, indexes, constraints, expressions, views, and data operations |
 | [Choosing a database target](dialects.md) | Keep migrations portable and use target-specific features intentionally |
 | [CLI reference](cli.md) | Create, preview, validate, apply, and inspect from a terminal |
-| [Node API](node-api.md) | Call `plan`, `validate`, `apply`, `status`, and `history` from JavaScript |
+| [Node API](node-api.md) | Call `plan`, `validate`, `apply`, `resolvePending`, `status`, and `history` from JavaScript |
 | [Operating migrations](operations.md) | Plan deployments, approve destructive work, monitor history, recover, and roll forward |
 | [Core concepts](concepts.md) | Understand identity, ownership, portability, policy, plans, and history |
 | [Policy model](policy.md) | Configure the public policy types and host responsibilities |
@@ -68,33 +70,68 @@ from the longer-term platform direction.
 | --- | --- |
 | TypeScript migration API | Available |
 | Preview without a database | Available in the CLI and Node API |
-| Offline target and ownership checks | Available in the CLI and Node API |
-| PostgreSQL schema apply | Node API, CLI, and Rust |
-| MySQL 8 schema apply | Node API, CLI, and Rust |
-| SQLite schema apply | Rust only |
-| JavaScript data-change apply | Not available; Node and CLI omit insert, update, delete, and backfill operations |
-| Migration status | PostgreSQL in Node; backend-specific support in Rust |
+| Offline target, schema-confinement, and ownership checks | Available in the CLI and Node API |
+| Catalog-aware apply and status | PostgreSQL and MySQL read current tables, columns, and indexes before preparing live-dependent work |
+| PostgreSQL schema and data apply | Node API, CLI, and Rust |
+| PostgreSQL online column rename | Initial approved apply, application cutover, then explicit Node or CLI apply/abort resolution |
+| MySQL 8 schema and data apply | Node API, CLI, and Rust; structured data targets must be trigger-free InnoDB |
+| SQLite schema and data apply | Rust only, with cross-process migration coordination |
+| Ordered data changes | Insert, update, delete, and backfill on every execution backend |
+| Migration status | PostgreSQL and MySQL in Node; backend-specific support in Rust |
 | Detailed history | PostgreSQL in Node and Rust |
-| Pending migration calculation in Node | Not available; `status().pending` is currently empty |
+| Pending migration calculation in Node | Available when `status()` receives the migration modules; CLI `status` loads its directory |
 | High-level rollback | Not available; use reviewed roll-forward migrations |
 | Database-backed dry run from Node | Not available |
-| Custom policy in Node | Not exposed by the current public Node options |
+| Trusted table-shape policy ceiling in Node | Optional on `apply()` and plan-aware `status()` |
+| Arbitrary custom executor policy in Node | Not exposed by the current public options |
 | JavaScript package installation | Not published to npm; use the source-checkout setup |
 
 Additional limits to plan around:
 
 - The target PostgreSQL schema or MySQL database must exist before Node/CLI
   apply.
-- The CLI cannot load an external table-ownership registry. It is most useful
-  for create-first, self-contained migration files. Use the Node API or Rust for
-  later files that change already-owned tables.
-- CLI `plan` checks PostgreSQL forms. Use Node `plan()` for MySQL or SQLite.
+- CLI plan, apply, and status load a trusted JSON table-ownership registry with
+  `--registry <file>`.
+- CLI `plan` checks PostgreSQL by default; select MySQL or SQLite with
+  `--dialect`.
 - Node `plan()` and `validate()` are offline checks; they do not inspect a live
   database or guarantee apply will succeed.
 - SQLite apply is not exposed by the Node API or CLI.
 - MySQL support targets MySQL 8, not MariaDB.
-- Reapplying the same authored DDL is not an idempotency guarantee in this
-  pre-release.
+- MySQL structured data migrations require an InnoDB target with no user
+  triggers.
+- PostgreSQL backfills reject pre-existing enabled user triggers. The managed
+  PostgreSQL online rename workflow remains supported.
+- A PostgreSQL online rename requires a matching live source type and `id` as
+  the complete, non-null, single-column primary key, with no pre-existing
+  enabled user triggers and no row policy that suppresses selected updates. Its
+  source and destination coexist until an approved `resolvePending()` or
+  `resolve-pending` action keeps one and drops the other. Other migrations on
+  that table remain blocked. Cleanup is all-or-nothing, so a failed resolution
+  leaves both columns and the managed rename trigger intact. Apply and abort are
+  terminal for the original migration identity; retrying after abort requires a
+  newly named migration.
+- On PostgreSQL, the rename must be the only operation in its migration that
+  targets that table. Operations on different tables may remain in the same
+  migration. Put all same-table follow-up work in a later migration and apply it
+  only after the rename is resolved.
+- A PostgreSQL rename destination is nullable but keeps the source's exact live
+  type, including modifiers. Review and recreate required defaults, constraints,
+  indexes, comments, and dependent objects after resolution. Source dependencies
+  can block resolution and must be audited before rollout.
+- Backfills use a fixed terminal cursor captured before the first batch. Later
+  rows are not guaranteed to be included and need a later migration. The cursor
+  must be the table's complete, single-column primary key on every target.
+- SQLite Rust apply coordinates zero-migrate processes for the same application
+  database and refuses unsafe application or journal database settings.
+- Migration names are stable identities. Keep each name unique within the
+  project, and never rename or edit an applied migration.
+- Status reports terminal online-rename aborts in top-level `aborted` and with
+  `aborted` plan and contract-step states. Aborted plans do not satisfy
+  `dependsOn`.
+- Pending delete and backfill steps require `approved: true` in Node or
+  `--approve` in the CLI after review. Matching completed steps skip without
+  renewed approval.
 
 ## Terms used in these guides
 
@@ -106,5 +143,6 @@ Additional limits to plan around:
 | owner | The application allowed to change a table |
 | policy | Rules that admit, reject, or require approval for a change |
 | approval | A trusted operator decision allowing reviewed destructive work |
+| pending version | The stable key used to resolve an outstanding PostgreSQL online column rename |
 | history | The append-only record of applied and rolled-back migration events |
 | target | `postgres`, `mysql`, or `sqlite` |

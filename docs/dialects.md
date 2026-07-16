@@ -15,21 +15,20 @@ For every migration, ask:
 2. **Can my chosen host execute it?**
 
 These are separate. For example, the migration API can describe and validate
-an update for PostgreSQL, but the public Node API and CLI do not execute
-structured data operations. Always check both compatibility and execution.
+an update for every target, while SQLite apply is available only through the
+Rust API. Always check both compatibility and execution.
 
 ## Target overview
 
 | Target | Best fit | Main limitations |
 | --- | --- | --- |
-| PostgreSQL | Full platform feature set, rich indexes, native types, partitions, RLS, and administration | Advanced operations need explicit capabilities; public Node/CLI does not run structured data steps |
-| SQLite | Embedded/local databases and the broadest supported backfill path | No public Node/CLI apply, no native partitions, sequences, comments, or PostgreSQL administration |
-| MySQL 8 | Portable application schema DDL through Node or Rust | No column rename, expression/partial indexes, comments, partitions, or structured data execution |
+| PostgreSQL | Full platform feature set, rich indexes, native types, partitions, RLS, administration, and complete schema/data execution | Advanced operations need explicit capabilities |
+| SQLite | Embedded/local databases applied through a Rust host | No public Node/CLI apply, no native partitions, sequences, comments, or PostgreSQL administration; backfills require an `INTEGER` or `TEXT` single-column primary key |
+| MySQL 8 | Portable application schema and data migrations through Node or Rust | No column rename, expression/partial indexes, comments, or partitions; data migrations require InnoDB and refuse targets with user triggers |
 
 Choose PostgreSQL when you need the broadest migration surface. Choose SQLite
-when the database lives in-process and you can use the Rust API. Choose
-MySQL 8 when its portable schema subset is enough and your migration does not
-depend on unsupported data execution.
+when you can use the Rust API with the database file. Choose
+MySQL 8 when its portable schema subset is enough.
 
 ## Execution paths
 
@@ -37,16 +36,20 @@ This table is the practical deployment boundary:
 
 | Execution path | Schema operations | Insert/update/delete | Batched backfill |
 | --- | --- | --- | --- |
-| Public Node/CLI, PostgreSQL | Yes, for supported non-privileged operations | **No** | **No** |
-| Public Node/CLI, MySQL 8 | Yes, for supported operations | **No** | **No** |
+| Public Node/CLI, PostgreSQL | Yes, for supported non-privileged operations | Yes | Yes, with a complete single-column primary key |
+| Public Node/CLI, MySQL 8 | Yes, for supported operations | Yes, on trigger-free InnoDB tables | Yes, on trigger-free InnoDB tables with a complete single-column primary key |
 | Public Node/CLI, SQLite | No apply driver | No | No |
-| PostgreSQL Rust API | Yes | Yes | No current backfill runner |
-| SQLite Rust API | Yes | Yes | Yes |
-| MySQL 8 Rust API | Yes | No | No |
+| PostgreSQL Rust API | Yes | Yes | Yes, with a complete single-column primary key |
+| SQLite Rust API | Yes | Yes | Yes, with an `INTEGER` or `TEXT` single-column primary key |
+| MySQL 8 Rust API | Yes | Yes, on trigger-free InnoDB tables | Yes, on trigger-free InnoDB tables with a complete single-column primary key |
 
-The public Node/CLI path can load and validate structured data operations, but
-it does not execute them. Do not interpret a successful apply or journal entry
-as proof that an `insert`, `update`, `delete`, or `backfill` ran.
+Supported schema and data steps execute in authored order. Pending deletes and
+backfills require operator approval: `approved: true` in Node or `--approve` in
+the CLI. Apply preflights every pending approval-gated step before any authored
+step starts, so a later unapproved delete or backfill cannot follow an earlier
+step from the same plan. Matching completed steps skip without renewed approval.
+Backfills capture a fixed terminal cursor before the first batch, record progress
+after every bounded batch, and resume only within that original cursor range.
 
 Privileged PostgreSQL capabilities are another host boundary. The public
 Node/CLI host cannot provide the required capability ceiling, so schemas,
@@ -73,9 +76,8 @@ For the best chance of running the same schema migration on all three targets:
   administration.
 - Validate the complete migration independently for each target.
 
-Even within this baseline, make sure your execution path supports the operation
-category. A portable data description is not executable through public
-Node/CLI apply.
+Even within this baseline, make sure your execution path supports the selected
+database. SQLite migrations need a Rust host.
 
 ## Tables and columns
 
@@ -84,7 +86,7 @@ Node/CLI apply.
 | Create/drop table | Yes | Yes | Yes |
 | Rename table | Yes | Yes | Yes |
 | Add/drop column | Yes | Yes | Yes |
-| Rename column | Yes | Yes | No |
+| Rename column | Yes, staged online workflow | Yes, through Rust apply | No |
 | Change base type | Yes | Yes | Yes |
 | Change type with custom `using` | No | No | No |
 | Set/drop nullability | Yes | Yes | Yes |
@@ -97,12 +99,54 @@ Node/CLI apply.
 
 SQLite may rebuild a table for supported changes that it cannot perform in
 place. Plan extra time and disk space for large tables, and test the change on a
-representative copy.
+representative copy. Its column rename is one rebuild, so same-table operations
+may stay in authored order within the migration.
 
 MySQL 8 does not currently support column rename through zero-migrate. Use an
-expand-and-contract change instead: add the new column, move data through a
-supported data execution path, update the application, then drop the old
-column in a later migration.
+expand-and-contract change instead: add the new column, backfill it, update the
+application, then drop the old column in a later migration.
+
+PostgreSQL `.column(source).rename({ to, type })` uses the built-in online
+workflow. The source must exist, the destination must not exist, and `type` must
+match the source's live PostgreSQL type. The table must have a complete,
+non-null, single-column `id` primary key with a supported orderable type, and
+the initial backfill requires approval. The table must have no pre-existing
+enabled user triggers, and row-level policy must allow every selected row to be
+updated.
+
+On PostgreSQL, the rename must be the only operation in the migration that
+targets that table. Other operations may target different tables. Put every
+same-table schema or data change in a later migration and apply it only after
+the rename is resolved. This restriction does not apply to SQLite's one-rebuild
+rename.
+
+The initial apply returns `pendingContracts` while the source and destination
+coexist. Move every application instance and database consumer to the
+destination, then resolve the returned `pendingVersion`. Apply resolution keeps
+the destination and drops the source; abort keeps the source and drops the
+destination. Both resolution choices require approval, and other migration
+changes to the table remain blocked until one succeeds. See the
+[operational workflow](operations.md#postgresql-online-column-rename).
+
+Resolution cleanup is all-or-nothing. If it fails, both columns and the managed
+rename trigger remain intact and the pending obligation remains valid for a
+retry of the same action. Once apply or abort succeeds, exact migration replay
+is terminal and cannot open another obligation. To retry the rename after an
+abort, author a new migration with a new exported name. An aborted plan does not
+satisfy `dependsOn`.
+
+During coexistence, a write through either column name keeps the values aligned;
+if both receive different values in one statement, the destination wins. The
+destination is nullable but otherwise keeps the source's exact live PostgreSQL
+type and modifiers. Equivalent built-in spellings such as `timestamptz` and
+`timestamp with time zone`, `decimal` and `numeric`, or `varchar` and `character
+varying` compare as aliases without dropping modifiers. Modifier drift is
+refused during resolution. Schema-qualified enum and domain types retain their
+exact live identity, including quoted names. `NOT NULL`, defaults, unique or
+primary-key rules, indexes, comments, and dependent objects do not transfer.
+Recreate required semantics in follow-up migrations after resolution, and do
+not use this workflow to rename the `id` primary key. Dependencies on the source
+can block resolution, so audit them before rollout.
 
 Primary keys must be part of the initial table definition. Adding a column with
 `.primaryKey()` later does not create a primary-key constraint on any target.
@@ -196,21 +240,83 @@ The authoring API supports these descriptions:
 | Insert literal rows | Yes | Yes | Yes |
 | Update | Yes | Yes | Yes |
 | Delete with predicate | Yes | Yes | Yes |
-| Batched backfill | Yes | Yes | Yes |
-| Insert with `onConflict` | Yes | No | No |
+| Batched backfill | Complete single-column primary key | `INTEGER` or `TEXT` single-column primary key | Complete single-column primary key |
+| Insert with non-empty `onConflict.doUpdate` | Yes, exact target | Yes, exact target | Yes, with guarded target matching |
+| Insert with `onConflict` do-nothing | Yes, exact target | Yes, exact target | No exact native form |
 
-This table means the migration can be described and validated. Execution still
-depends on the [execution path](#execution-paths):
+PostgreSQL and MySQL execute all four operations through the public Node API,
+CLI, or Rust API. SQLite executes all four through the Rust API. One-shot data
+statements keep values separate from statement structure; structured backfill
+expressions use dialect-safe literal encoding.
 
-- Public Node/CLI: none of these structured data operations run.
-- PostgreSQL Rust API: insert, update, and delete run; backfill does not.
-- SQLite Rust API: insert, update, delete, and backfill run.
-- MySQL 8 Rust API: structured data operations do not run.
+SQLite has no native fixed-precision decimal storage. zero-migrate stores
+`t.numeric(...)` values as exact decimal text on SQLite, so `decimal("...")`
+keeps the authored digits without passing through a JavaScript or SQLite
+floating-point number. Text equality is representation-sensitive: `1`, `1.0`,
+and `01.0` remain different stored values, and ordering is lexical. SQLite
+arithmetic and numeric casts still coerce the text to SQLite numbers and are not
+arbitrary-precision operations. Use PostgreSQL or MySQL when database-side
+fixed-precision arithmetic or numeric ordering is required.
 
-If a schema change needs a data move, do not bundle the two steps until you
-have chosen an executor that supports both. For Node/CLI deployments, run data
-changes through a separate, explicitly managed application job or use an
-appropriate Rust host.
+Pending `delete` and `backfill` steps require explicit approval. A backfill
+cursor must be the table's complete, non-null, single-column primary key on
+every target; a unique-only key or one column from a composite primary key is
+not sufficient. PostgreSQL and MySQL require a supported orderable cursor type.
+SQLite additionally requires declared `INTEGER` or `TEXT` affinity, and every
+live cursor value must use the matching `integer` or `text` storage class. Text
+cursors must contain valid UTF-8; embedded NUL characters are supported. A
+`WITHOUT ROWID` table is supported when that primary key meets the same rules.
+The backfill must not assign its cursor column.
+
+Every MySQL structured insert, update, delete, and backfill requires an InnoDB
+target table without user triggers. Apply refuses before changing target rows if
+the storage engine or trigger condition is unsafe. SQLite Rust apply coordinates
+zero-migrate processes for the same application database and rejects backfills
+on tables with user triggers. PostgreSQL backfills also require no pre-existing
+enabled user triggers; the managed online rename workflow remains supported. A
+PostgreSQL row policy that suppresses an update causes the batch to
+roll back without advancing progress.
+
+SQLite refuses to migrate when it cannot establish crash-safe settings for both
+the application and journal databases. This uses DELETE rollback-journal mode
+for both files and `synchronous=FULL` on the migration connection. Opening an
+application database that uses WAL changes its persistent journal mode, so treat
+SQLite apply as an operational storage-mode decision.
+
+Before the first batch, every backend captures a fixed terminal cursor. Retries
+resume after the last committed cursor and stop at that original boundary. Rows
+inserted after capture are not guaranteed to be processed and need a later
+migration. Integer and decimal cursor values remain exact across the JavaScript
+boundary. `byteValue` preserves exact binary data on every execution backend;
+its string form is decoded from well-formed base64 rather than stored as text.
+Binary values work in inserts, updates, backfill assignments, conflict updates,
+and compatible column defaults.
+
+Schema and data steps can stay in one migration: they execute in authored
+order, receive stable journal identities, and appear together in plan-aware
+status. Saved backfill progress without a final completion event appears as an
+`inflight` step in a `partial` plan.
+
+An interrupted MySQL schema step is different from a resumable backfill. MySQL
+may have auto-committed the DDL before completion history was written, so
+zero-migrate preserves the inflight marker and does not replay the statement.
+Inspect the live schema before normal apply continues. A Rust host resolves the
+marker with `MysqlBackend::recover_inflight_ddl` and the exact reviewed
+`Migration`. Choose `MarkAppliedAfterVerification` only after verifying the
+complete new shape, or `ClearForRetryAfterRollback` only after restoring and
+verifying the complete old shape.
+
+PostgreSQL and SQLite use the exact columns in `onConflict.columns`. MySQL 8
+cannot name a particular unique constraint in its duplicate-key syntax. For
+`doUpdate`, zero-migrate first proves that the target is every full column of one
+primary or unique index, then compares the incoming target values with the
+existing row and updates only on a match. Prefix and functional indexes are not
+accepted as proof. Every target column must be present in the inserted row, and
+`doUpdate` cannot assign a target column on MySQL. A collision on another MySQL
+unique key, including a nullable-target non-match, fails the statement instead
+of updating the wrong row. MySQL `doNothing` is rejected because a duplicate-key
+no-op fires update triggers, while `INSERT IGNORE` can suppress unrelated data
+errors.
 
 ## Views, enums, domains, and sequences
 
@@ -309,6 +415,10 @@ MySQL 8 requires exactly one event and a row-level body. PostgreSQL requires a
 separately declared named function. Use `dialect()` to make the different
 implementations explicit.
 
+MySQL trigger DDL is supported, but structured insert, update, delete, and
+backfill operations refuse a target that already has a user trigger. Apply the
+data change before adding the trigger, or redesign the rollout explicitly.
+
 ## PostgreSQL capabilities
 
 These PostgreSQL-only features require an explicit capability:
@@ -328,9 +438,9 @@ These PostgreSQL-only features require an explicit capability:
 | Raw view body | `rawViewBody` |
 
 Capabilities must come from trusted host policy. A migration cannot grant
-itself permission by importing an API or targeting PostgreSQL. The public
-Node/CLI host cannot currently supply this policy ceiling, so these operations
-require a reviewed Rust/custom host.
+itself permission by importing an API or targeting PostgreSQL. The Node
+`policyCeiling` option is limited to trusted table-shape policy, and the CLI has
+no policy option. These operations require a reviewed Rust/custom host.
 
 ## Using `dialect()`
 
@@ -419,9 +529,8 @@ table("users").update({
 });
 ```
 
-The expression works on all targets, but the data step still needs PostgreSQL
-or SQLite embedding to execute. Public Node/CLI and MySQL 8 execution will not
-run it.
+The expression and data step work on all targets. Use the public Node API or CLI
+for PostgreSQL and MySQL 8, or the Rust API for any of the three targets.
 
 ### Use expand-and-contract for incompatible DDL
 
@@ -442,6 +551,9 @@ Before apply:
 
 - Confirm the intended target is PostgreSQL, SQLite, or MySQL 8.
 - Validate the full migration for that exact target.
+- For a PostgreSQL rename, isolate same-table work, then plan the application
+  cutover and explicit apply or abort resolution before starting the approved
+  backfill.
 - Check the execution-path table, especially for data changes and backfills.
 - Use a plain named btree index unless a target-specific index is intentional.
 - Review checks, foreign keys, generated columns, identity, and sequences.

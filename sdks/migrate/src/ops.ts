@@ -316,7 +316,6 @@ interface Recorder {
 type RecorderPhase = "up" | "down";
 
 let active: Recorder | null = null;
-const deferredUpOps: Node[] = [];
 
 function structuredError(code: string, message: string, extra?: Record<string, unknown>): Error {
   const err = new Error(message) as Error & Record<string, unknown>;
@@ -326,12 +325,17 @@ function structuredError(code: string, message: string, extra?: Record<string, u
 }
 
 /** Begin a fresh recording buffer (the build evaluator calls this before a phase). */
-export function __begin(phase: RecorderPhase = "up"): void {
+export function __begin(_phase: RecorderPhase = "up"): void {
   active = {
-    ops: phase === "up" ? deferredUpOps.map((op) => structuredClone(op)) : [],
+    ops: [],
     pending: new Map(),
     nextSelectorId: 0,
   };
+}
+
+/** Discard the current recording after migration authoring throws or returns a promise. */
+export function __abort(): void {
+  active = null;
 }
 
 /**
@@ -366,9 +370,8 @@ function recorder(): Recorder {
   if (active === null) {
     throw structuredError(
       "OP_OUTSIDE_RECORDER",
-      "op authoring called outside an active migration recorder; " +
-        "the table() handle may only be used synchronously inside up()/down()",
-      { suggested_fix: "move the table()/selector calls inside the migration's up()/down() body" },
+      "migration operations may only be authored synchronously inside up()/down()",
+      { suggested_fix: "move the operation call inside the migration's up()/down() body" },
     );
   }
   return active;
@@ -376,15 +379,6 @@ function recorder(): Recorder {
 
 function push(op: Node): Node {
   recorder().ops.push(op);
-  return op;
-}
-
-function pushOrDeferUp(op: Node): Node {
-  if (active === null) {
-    deferredUpOps.push(op);
-    return op;
-  }
-  active.ops.push(op);
   return op;
 }
 
@@ -396,7 +390,7 @@ export function __pgPush(op: Node): Node {
 // ── The `defineOp` chokepoint + derived tier-1 producer registry (S0.3) ──
 //
 // Every op producer emits through an emitter minted by `defineOp(kind, …)`, the
-// single chokepoint wrapping `push`/`pushOrDeferUp`. The emitter is
+// single chokepoint wrapping `push`. The emitter is
 // behaviour-preserving: it records `compact({ op: kind, ...payload })` —
 // byte-identical to the prior in-line `push(compact({ op: kind, … }))`. Each mint
 // APPENDS to `tier1Producers`, so the producer registry (op-kind → producer(s)) is
@@ -409,8 +403,6 @@ export interface OpProducer {
   readonly kind: string;
   /** A stable identity for the emission site (census grouping + diagnostics). */
   readonly producer: string;
-  /** Whether the emitter defers into the up-phase buffer (`pushOrDeferUp`). */
-  readonly deferrable: boolean;
 }
 
 const tier1Producers: OpProducer[] = [];
@@ -420,11 +412,9 @@ type OpEmitter = (payload: Node) => Node;
 /** Mint the single emitter every producer for `kind` records through, and register
  *  the (kind → producer) fact so the tier-1 registry is derivable. `producer`
  *  defaults to `kind` (the common one-producer-per-kind case). */
-function defineOp(kind: string, producer: string = kind, opts: { deferrable?: boolean } = {}): OpEmitter {
-  const deferrable = opts.deferrable === true;
-  tier1Producers.push({ kind, producer, deferrable });
-  const sink = deferrable ? pushOrDeferUp : push;
-  return (payload: Node): Node => sink(compact({ op: kind, ...payload }));
+function defineOp(kind: string, producer: string = kind): OpEmitter {
+  tier1Producers.push({ kind, producer });
+  return (payload: Node): Node => push(compact({ op: kind, ...payload }));
 }
 
 /** The flat tier-1 producer list, in mint (declaration) order — DATA the census
@@ -448,11 +438,11 @@ export function opProducerRegistry(): ReadonlyMap<string, readonly OpProducer[]>
 // The minted emitters — one per producer site. Multi-producer op-kinds
 // (`addConstraint`) mint several, so the registry surfaces the duplication as
 // data.
-const emitCreateEnum = defineOp("createEnum", "createEnum", { deferrable: true });
+const emitCreateEnum = defineOp("createEnum");
 const emitDropEnum = defineOp("dropEnum");
-const emitCreateDomain = defineOp("createDomain", "createDomain", { deferrable: true });
+const emitCreateDomain = defineOp("createDomain");
 const emitDropDomain = defineOp("dropDomain");
-const emitCreateSequence = defineOp("createSequence", "createSequence", { deferrable: true });
+const emitCreateSequence = defineOp("createSequence");
 const emitAlterSequence = defineOp("alterSequence");
 const emitDropSequence = defineOp("dropSequence");
 const emitCreateSchema = defineOp("createSchema");
@@ -531,6 +521,16 @@ function compact<T extends Record<string, unknown>>(obj: T): T {
     if (obj[k] === undefined) delete obj[k];
   }
   return obj;
+}
+
+/** Define an enumerable own property without invoking Object.prototype.__proto__. */
+function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
 }
 
 function requireString(v: unknown, what: string): asserts v is string {
@@ -972,14 +972,43 @@ function rejectNestedFunctionValues(value: unknown): void {
   }
 }
 
+/** Expand JavaScript's scientific notation into the plain decimal spelling the
+ * public decimal carrier accepts. `String(number)` is otherwise the canonical,
+ * shortest round-trippable representation of the authored finite number. */
+function finiteNumberDecimalString(value: number): string {
+  const rendered = String(value);
+  if (!/[eE]/.test(rendered)) return rendered;
+
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/.exec(rendered);
+  if (match === null) {
+    throw structuredError(
+      "OP_INVALID",
+      'number scalar could not be represented exactly; use decimal("<n>")',
+    );
+  }
+
+  const [, sign, whole, fraction = "", exponentText] = match;
+  const digits = whole + fraction;
+  const decimalAt = whole.length + Number(exponentText);
+  let expanded: string;
+  if (decimalAt <= 0) {
+    expanded = `${sign}0.${"0".repeat(-decimalAt)}${digits}`;
+  } else if (decimalAt >= digits.length) {
+    expanded = `${sign}${digits}${"0".repeat(decimalAt - digits.length)}`;
+  } else {
+    expanded = `${sign}${digits.slice(0, decimalAt)}.${digits.slice(decimalAt)}`;
+  }
+  return requireDecimalString(expanded);
+}
+
 /**
  * Normalize a JS scalar into the closed `IrScalar` WIRE carrier so the recorded
  * shape is exactly what Rust's `IrScalar` deserializer accepts:
  *  - a branded `decimal("...")` value → `{ decimal: "<v>" }`;
  *  - a branded `byteValue(...)` value → `{ bytes: "<base64>" }`;
  *  - a `Uint8Array` → `{ bytes: "<base64>" }` (the raw-bytes carrier);
- *  - JSON containers are scanned so function values fail closed at any depth;
- *  - everything else passes through verbatim.
+ *  - finite non-integer numbers use the exact decimal carrier;
+ *  - only the documented scalar kinds are accepted.
  */
 function toIrScalar(value: unknown): unknown {
   rejectNestedFunctionValues(value);
@@ -994,11 +1023,43 @@ function toIrScalar(value: unknown): unknown {
   if (isRemovedBytesCarrier(value)) {
     throw structuredError("OP_INVALID", "the { bytes } carrier is removed — use byteValue(...)");
   }
-  if (typeof value === "number" && Number.isFinite(value) && !Number.isInteger(value)) {
-    return { decimal: String(value) };
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw structuredError("OP_INVALID", "number scalar must be finite");
+    }
+    if (Number.isInteger(value)) {
+      if (!Number.isSafeInteger(value)) {
+        throw structuredError(
+          "OP_INVALID",
+          'integer scalar must be a JS safe integer; use decimal("<n>") for exact large values',
+        );
+      }
+    } else {
+      return { decimal: finiteNumberDecimalString(value) };
+    }
   }
   if (value instanceof Uint8Array) return { bytes: bytesToBase64(value) };
-  return value;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    typeof value === "number"
+  ) {
+    return value;
+  }
+  if (value === undefined) {
+    throw structuredError(
+      "OP_INVALID",
+      "scalar value cannot be undefined; use null explicitly",
+    );
+  }
+  if (typeof value === "symbol") {
+    throw structuredError("OP_INVALID", "symbol is not a supported scalar value");
+  }
+  throw structuredError(
+    "OP_INVALID",
+    "scalar value must be null, a string, boolean, finite number, decimal(...), byteValue(...), or Uint8Array",
+  );
 }
 
 function toIrValue(value: unknown): unknown {
@@ -1029,7 +1090,7 @@ function toIrJsonValue(value: unknown): unknown {
     }
     const out: Record<string, unknown> = {};
     for (const key of Object.keys(value).sort()) {
-      out[key] = toIrJsonValue(value[key]);
+      setOwn(out, key, toIrJsonValue(value[key]));
     }
     return out;
   }
@@ -2449,7 +2510,7 @@ function resolveSet(set: Record<string, DmlSetValue>): Record<string, unknown> {
     throw structuredError("OP_INVALID", "`set` must be an object of column → DML value");
   }
   const out: Record<string, unknown> = {};
-  for (const col of Object.keys(set)) out[col] = resolveSetValue(set[col]);
+  for (const col of Object.keys(set)) setOwn(out, col, resolveSetValue(set[col]));
   return out;
 }
 
@@ -3420,7 +3481,7 @@ function normalizeInsertRows<R extends Row = Row>(
   const normalized = arr.map((r) => {
     const keys = Object.keys(r);
     const values: Record<string, unknown> = {};
-    for (const key of keys) values[key] = toIrValue((r as Row)[key]);
+    for (const key of keys) setOwn(values, key, toIrValue((r as Row)[key]));
     return { keys, values };
   });
   for (let i = 0; i < normalized.length; i++) {
@@ -3455,7 +3516,9 @@ function normalizeOnConflict(
   if (oc === undefined || oc === null) return undefined;
   if (oc.doUpdate === undefined) return { columns: oc.columns } as Node;
   const doUpdate: Record<string, unknown> = {};
-  for (const col of Object.keys(oc.doUpdate)) doUpdate[col] = toIrValue(oc.doUpdate[col]);
+  for (const col of Object.keys(oc.doUpdate)) {
+    setOwn(doUpdate, col, toIrValue(oc.doUpdate[col]));
+  }
   return { columns: oc.columns, doUpdate } as Node;
 }
 

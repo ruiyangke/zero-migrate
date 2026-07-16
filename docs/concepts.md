@@ -76,7 +76,7 @@ owner, project schema, approval, or audit actor.
 
 ## Names and ordering
 
-Give every migration a stable, descriptive name:
+Give every migration a unique, stable, descriptive name:
 
 ```ts
 export const name = "add_account_status";
@@ -92,8 +92,9 @@ prefixes therefore produce a predictable sequence:
 20260716081500_add_account_status_index.ts
 ```
 
-After a migration has been applied, do not rename it or change its contents.
-Create a new forward migration instead.
+The deploying application identity and migration name form durable migration
+identity. Do not reuse a name, and after apply do not rename the migration or
+change its contents. Create a new, uniquely named forward migration instead.
 
 ## Validate, plan, preview, and apply
 
@@ -107,8 +108,8 @@ not connect to a database.
 ### Validate
 
 JavaScript `validate()` checks that the migration is well formed, supported by
-the selected dialect, and allowed by the supplied table ownership registry. It
-does not inspect the live database.
+the selected dialect, confined to the supplied project schema, and allowed by
+the supplied table ownership registry. It does not inspect the live database.
 
 ### Plan
 
@@ -122,12 +123,76 @@ Apply adds the trusted host inputs, performs the target-specific safety checks,
 acquires the project lock, checks migration history, executes pending work, and
 records the result.
 
-The public Node and CLI apply paths currently execute **DDL only**. They can
-validate and preview `insert`, `update`, `delete`, and `backfill` operations, but
-they do not execute those operations. A mixed migration can therefore apply its
-schema changes while omitting its data changes. Use a Rust integration for data
-migration execution, or split and run the data work through a separately
-reviewed application job.
+PostgreSQL and MySQL apply read the current target catalog before preparing work
+that depends on existing tables, columns, or indexes. This catalog-aware step is
+not a complete structural-drift comparison or a database-backed dry run.
+
+The public Node API and CLI execute DDL, `insert`, `update`, `delete`, and
+`backfill` operations on PostgreSQL and MySQL 8 in authored order. A mixed
+migration keeps its schema and data steps together. SQLite executes the same
+operation set through the Rust API; it is not a Node or CLI target.
+
+Pending deletes and backfills require explicit operator approval. Backfills also
+require the table's complete, non-null, single-column primary key as their
+cursor. Under the project lock, apply checks every pending approval-gated step
+in the complete plan before the first authored step executes. A later
+unapproved delete or backfill cannot follow an earlier step from that plan.
+
+A backfill captures a fixed terminal cursor before its first batch. Each batch
+saves the last committed cursor, and retries stop at that original boundary.
+Rows inserted after capture are not guaranteed to be included and need a later
+migration. MySQL data targets must be trigger-free InnoDB tables. SQLite
+backfills additionally require declared `INTEGER` or `TEXT` affinity with
+consistently typed live cursor values. PostgreSQL and SQLite backfills reject
+pre-existing enabled user triggers; the managed PostgreSQL online rename
+workflow remains supported.
+
+### PostgreSQL online column rename
+
+PostgreSQL column rename separates database preparation from application
+cutover. The migration still contains one `.column(source).rename({ to, type })`
+operation, but the approved first apply returns a pending contract instead of
+dropping the source immediately.
+
+That rename must be the only operation in the PostgreSQL migration that targets
+its table. Operations on different tables may remain. Put every other operation
+on the renamed table in a later migration and apply it only after resolution.
+
+The source must exist, the destination must not exist, and the declared type
+must match the source's live PostgreSQL type. The table must use `id` as its
+complete, non-null, single-column primary key with a supported orderable cursor
+type, no pre-existing enabled user triggers, and row-level policy that permits
+the selected updates. Existing values are copied before the pending contract is
+returned.
+
+During the coexistence window, deploy application code that uses the
+destination and wait for all older instances and consumers to stop using the
+source. Other migration changes to that table are blocked. Then explicitly
+resolve the returned `pendingVersion`: apply keeps the destination and drops the
+source; abort keeps the source and drops the destination. Both resolutions
+require approval.
+
+Writes through either name keep the values aligned during coexistence; if both
+receive different values in one statement, the destination wins. The
+destination is nullable but otherwise keeps the source's exact live PostgreSQL
+type, including modifiers. Equivalent built-in aliases are accepted without
+discarding modifiers; modifier drift is refused during resolution. Defaults,
+constraints, indexes, comments, and dependent objects need separate review and
+follow-up migrations after resolution. Source dependencies can block
+resolution and must be audited before rollout.
+
+An unchanged retry skips completed work and resumes an interrupted backfill. A
+pending contract remains pending across repeat apply calls until Node
+`resolvePending()` or CLI `resolve-pending` resolves it. Resolution cleanup is
+all-or-nothing: a failure leaves both columns and the managed rename trigger
+intact, keeps the contract pending, and keeps the table blocked.
+
+After apply or abort resolution succeeds, the original rename identity is
+terminal and exact replay does not open another contract. To try again after an
+abort, author a new migration with a new exported name. An aborted plan does not
+satisfy `dependsOn`, so dependent work remains blocked until it points to a new
+replacement migration. See
+[Operating migrations](operations.md#postgresql-online-column-rename).
 
 ## Project identity and ownership
 
@@ -159,30 +224,41 @@ Policy controls which capabilities a migration may use, including destructive
 changes, raw SQL, cross-schema access, roles, extensions, and optional required
 table shape.
 
-The public Node API uses the built-in confined policy and does not expose custom
-policy composition. Platforms that need custom policy can make those decisions
-in a Rust host, but arbitrary policy configuration is not available to the
-public apply API yet.
+The public Node API uses a confined default and optionally accepts a trusted
+table-shape `policyCeiling`. Platforms that need broader custom policy can make
+those decisions in a Rust host, but arbitrary executor policy is not available
+to the public apply API yet.
 
-Destructive work requires explicit operator approval. The Node API exposes an
-`approved` boolean; the CLI does not expose approval. Approval should always be
-bound to the exact migration content that was reviewed.
+Pending destructive work and backfills require explicit operator approval. The
+Node API uses `approved: true`; the CLI uses `--approve`. Approval should always
+be bound to the exact migration content that was reviewed.
 
 See [Policy model](policy.md) and [Security model](security-model.md).
 
 ## The migration journal
 
-Every completed migration adds an event to an append-only journal. The journal
-captures migration identity, checksum, actor, and time so zero-migrate can:
+Every executable step has a stable journal identity, and completed work adds an
+event to an append-only journal. The journal captures the complete migration
+checksum, including bound data values, together with the actor and time so
+zero-migrate can:
 
 - detect changed content for an already-known migration;
-- show PostgreSQL history;
+- reconcile PostgreSQL and MySQL migration status;
 - prevent unsafe reapplication;
-- recover supported non-transactional work after interruption.
+- resume backfills after interruption and expose non-transactional recovery
+  state for reviewed repair.
 
-JavaScript `status()` currently reads journal state with an empty migration set,
-so it does not discover pending files in a directory. JavaScript `history()` is
-currently PostgreSQL-only.
+Pass the ordered migration set to Node `status()` for plan-aware PostgreSQL or
+MySQL status. The CLI does this from `--dir` automatically. Status includes all
+schema and data steps and distinguishes applied, aborted, pending, partial,
+drifted, and blocked migrations. Top-level `aborted` contains terminal aborted
+plan IDs, separate from `applied` and `pending`. JavaScript `history()` remains
+PostgreSQL-only.
+
+Status also exposes outstanding rename obligations in `pendingContracts`,
+plans waiting on them in `blocked`, and journal identities missing from the
+supplied set in `unexpectedJournal`. These are operator-visible states, not work
+that apply silently discards.
 
 ## Transactions and partial completion
 
@@ -190,9 +266,14 @@ A directory of migration files is not one global transaction. If an earlier
 migration succeeds and a later one fails, the earlier migration remains
 applied.
 
-PostgreSQL and SQLite can commit supported transactional schema work together
-with its journal event. MySQL DDL auto-commits, so interrupted work uses recovery
-state and requires extra operational care.
+PostgreSQL and SQLite can commit supported transactional schema or ordinary data
+work together with its journal event. MySQL ordinary data statements are
+transactional, but MySQL DDL auto-commits, so interrupted schema work uses
+recovery state and stops for operator repair instead of replaying ambiguous DDL.
+Backfills on every target
+commit bounded batches and save their cursor so an interrupted run can resume
+within its previously captured terminal boundary. Runtime database errors can
+still leave earlier completed steps applied after execution begins.
 
 ## Drift and rollback
 

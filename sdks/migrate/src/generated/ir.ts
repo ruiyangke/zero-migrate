@@ -383,7 +383,8 @@ export interface TableRuntimeOptionsPatch {
   strictness?: TableStrictness | null;
 }
 
-/** The optional `insert { onConflict }` upsert clause (PG-only). */
+/** Structured insert conflict handling. PostgreSQL and SQLite support both
+ * forms. MySQL supports a non-empty doUpdate when its target can be guarded. */
 export interface IrOnConflict {
   columns: string[];
   doUpdate?: { [column: string]: IrValue } | null;

@@ -26,8 +26,9 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
+import { table, t } from "zero-migrate";
 import { buildEnvelope } from "zero-migrate/internal/recorder";
-import { currentIrVersion, apply } from "zero-migrate-engine";
+import { currentIrVersion, apply, plan, resolvePending, status } from "zero-migrate-engine";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -91,6 +92,30 @@ test("Node-native authoring: pure-JS recorder drains the DSL into an op-IR envel
   }
 });
 
+test("plan authors once and validates the envelope it returns", () => {
+  let calls = 0;
+  const migration = {
+    up() {
+      calls += 1;
+      table("single_pass").create({
+        columns: {
+          value: t.int(),
+        },
+      });
+    },
+  };
+
+  const report = plan({
+    migration,
+    ownerApp: "app_single_pass",
+    dialect: "postgres",
+  });
+
+  assert.equal(report.ok, true);
+  assert.equal(calls, 1);
+  assert.equal(report.envelope.ops.length, 1);
+});
+
 // ---------------------------------------------------------------------------
 // FULL arm — napi addon lowers + applies over the real `pg` driver (pg :5440).
 // Auto-skips if the test Postgres is unreachable.
@@ -135,7 +160,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
     );
     assert.equal(tbl.rows[0].ex, true, "widgets table was created");
 
-    // The author columns AND the addon-folded confined system columns are present.
+    // With no policy ceiling, the host preserves the author-owned table shape.
     const cols = await probe.query(
       `SELECT column_name FROM information_schema.columns
         WHERE table_schema = $1 AND table_name = 'widgets'`,
@@ -146,7 +171,7 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
       assert.ok(colNames.has(col), `author column ${col} present`);
     }
     for (const col of ["id", "created_at", "updated_at", "version"]) {
-      assert.ok(colNames.has(col), `folded system column ${col} present`);
+      assert.ok(!colNames.has(col), `no policy-managed system column ${col} is injected`);
     }
 
     // The journal recorded the applied migration steps.
@@ -162,6 +187,207 @@ test("Node-native apply: napi addon lowers + applies the authored IR over the pg
     assert.ok(
       journalNames.includes("add_column_widgets_qty"),
       `journal records the add_column step (got ${JSON.stringify(journalNames)})`,
+    );
+  } finally {
+    await probe
+      .query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE; DROP SCHEMA IF EXISTS "${meta}" CASCADE`)
+      .catch(() => {});
+    await probe.end().catch(() => {});
+  }
+});
+
+test("Node-native apply uses live PostgreSQL facts for existing-table changes", async (context) => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const pg = (await import("pg")).default;
+  const probe = new pg.Client({ connectionString: PG_URL });
+  try {
+    await probe.connect();
+  } catch (e) {
+    await probe.end().catch(() => {});
+    context.skip(`test Postgres unreachable at ${PG_URL}: ${(e as Error).message}`);
+    return;
+  }
+
+  const schema = uniqueSchema("node_live_lower");
+  const meta = `${schema}_migrations`;
+  const ownerApp = "app_live_lower";
+  const driver = { kind: "postgres" as const, url: PG_URL };
+  try {
+    await probe.query(`
+      CREATE SCHEMA "${schema}";
+      CREATE TABLE "${schema}".accounts (
+        id bigint PRIMARY KEY,
+        email text NOT NULL,
+        status text
+      );
+      CREATE UNIQUE INDEX accounts_email_key ON "${schema}".accounts (email);
+      CREATE TABLE "${schema}".rename_items (
+        id bigint PRIMARY KEY,
+        old_label text
+      );
+      INSERT INTO "${schema}".rename_items (id, old_label)
+      VALUES (1, 'first'), (2, 'second')
+    `);
+
+    const dropUnique = {
+      up() {
+        table("accounts").index("accounts_email_key").drop();
+      },
+    };
+    await assert.rejects(
+      apply({
+        migration: dropUnique,
+        ownerApp,
+        projectSchema: schema,
+        driver,
+        registry: { accounts: ownerApp, rename_items: ownerApp },
+        approved: false,
+        appliedBy: "test",
+        nameFallback: "drop_unique_index",
+      }),
+      /approval/i,
+      "a live UNIQUE index drop must require approval even though JavaScript carries no unique hint",
+    );
+    const stillUnique = await probe.query(
+      `SELECT to_regclass('"${schema}".accounts_email_key') IS NOT NULL AS ex`,
+    );
+    assert.equal(stillUnique.rows[0].ex, true, "refused apply keeps the unique index");
+
+    await apply({
+      migration: dropUnique,
+      ownerApp,
+      projectSchema: schema,
+      driver,
+      registry: { accounts: ownerApp, rename_items: ownerApp },
+      approved: true,
+      appliedBy: "test",
+      nameFallback: "drop_unique_index",
+    });
+
+    await apply({
+      migration: {
+        up() {
+          table("accounts").column("status").setDefault("ready");
+        },
+      },
+      ownerApp,
+      projectSchema: schema,
+      driver,
+      registry: { accounts: ownerApp, rename_items: ownerApp },
+      approved: false,
+      appliedBy: "test",
+      nameFallback: "set_existing_default",
+    });
+    const defaultValue = await probe.query(
+      `SELECT column_default FROM information_schema.columns
+        WHERE table_schema = $1 AND table_name = 'accounts' AND column_name = 'status'`,
+      [schema],
+    );
+    assert.match(defaultValue.rows[0].column_default, /ready/);
+
+    const renameMigration = {
+      up() {
+        table("rename_items")
+          .column("old_label")
+          .rename({ to: "label", type: t.text() });
+      },
+    };
+    const renameOutcome = await apply({
+      migration: renameMigration,
+      ownerApp,
+      projectSchema: schema,
+      driver,
+      registry: { accounts: ownerApp, rename_items: ownerApp },
+      approved: true,
+      appliedBy: "test",
+      nameFallback: "rename_existing_column",
+    });
+    assert.equal(renameOutcome.pendingContracts.length, 1);
+    const pending = renameOutcome.pendingContracts[0];
+    assert.equal(pending.table, "rename_items");
+    assert.equal(pending.fromColumn, "old_label");
+    assert.equal(pending.toColumn, "label");
+    const renamed = await probe.query(
+      `SELECT old_label, label FROM "${schema}".rename_items ORDER BY id`,
+    );
+    assert.deepEqual(renamed.rows, [
+      { old_label: "first", label: "first" },
+      { old_label: "second", label: "second" },
+    ]);
+
+    const resolution = {
+      ownerApp,
+      projectSchema: schema,
+      pendingVersion: pending.pendingVersion,
+      action: "apply" as const,
+      driver,
+      approved: true as const,
+      appliedBy: "test",
+    };
+    await probe.query(
+      `CREATE VIEW "${schema}".rename_items_old_labels AS
+       SELECT old_label FROM "${schema}".rename_items`,
+    );
+    await assert.rejects(
+      resolvePending(resolution),
+      /depend|cannot drop/i,
+      "a source-column dependency must leave the contract pending",
+    );
+    const triggersAfterPartial = await probe.query(
+      `SELECT count(*)::int AS n
+         FROM pg_trigger trigger
+         JOIN pg_class target ON target.oid = trigger.tgrelid
+         JOIN pg_namespace namespace ON namespace.oid = target.relnamespace
+        WHERE namespace.nspname = $1
+          AND target.relname = 'rename_items'
+          AND NOT trigger.tgisinternal`,
+      [schema],
+    );
+    assert.equal(
+      triggersAfterPartial.rows[0].n,
+      1,
+      "failed cleanup must roll back the trigger drop and column drop together",
+    );
+    await probe.query(`DROP VIEW "${schema}".rename_items_old_labels`);
+
+    const resolved = await resolvePending(resolution);
+    assert.equal(resolved.pendingContracts.length, 0);
+    const completed = await probe.query(
+      `SELECT label FROM "${schema}".rename_items ORDER BY id`,
+    );
+    assert.deepEqual(completed.rows, [{ label: "first" }, { label: "second" }]);
+    const oldColumn = await probe.query(
+      `SELECT EXISTS (
+         SELECT 1 FROM information_schema.columns
+          WHERE table_schema = $1 AND table_name = 'rename_items' AND column_name = 'old_label'
+       ) AS ex`,
+      [schema],
+    );
+    assert.equal(oldColumn.rows[0].ex, false, "contract completion drops the old column");
+    const settled = await status({
+      ownerApp,
+      projectSchema: schema,
+      driver,
+      registry: { rename_items: ownerApp },
+      migrations: [renameMigration],
+      nameFallbacks: ["rename_existing_column"],
+    });
+    assert.equal(settled.pendingContracts.length, 0);
+    assert.equal(settled.plans?.[0]?.state, "applied");
+    const replayed = await apply({
+      migration: renameMigration,
+      ownerApp,
+      projectSchema: schema,
+      driver,
+      registry: { accounts: ownerApp, rename_items: ownerApp },
+      approved: true,
+      appliedBy: "test",
+      nameFallback: "rename_existing_column",
+    });
+    assert.equal(
+      replayed.pendingContracts.length,
+      0,
+      "a completed rename file must remain a terminal no-op on later deploys",
     );
   } finally {
     await probe

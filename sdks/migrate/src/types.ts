@@ -769,13 +769,14 @@ export interface ForeignKeyReference {
 export interface InsertArgs<R extends Row = Row> {
   rows: R | R[];
   /**
-   * **PG-ONLY** upsert. A live, intended feature — rejected as a hard build
-   * error only on a SQLite target (`dialect_scope = PgOnly`). There is no
-   * portable SQLite upsert and no raw route (property A); a SQLite-targeted
-   * `onConflict` surfaces at build with the structured envelope, never at
-   * runtime.
+   * Structured upsert. PostgreSQL and SQLite use the exact conflict target.
+   * MySQL 8 supports a non-empty `doUpdate` through native duplicate-key handling
+   * after proving the target exactly matches one full primary or unique index.
+   * On MySQL, include every target column in `rows`, do not assign a target column
+   * from `doUpdate`, and do not omit `doUpdate`; targeted do-nothing has no exact
+   * MySQL form.
    */
-  onConflict?: { columns: string[]; doUpdate?: Partial<R> };
+  onConflict?: { columns: string[]; doUpdate?: Record<string, DmlValue> };
   /** The schema qualifier; overrides the handle default. */
   schema?: string;
 }

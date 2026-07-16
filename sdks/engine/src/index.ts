@@ -95,6 +95,8 @@ export interface HostApplyOptions {
   /** The project's `{ table: owner_app }` registry (ownership check).
    *  Defaults to `{}` (a fresh single-app project). */
   registry?: Record<string, string>;
+  /** Optional table-shape policy ceiling enforced while validating the migration. */
+  policyCeiling?: string;
   /** The migrator role to `SET ROLE` under (least-privilege apply). Optional. */
   migratorRole?: string;
   /** Whether destructive changes are pre-approved. Default `false`. */
@@ -127,7 +129,62 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
       dialect: dialectOf(opts.driver),
       registry: opts.registry ?? {},
       envelope,
+      policyCeiling: opts.policyCeiling,
       approved: opts.approved ?? false,
+      appliedBy: opts.appliedBy ?? "host",
+    });
+  } finally {
+    await close();
+  }
+}
+
+/** Options for completing or aborting a PostgreSQL online column rename. */
+export interface ResolvePendingOptions {
+  /** The app id that authored the original rename. */
+  ownerApp: string;
+  /** The project schema containing the renamed table. */
+  projectSchema: string;
+  /** Pending version returned by `apply()` or `status()`. */
+  pendingVersion: string;
+  /** `apply` keeps the new column; `abort` keeps the old column. */
+  action: "apply" | "abort";
+  /** Online rename resolution is currently available on PostgreSQL. */
+  driver: Extract<DriverConfig, { kind: "postgres" }>;
+  /** Required explicit acknowledgement of the reviewed column drop. */
+  approved: true;
+  /** Optional least-privilege migration role. */
+  migratorRole?: string;
+  /** Audit label recorded in the migration journal. */
+  appliedBy?: string;
+}
+
+/**
+ * Finish an outstanding PostgreSQL online rename after application cutover, or
+ * abort it and return to the original column. Both actions are approval-gated.
+ */
+export async function resolvePending(
+  opts: ResolvePendingOptions,
+): Promise<ApplyOutcome> {
+  if (opts.driver.kind !== "postgres") {
+    throw new Error(
+      "zero-migrate-engine: pending-contract resolution supports only PostgreSQL online renames",
+    );
+  }
+  if (opts.approved !== true) {
+    throw new Error(
+      "zero-migrate-engine: pending-contract resolution requires explicit approval",
+    );
+  }
+  const addon = loadAddon();
+  const { hostDriver, close } = await openSession(opts.driver);
+  try {
+    return await addon.resolvePending(hostDriver, {
+      ownerApp: opts.ownerApp,
+      projectSchema: opts.projectSchema,
+      migratorRole: opts.migratorRole,
+      pendingVersion: opts.pendingVersion,
+      action: opts.action,
+      approved: true,
       appliedBy: opts.appliedBy ?? "host",
     });
   } finally {
@@ -139,6 +196,8 @@ export async function apply(opts: HostApplyOptions): Promise<ApplyOutcome> {
 export interface HostPlanOptions {
   migration: MigrationModule;
   ownerApp: string;
+  /** Confined project schema used by both offline validation and apply. */
+  projectSchema?: string;
   dialect?: "postgres" | "mysql" | "sqlite";
   registry?: Record<string, string>;
   nameFallback?: string;
@@ -163,6 +222,15 @@ export interface PlanReport {
 export function validate(opts: HostPlanOptions): LoadVerifyReply {
   const addon = loadAddon();
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
+  return validateEnvelope(addon, envelope, opts);
+}
+
+/** Validate an already-authored envelope so planning never executes up() twice. */
+function validateEnvelope(
+  addon: MigrateAddon,
+  envelope: IrEnvelope,
+  opts: HostPlanOptions,
+): LoadVerifyReply {
   // Typed boundary: `loadVerify` takes the IR envelope bytes + a
   // typed `Record<string,string>` registry and returns a typed `LoadVerifyReply`.
   return addon.loadVerify(
@@ -170,6 +238,7 @@ export function validate(opts: HostPlanOptions): LoadVerifyReply {
     opts.ownerApp,
     opts.dialect ?? "postgres",
     opts.registry ?? {},
+    opts.projectSchema ?? "public",
   );
 }
 
@@ -179,9 +248,9 @@ export function validate(opts: HostPlanOptions): LoadVerifyReply {
  * `dryRun` (the full shadow verification) is deferred.
  */
 export function plan(opts: HostPlanOptions): PlanReport {
-  const verdict = validate(opts);
   const addon = loadAddon();
   const envelope = authorEnvelope(addon, opts.migration, opts.nameFallback);
+  const verdict = validateEnvelope(addon, envelope, opts);
   return {
     ok: verdict.ok,
     ir_version: verdict.irVersion,
@@ -197,6 +266,15 @@ export interface HostStatusOptions {
   projectSchema: string;
   driver: DriverConfig;
   registry?: Record<string, string>;
+  /** Ordered migration modules to reconcile as complete lowered plans. When
+   *  omitted, `status` preserves the legacy journal-only read behavior. */
+  migrations?: readonly MigrationModule[];
+  /** Optional filename-derived fallback name for each migration. Must be the
+   *  same length as `migrations` when supplied. */
+  nameFallbacks?: readonly string[];
+  /** Optional table-shape policy ceiling; use the same value as apply. */
+  policyCeiling?: string;
+  /** Legacy single fallback used when `nameFallbacks[index]` is absent. */
   nameFallback?: string;
 }
 
@@ -204,21 +282,44 @@ export interface HostStatusOptions {
  * `status` — reconcile against the live journal over the host driver. Returns
  * the typed `StatusReply` (no JSON parse; `currentVersion` camelCase).
  *
- * NOTE: the addon `status` entry takes pre-lowered migrations (a typed
- * `Vec<Migration>`), and the addon exposes no standalone "lower a module → Migration"
- * verb, so the facade cannot lower arbitrary modules here. Rather than accept a
- * `migrations` option and silently ignore it, this verb supports the read path
- * (empty-journal / "pending" reconciliation) with no migrations argument — the
- * journal-vs-nothing query the oracle exercises. Reconciling N supplied modules is a
- * follow-up that reuses `applyIr`'s lower.
+ * When `migrations` is supplied, status reconciles the same complete ordered plans
+ * used by apply. Top-level `applied`/`pending` values are logical plan ids;
+ * `plans[].steps` exposes schema, data, backfill, and online-step state. Omitting
+ * `migrations` returns journal-only status.
  */
 export async function status(opts: HostStatusOptions): Promise<StatusReply> {
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
+    if (opts.migrations !== undefined) {
+      if (
+        opts.nameFallbacks !== undefined &&
+        opts.nameFallbacks.length !== opts.migrations.length
+      ) {
+        throw new Error(
+          "zero-migrate-engine: status nameFallbacks must match migrations length",
+        );
+      }
+      const envelopes = opts.migrations.map((migration, index) =>
+        authorEnvelope(
+          addon,
+          migration,
+          opts.nameFallbacks?.[index] ?? opts.nameFallback,
+        ),
+      );
+      return await addon.statusIr(hostDriver, {
+        ownerApp: opts.ownerApp,
+        projectSchema: opts.projectSchema,
+        dialect: dialectOf(opts.driver),
+        registry: opts.registry ?? {},
+        envelopes,
+        policyCeiling: opts.policyCeiling,
+      });
+    }
     return await addon.status(hostDriver, {
       projectId: opts.projectSchema,
       projectSchema: opts.projectSchema,
+      dialect: dialectOf(opts.driver),
       migrations: [], // the read path / empty-journal flow (see doc).
     });
   } finally {
@@ -229,6 +330,9 @@ export async function status(opts: HostStatusOptions): Promise<StatusReply> {
 /** `history` — the journal audit trail over the host driver. Returns the
  *  typed `HistoryReply` (no JSON parse; `eventSeq` is a `bigint`). */
 export async function history(opts: HostStatusOptions): Promise<HistoryReply> {
+  if (opts.driver.kind !== "postgres") {
+    throw new Error("zero-migrate-engine: history supports only PostgreSQL");
+  }
   const addon = loadAddon();
   const { hostDriver, close } = await openSession(opts.driver);
   try {
