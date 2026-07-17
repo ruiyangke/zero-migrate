@@ -433,6 +433,13 @@ Performance Schema transaction tables, and the `transaction` instrument plus
 `events_transactions_current` consumer must be enabled. Zero-migrate stops if it
 cannot prove the session is idle.
 
+An explicit primary-key add, replace, or drop also requires the MySQL
+`LOCK TABLES` privilege for the target table and migration inflight table.
+Zero-migrate holds those locks while checking the exact live preconditions and
+writing the started marker, then performs the key swap and any declared
+`AUTO_INCREMENT` removal in one `ALTER TABLE`. It never disables
+`foreign_key_checks` for this operation.
+
 If an interrupted schema step leaves an inflight marker, automatic apply stops.
 The marker is preserved and the schema statement is not replayed because MySQL
 may already have committed some or all of it. A Rust host resolves it with

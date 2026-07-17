@@ -148,8 +148,14 @@ Recreate required semantics in follow-up migrations after resolution, and do
 not use this workflow to rename the `id` primary key. Dependencies on the source
 can block resolution, so audit them before rollout.
 
-Primary keys must be part of the initial table definition. Adding a column with
-`.primaryKey()` later does not create a primary-key constraint on any target.
+Adding a column with `.primaryKey()` later does not create a primary-key
+constraint on any target. Once all data and dependency prerequisites have been
+staged separately, `table(name).primaryKey().add()`, `.replace()`, and `.drop()`
+perform the explicit final constraint change on all three targets. Replace and
+drop require an exact ordered `expectedColumns` precondition; their optional
+`dropIdentityFrom` tuple is the only supported generation transition. Apply
+also refuses to strand an inbound foreign key without an exact alternate unique
+key.
 
 ### Features inside `table(...).create({...})`
 

@@ -236,8 +236,25 @@ the referenced key remains the authoritative source of the format check.
 
 Primary-key intent belongs on the initial table definition. Calling
 `.primaryKey()` on a later added column does not add a primary-key constraint.
-Create the primary key with the table or use a deliberate follow-up database
-design.
+After staging and validating any new columns, values, candidate uniqueness, and
+foreign keys separately, make the final constraint change explicitly:
+
+```ts
+table("orders").primaryKey().replace({
+  expectedColumns: ["id"],
+  columns: ["tenant_id", "order_id"],
+  dropIdentityFrom: ["id"],
+});
+```
+
+Use `.add({ columns })` only when the table has no primary key, and
+`.drop({ expectedColumns, dropIdentityFrom? })` to remove one. For replace and
+drop, `expectedColumns` is an exact ordered live-state precondition. Apply
+refuses a mismatch instead of discovering a different key. These operations do
+not create columns or uniqueness, backfill data, or migrate foreign keys.
+`dropIdentityFrom` is the only generation transition they perform and must name
+an old identity or auto-increment column that cannot retain that facet after the
+key change.
 
 Compose a public TypeID primary key as
 `ids.typeId({ prefix }).primaryKey()`. This column has no database default, so
