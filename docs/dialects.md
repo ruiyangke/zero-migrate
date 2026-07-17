@@ -170,9 +170,11 @@ For a three-target unique key, create a named unique btree index instead of
 using the table-level `uniques` option:
 
 ```javascript
+import { table, t, uuidV4 } from "zero-migrate";
+
 table("accounts").create({
   columns: {
-    id: t.id(),
+    id: t.uuid().primaryKey().default(uuidV4()),
     email: t.text().notNull(),
   },
   indexes: [

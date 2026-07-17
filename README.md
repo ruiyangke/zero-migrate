@@ -40,7 +40,7 @@ vendor-only behavior is clearly marked and rejected on unsupported targets.
 
 ```ts
 // migrations/20260715090000_create_orders.ts
-import { now, table, t } from "zero-migrate";
+import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_orders";
 
@@ -48,7 +48,7 @@ export default {
   up() {
     table("orders").create({
       columns: {
-        id: t.id({ prefix: "ord" }),
+        id: ids.typeId({ prefix: "ord" }).primaryKey(),
         total: t.numeric({ precision: 12, scale: 2 }).notNull(),
         status: t.text().notNull().default("pending"),
         created_at: t.timestamp().notNull().default(now()),
@@ -60,11 +60,19 @@ export default {
     });
 
     table("orders").insert({
-      rows: { total: 0, status: "pending" },
+      rows: {
+        id: "ord_01h455vb4pex5vsknk084sn02q",
+        total: 0,
+        status: "pending",
+      },
     });
   },
 };
 ```
+
+`ids.typeId({ prefix: "ord" }).primaryKey()` stores public TypeID values and
+does not add a database default. The insert therefore supplies a matching
+TypeID explicitly.
 
 The same migration can be checked for PostgreSQL, MySQL 8, or SQLite. If you
 choose a database-specific feature, you declare that choice in the migration so

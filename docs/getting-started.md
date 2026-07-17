@@ -77,7 +77,7 @@ pnpm exec tsx dist/cli-bin.js new create_users --dir ./migrations
 Open the generated file and replace its contents:
 
 ```ts
-import { now, table, t } from "zero-migrate";
+import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_users";
 
@@ -85,7 +85,7 @@ export default {
   up() {
     table("users").create({
       columns: {
-        id: t.id({ prefix: "user" }),
+        id: ids.typeId({ prefix: "user" }).primaryKey(),
         email: t.text().notNull(),
         display_name: t.text(),
         state: t.text().notNull().default("invited"),
@@ -100,6 +100,7 @@ export default {
 
     table("users").insert({
       rows: {
+        id: "user_01h455vb4pex5vsknk084sn02q",
         email: "first@example.com",
         display_name: "First user",
       },
@@ -114,9 +115,11 @@ with an `up()` method. Keep all migration calls synchronous inside that method.
 The most important authoring rules are:
 
 - Columns are nullable unless you call `.notNull()`.
-- A `t.id({ prefix })` prefix is at most four characters, starts with a
-  lowercase letter, uses only lowercase letters, digits, or underscores, and
-  cannot be the reserved prefix `usr`.
+- `ids.typeId({ prefix }).primaryKey()` stores TypeID 0.3 values and does not
+  add a database default, so inserts must supply a valid TypeID. A nonempty
+  prefix is at most 63 characters, contains only lowercase letters and
+  underscores, and starts and ends with a lowercase letter. The empty prefix is
+  also permitted; the examples here use nonempty prefixes.
 - Build defaults with helpers such as `now()` instead of SQL strings.
 - A selector such as `.column("name")` does nothing until you call an action
   such as `.add(...)`, `.setType(...)`, or `.drop()`.
@@ -128,7 +131,7 @@ The most important authoring rules are:
 Here is another complete, portable create-first migration:
 
 ```ts
-import { now, table, t } from "zero-migrate";
+import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_projects";
 
@@ -136,7 +139,7 @@ export default {
   up() {
     table("projects").create({
       columns: {
-        id: t.id({ prefix: "proj" }),
+        id: ids.typeId({ prefix: "proj" }).primaryKey(),
         name: t.text().notNull(),
         archived: t.boolean().notNull().default(false),
         created_at: t.timestamp().notNull().default(now()),

@@ -9,7 +9,7 @@ A migration is an ordinary TypeScript module that describes database changes
 with the `zero-migrate` API:
 
 ```ts
-import { table, t } from "zero-migrate";
+import { ids, table, t } from "zero-migrate";
 
 export const name = "create_accounts";
 
@@ -17,7 +17,7 @@ export default {
   up() {
     table("accounts").create({
       columns: {
-        id: t.id({ prefix: "acct" }),
+        id: ids.typeId({ prefix: "acct" }).primaryKey(),
         email: t.text().notNull(),
       },
     });

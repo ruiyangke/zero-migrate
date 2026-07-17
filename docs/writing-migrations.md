@@ -20,7 +20,7 @@ features, and safe rollout.
 Create a file such as `migrations/20260715120000_create_accounts.js`:
 
 ```ts
-import { now, table, t } from "zero-migrate";
+import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_accounts";
 
@@ -28,7 +28,7 @@ export default {
   up() {
     table("accounts").create({
       columns: {
-        id: t.id({ prefix: "acct" }),
+        id: ids.typeId({ prefix: "acct" }).primaryKey(),
         email: t.text().notNull(),
         display_name: t.text(),
         state: t.text().notNull().default("invited"),
@@ -51,7 +51,7 @@ The important parts are:
   history. It must be unique within the project.
 - `up()` contains the ordered changes.
 - `table("accounts")` selects the object to change.
-- `t` builds column definitions.
+- `t` and `ids` build column definitions.
 - String values such as `"invited"` are data, never SQL fragments.
 
 Migration discovery is filename-based and lexicographic. Use sortable timestamp
@@ -127,11 +127,13 @@ Use these guides for the host side:
 default schema for operations made through that handle:
 
 ```ts
+import { table, t, uuidV4 } from "zero-migrate";
+
 const auditEvents = table("events", { schema: "app_data" });
 
 auditEvents.create({
   columns: {
-    id: t.id(),
+    id: t.uuid().primaryKey().default(uuidV4()),
     kind: t.text().notNull(),
   },
 });
@@ -159,11 +161,11 @@ fields are `softDelete`, `versioning`, and `strictness`, where strictness is
 
 ## Column types
 
-Build every column with the immutable `t` helpers:
+Build every column with the immutable `t` and `ids` helpers:
 
 | Factory | Use |
 | --- | --- |
-| `t.id({ prefix? })` | UUID primary key with a generated value |
+| `ids.typeId({ prefix })` | TypeID 0.3 text |
 | `t.text({ caseSensitive? })` | Text |
 | `t.textArray()` | Text array |
 | `t.numeric({ precision?, scale? })` | Exact decimal number |
@@ -217,9 +219,13 @@ Primary-key intent belongs on the initial table definition. Calling
 Create the primary key with the table or use a deliberate follow-up database
 design.
 
-`t.id({ prefix })` prefixes must start with a lowercase letter, contain only
-lowercase letters, digits, and underscores, and be no more than four
-characters. `usr` is reserved.
+Compose a public TypeID primary key as
+`ids.typeId({ prefix }).primaryKey()`. This column has no database default, so
+the application or migration must supply each TypeID value. Under TypeID 0.3, a
+nonempty prefix can contain at most 63 characters, can use only lowercase
+letters and underscores, and must start and end with a lowercase letter. An
+empty prefix is also permitted; the examples in this guide use nonempty
+prefixes.
 
 Generated columns cannot also have a default or identity. PostgreSQL supports
 stored generated columns; SQLite and MySQL also support virtual generated

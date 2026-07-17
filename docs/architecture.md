@@ -38,7 +38,7 @@ Most users work with two packages:
 A migration module is ordinary TypeScript:
 
 ```ts
-import { now, table, t } from "zero-migrate";
+import { ids, now, table, t } from "zero-migrate";
 
 export const name = "create_projects";
 
@@ -46,7 +46,7 @@ export default {
   up() {
     table("projects").create({
       columns: {
-        id: t.id({ prefix: "proj" }),
+        id: ids.typeId({ prefix: "proj" }).primaryKey(),
         name: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
       },
