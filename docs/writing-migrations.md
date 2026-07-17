@@ -178,7 +178,6 @@ Build every column with the immutable `t` and `ids` helpers:
 | `t.bytes()` | Binary data |
 | `t.json()` | JSON |
 | `t.inet()` | IP address or network |
-| `t.ref("accounts")` | Reference-shaped identifier for another table |
 | `t.vector({ dimensions, metric? })` | Vector data |
 | `t.geoPoint()` | Geographic point |
 | `t.enum(nameOrHandle)` | Declared enum |
@@ -210,9 +209,30 @@ Available modifiers include:
 - `.default(value)`
 - `.primaryKey()`
 - `.unique()`
+- `.references(table, column, { onDelete?, onUpdate? })`
 - `.generated(expression, { virtual? })`
 - `.identity({ always? })` and `.autoIncrement()`
 - `.mask({ kind, classification? })`
+
+References keep their explicit local type and add only a single-column foreign
+key. They do not infer storage from a live database or imply a default,
+generator, primary key, or unique constraint:
+
+```ts
+table("orders").create({
+  columns: {
+    id: t.bigInt().primaryKey().autoIncrement(),
+    account_id: t.uuid().references("accounts", "id", {
+      onDelete: "cascade",
+      onUpdate: "restrict",
+    }),
+  },
+});
+```
+
+Foreign-key actions are `cascade`, `restrict`, `setNull`, `setDefault`, and
+`noAction`. TypeID and ULID references retain their exact format metadata, while
+the referenced key remains the authoritative source of the format check.
 
 Primary-key intent belongs on the initial table definition. Calling
 `.primaryKey()` on a later added column does not add a primary-key constraint.
@@ -480,9 +500,12 @@ orders.constraint("old_orders_rule").drop({ ifExists: true });
 ```
 
 Foreign-key actions are `cascade`, `restrict`, `setNull`, `setDefault`, and
-`noAction`. Deferrable constraints, `notValid` adoption, explicit validation,
-standalone checks, exclusion constraints, and composite/non-`id` foreign keys
-are PostgreSQL features.
+`noAction`. Explicitly typed, single-column references declared with
+`.references()` are supported across PostgreSQL, SQLite, and MySQL when the
+local and referenced storage, format, and collation are compatible. Deferrable
+constraints, `notValid` adoption, explicit validation, standalone checks,
+exclusion constraints, and composite table-level foreign keys are PostgreSQL
+features in the current engine.
 
 A one-column foreign key to `id` and a unique constraint can be added on
 PostgreSQL, SQLite, and MySQL. SQLite has additional restrictions when those
