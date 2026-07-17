@@ -23,7 +23,7 @@ Rust API. Always check both compatibility and execution.
 | Target | Best fit | Main limitations |
 | --- | --- | --- |
 | PostgreSQL | Full platform feature set, rich indexes, native types, partitions, RLS, administration, and complete schema/data execution | Advanced operations need explicit capabilities |
-| SQLite | Embedded/local databases applied through a Rust host | No public Node/CLI apply, no native partitions, sequences, comments, or PostgreSQL administration; backfills require an `INTEGER` or `TEXT` single-column primary key |
+| SQLite | Embedded/local databases applied through a Rust host | No public Node/CLI apply, no native partitions, sequences, comments, or PostgreSQL administration; backfill cursor components require supported `INTEGER` or `TEXT` semantics |
 | MySQL 8 | Portable application schema and data migrations through Node or Rust | No column rename, expression/partial indexes, comments, or partitions; data migrations require InnoDB and refuse targets with user triggers |
 
 Choose PostgreSQL when you need the broadest migration surface. Choose SQLite
@@ -36,12 +36,12 @@ This table is the practical deployment boundary:
 
 | Execution path | Schema operations | Insert/update/delete | Batched backfill |
 | --- | --- | --- | --- |
-| Public Node/CLI, PostgreSQL | Yes, for supported non-privileged operations | Yes | Yes, with a complete single-column primary key |
-| Public Node/CLI, MySQL 8 | Yes, for supported operations | Yes, on trigger-free InnoDB tables | Yes, on trigger-free InnoDB tables with a complete single-column primary key |
+| Public Node/CLI, PostgreSQL | Yes, for supported non-privileged operations | Yes | Yes, with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
+| Public Node/CLI, MySQL 8 | Yes, for supported operations | Yes, on trigger-free InnoDB tables | Yes, on InnoDB with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
 | Public Node/CLI, SQLite | No apply driver | No | No |
-| PostgreSQL Rust API | Yes | Yes | Yes, with a complete single-column primary key |
-| SQLite Rust API | Yes | Yes | Yes, with an `INTEGER` or `TEXT` single-column primary key |
-| MySQL 8 Rust API | Yes | Yes, on trigger-free InnoDB tables | Yes, on trigger-free InnoDB tables with a complete single-column primary key |
+| PostgreSQL Rust API | Yes | Yes | Yes, with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
+| SQLite Rust API | Yes | Yes | Yes, with a supported exact ordered primary/unique candidate-key cursor tuple and explicit stability |
+| MySQL 8 Rust API | Yes | Yes, on trigger-free InnoDB tables | Yes, on InnoDB with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
 
 Supported schema and data steps execute in authored order. Pending deletes and
 backfills require operator approval: `approved: true` in Node or `--approve` in
@@ -242,7 +242,7 @@ The authoring API supports these descriptions:
 | Insert literal rows | Yes | Yes | Yes |
 | Update | Yes | Yes | Yes |
 | Delete with predicate | Yes | Yes | Yes |
-| Batched backfill | Complete single-column primary key | `INTEGER` or `TEXT` single-column primary key | Complete single-column primary key |
+| Batched backfill | Ordered primary/unique candidate-key tuple | Ordered primary/unique tuple with supported `INTEGER`/`TEXT` components | Ordered primary/unique candidate-key tuple |
 | Insert with non-empty `onConflict.doUpdate` | Yes, exact target | Yes, exact target | Yes, with guarded target matching |
 | Insert with `onConflict` do-nothing | Yes, exact target | Yes, exact target | No exact native form |
 
@@ -260,15 +260,23 @@ arithmetic and numeric casts still coerce the text to SQLite numbers and are not
 arbitrary-precision operations. Use PostgreSQL or MySQL when database-side
 fixed-precision arithmetic or numeric ordering is required.
 
-Pending `delete` and `backfill` steps require explicit approval. A backfill
-cursor must be the table's complete, non-null, single-column primary key on
-every target; a unique-only key or one column from a composite primary key is
-not sufficient. PostgreSQL and MySQL require a supported orderable cursor type.
-SQLite additionally requires declared `INTEGER` or `TEXT` affinity, and every
-live cursor value must use the matching `integer` or `text` storage class. Text
-cursors must contain valid UTF-8; embedded NUL characters are supported. A
-`WITHOUT ROWID` table is supported when that primary key meets the same rules.
-The backfill must not assign its cursor column.
+Pending `delete` and `backfill` steps require explicit approval. A backfill's
+declared `cursorColumns` must exactly match, in order, a non-null primary or
+unique candidate-key tuple whose comparison semantics the target can preserve;
+one column from a composite key is not sufficient. PostgreSQL and MySQL require
+supported orderable component types. SQLite additionally requires supported
+declared `INTEGER` or `TEXT` affinity and matching live storage classes for each
+component. Text components must contain valid UTF-8; embedded NUL characters
+are supported. A `WITHOUT ROWID` table is supported when its candidate key
+meets the same rules. The backfill must not assign any cursor component.
+
+Every backfill also declares `cursorStability`. `guardUpdates` installs a
+zero-migrate-owned persistent guard until durable completion; apply refuses
+trigger interactions it cannot prove safe. `externalInvariant` records a named
+application or maintenance invariant and requires explicit destructive
+approval. The bounded cohort does not cover concurrent inserts by itself:
+establish a write invariant that makes new rows fail the filter before capture,
+or run a final catch-up while writes are stopped.
 
 Every MySQL structured insert, update, delete, and backfill requires an InnoDB
 target table without user triggers. Apply refuses before changing target rows if

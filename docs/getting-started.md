@@ -246,13 +246,15 @@ approval before it resumes. Apply checks every pending approval-gated step in
 the plan before executing its first authored step, so a later unapproved delete
 or backfill cannot follow an already-committed earlier step from that plan.
 
-A backfill pages by the table's complete, non-null, single-column primary key,
-using a supported orderable type. Before the first batch it captures a fixed
-terminal cursor. Each batch saves the last committed cursor, so retrying resumes
-within that original range instead of starting over or chasing later rows. Rows
-inserted after the backfill starts are not guaranteed to be included and need a
-later migration. PostgreSQL rejects a backfill target with a pre-existing
-enabled user trigger; the managed online rename workflow remains supported.
+A backfill pages by an exact ordered, non-null primary or unique candidate-key
+tuple with compatible comparison semantics. It also declares either a managed
+`guardUpdates` cursor guard or an approved, named `externalInvariant`. Before
+the first batch it captures a fixed terminal tuple. Each batch saves the last
+committed typed tuple, so retrying resumes within that original range instead of
+starting over or chasing later rows. The bounded cohort does not cover
+concurrent inserts by itself: make new rows fail the filter before capture, or
+run a final catch-up while writes are stopped. PostgreSQL rejects trigger
+interactions it cannot prove safe; the managed online rename workflow remains supported.
 Completion is recorded in the normal migration journal.
 Editing an applied migration, including its bound data values or backfill
 transform, stops with checksum drift.
@@ -565,9 +567,9 @@ live values use the matching storage class.
 - Use a pre-provisioned schema or database and least-privilege credentials.
 - Supply a complete ownership registry for previously created tables.
 - Require an independent approval decision for destructive changes.
-- Confirm delete/backfill approval and use the table's complete, non-null,
-  single-column primary key as the cursor. Plan a later migration for rows
-  written after the backfill starts.
+- Confirm delete/backfill approval; use an exact ordered primary/unique
+  candidate-key tuple and choose a cursor-stability mode. Make new rows fail the
+  filter before cohort capture or arrange a final catch-up with writes stopped.
 - Test against a disposable copy of the target database.
 - Back up data and define a forward-fix or recovery procedure.
 - Preserve the migration journal and monitor failed or incomplete deployments.

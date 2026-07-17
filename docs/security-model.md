@@ -202,8 +202,8 @@ its dedicated session is idle.
 MySQL DDL auto-commits. zero-migrate records started/completed recovery state,
 but the schema change and journal completion cannot be one transaction. Every
 insert, update, delete, and backfill target must use InnoDB. Backfills also
-require the table's complete, non-null, single-column primary key with a
-supported orderable type. MySQL refuses structured data migrations when the
+require an exact ordered, non-null primary or unique candidate-key tuple with
+supported comparison semantics and an explicit cursor-stability mode. MySQL refuses structured data migrations when the
 target has user triggers because it cannot prove that trigger side effects stay
 transactionally consistent with the migration journal.
 
@@ -235,8 +235,9 @@ other migration tools or arbitrary writers.
 
 SQLite refuses to migrate when it cannot establish crash-safe settings for both
 the application and journal databases. A SQLite backfill additionally requires
-the table's non-null, single-column primary key with declared `INTEGER` or
-`TEXT` affinity. Every live cursor value must use the matching storage class.
+an exact ordered, non-null primary or unique candidate-key tuple with supported
+declared `INTEGER` or `TEXT` affinity. Every live cursor value must use the
+matching storage class.
 
 ## Journal and integrity
 
@@ -351,9 +352,11 @@ Keep the host and database credentials inside the trusted computing base.
 - Validate the exact target dialect.
 - Review the structured migration preview.
 - Bind destructive and backfill approval to immutable content.
-- Use stable unique migration names. Backfills must use the table's complete,
-  non-null, single-column primary key.
-- Plan a later migration for rows written after a backfill begins.
+- Use stable unique migration names. Backfills must use an exact ordered,
+  non-null primary or unique candidate-key tuple with compatible comparison
+  semantics and an explicit cursor-stability mode.
+- Before cohort capture, make concurrent inserts fail the filter or arrange a
+  final catch-up while writes are stopped.
 - Require trigger-free InnoDB targets for MySQL structured data migrations.
 - Enable MySQL transaction tracking and grant the migration account access to
   the required Performance Schema transaction state.

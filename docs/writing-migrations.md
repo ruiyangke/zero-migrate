@@ -585,7 +585,8 @@ table("expired_sessions").delete({
 
 table("users").backfill({
   name: "backfill_user_names",
-  cursorColumn: "id",
+  cursorColumns: ["id"],
+  cursorStability: { mode: "guardUpdates" },
   batchSize: 500,
   set: {
     first_name: (col) => col("full_name").splitPart(" ", 1),
@@ -626,31 +627,50 @@ Behavior to know:
   provide atomic journaling. MySQL also refuses these structured data operations
   when the target has a user trigger, because it cannot prove that the trigger's
   side effects stay consistent with the migration journal.
-- Backfill defaults are cursor `id`, batch size `1000`, and name
+- `cursorColumns` and `cursorStability` are required. A one-column cursor is
+  written `cursorColumns: ["id"]`; there is no `cursorColumn` spelling or
+  implicit cursor. Batch size still defaults to `1000`, and the name defaults to
   `backfill_<table>`.
-- On every target, a backfill cursor must be the table's complete, non-null,
-  single-column primary key. A unique-only key or one column from a composite
-  primary key is not sufficient. The backfill cannot assign the cursor.
-- PostgreSQL and MySQL also require a supported orderable cursor type. A MySQL
-  cursor cannot be a generated column or be automatically updated.
+- Before execution, the planner proves that `cursorColumns` is the exact ordered,
+  non-null column tuple of a primary or full unique candidate key with comparison
+  semantics the target can preserve. Composite primary and unique keys are
+  supported. Prefix, partial, expression, nullable, reordered, and wider keys do
+  not prove the cursor. The backfill cannot assign any cursor component.
+- PostgreSQL and MySQL also require supported orderable types at every tuple
+  position. A MySQL cursor component cannot be generated or automatically
+  updated.
 - SQLite additionally requires declared `INTEGER` or `TEXT` affinity. Existing
   cursor values must all use the matching SQLite storage class, and text cursors
   must be valid UTF-8. Embedded NUL characters are supported. Other or mixed
   cursor storage classes are rejected before that backfill changes rows.
-- PostgreSQL and SQLite backfills reject target tables with pre-existing enabled
-  user triggers. The managed PostgreSQL online rename workflow remains
-  supported. A row-level policy that suppresses a selected update
-  rolls the batch back without advancing progress.
-- Before its first batch, a backfill captures a fixed terminal cursor. Each
-  batch saves the last committed cursor, and a retry resumes after that cursor
-  without chasing rows beyond the original boundary. This is a bounded cursor
-  range, not a snapshot. Rows inserted after the backfill starts are not
-  guaranteed to be included and should be handled by a later migration.
-- Keep every paging primary-key value unchanged from the first batch through
-  completion. The migration itself is rejected if it assigns the cursor, but
-  your application and other database clients must follow the same rule while
-  the backfill runs. Moving an unprocessed key behind the saved cursor can skip
-  that row; moving a processed key ahead of it can process that row again.
+- `cursorStability: { mode: "guardUpdates" }` installs a durable,
+  zero-migrate-owned database guard before cohort capture. It rejects updates
+  that change any cursor component, survives interruption, and is removed only
+  with durable completion. Installation and cleanup state are journaled. Apply
+  rejects pre-existing trigger interactions or target shapes for which it cannot
+  prove the guard works.
+- `cursorStability: { mode: "externalInvariant", name: "…" }` records a named
+  application or maintenance invariant that forbids cursor updates for the
+  operation's whole lifetime, including time between a crash and resume. It is
+  displayed in preview and plan-aware status and requires explicit destructive
+  approval. The engine records this assertion; it cannot enforce the external
+  system named by it.
+- Before its first batch, a backfill captures the greatest matching cursor tuple.
+  Batches page lexicographically after the last tuple and at or before that fixed
+  end tuple, ordered by every component. Checkpoints are tagged scalar JSON
+  arrays with the same arity as `cursorColumns`, never delimiter-joined strings.
+  Cursor columns, exact type/collation semantics, cohort bound, checksum, row and
+  batch counts, and completion state are retained in progress; resume refuses
+  drift. Each data batch and its checkpoint commit atomically.
+- This bounded cohort is not a snapshot and cursor stability does not cover new
+  inserts. Before cohort capture, establish a write invariant that makes new rows
+  fail the filter, or schedule a final catch-up while writes are stopped. A
+  completed bounded cohort never means concurrent inserts were covered.
+- If no stable unique tuple exists, or neither stability mode is acceptable, use
+  an explicit alternative: a one-shot update in a maintenance window, a
+  target-specific rebuild or temporary surrogate, or a stable unique cursor
+  created in an earlier migration. zero-migrate never pages on a row locator it
+  cannot prove stable.
 - Every data step has a stable journal identity and carries the checksum of the
   complete migration, including bound values. An unchanged step is skipped on
   repeat apply; editing an applied migration fails with checksum drift.
@@ -1045,7 +1065,7 @@ helpers. The runtime API remains ordinary JavaScript.
 | An operation appears to do nothing | Make sure a selector ends with `add`, `drop`, `create`, or another terminal |
 | A migration behaves differently between runs | Remove clock, randomness, environment, filesystem, and network reads |
 | A delete or backfill is refused | Review the exact migration, then use Node `approved: true` or CLI `--approve` |
-| A backfill cursor is rejected | Use the table's complete, non-null, single-column primary key; SQLite also requires `INTEGER` or `TEXT` affinity with matching stored values |
+| A backfill cursor is rejected | Use an exact ordered, non-null primary or unique candidate-key tuple with compatible comparison semantics; SQLite components also need supported `INTEGER` or `TEXT` affinity and matching stored values |
 | A MySQL data step is rejected | Use InnoDB and remove or redesign user triggers on the target before applying structured data migrations |
 | A feature fails only on one database | Check [Dialect support](dialects.md) and validate for that target |
 | A schema operation is denied | Check project schema ownership and required capabilities |
@@ -1063,10 +1083,11 @@ and recovery errors.
 - Keep `up()` synchronous and deterministic.
 - Preview the exact operation order.
 - Validate against every database target you deploy.
-- Confirm delete/backfill approval and test the table's complete, non-null,
-  single-column primary key as the backfill cursor on representative data.
-- Plan a later migration for rows written after a backfill captures its terminal
-  cursor.
+- Confirm delete/backfill approval; test the exact ordered primary/unique cursor
+  tuple and the selected `guardUpdates` or named `externalInvariant` mode on
+  representative data.
+- Before cohort capture, establish a write invariant that makes new rows fail
+  the filter, or schedule a final catch-up while writes are stopped.
 - Name constraints, indexes, triggers, and policies.
 - Review operations without a `where` clause.
 - Confirm destructive approval, ownership, and privileged capabilities.

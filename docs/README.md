@@ -100,8 +100,10 @@ Additional limits to plan around:
 - MySQL support targets MySQL 8, not MariaDB.
 - MySQL structured data migrations require an InnoDB target with no user
   triggers.
-- PostgreSQL backfills reject pre-existing enabled user triggers. The managed
-  PostgreSQL online rename workflow remains supported.
+- Resumable backfills require an exact ordered, non-null primary/unique cursor
+  tuple plus either a zero-migrate update guard or an explicitly approved named
+  external invariant. Apply rejects trigger interactions it cannot prove safe.
+  The managed PostgreSQL online rename workflow remains supported.
 - A PostgreSQL online rename requires a matching live source type and `id` as
   the complete, non-null, single-column primary key, with no pre-existing
   enabled user triggers and no row policy that suppresses selected updates. Its
@@ -119,9 +121,11 @@ Additional limits to plan around:
   type, including modifiers. Review and recreate required defaults, constraints,
   indexes, comments, and dependent objects after resolution. Source dependencies
   can block resolution and must be audited before rollout.
-- Backfills use a fixed terminal cursor captured before the first batch. Later
-  rows are not guaranteed to be included and need a later migration. The cursor
-  must be the table's complete, single-column primary key on every target.
+- Backfills use typed tuple checkpoints and a fixed terminal tuple captured before
+  the first batch. Later inserts are outside that bounded cohort: establish a
+  write invariant that makes them fail the filter or run a final catch-up while
+  writes are stopped. A completed cohort does not claim those inserts were
+  covered.
 - SQLite Rust apply coordinates zero-migrate processes for the same application
   database and refuses unsafe application or journal database settings.
 - Migration names are stable identities. Keep each name unique within the

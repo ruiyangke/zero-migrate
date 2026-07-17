@@ -440,16 +440,18 @@ need the aggregate state of the migration.
 - DDL, insert, update, delete, and backfill steps run on PostgreSQL and MySQL in
   authored order. Values are bound separately from statement structure.
 - Pending delete and backfill steps require `approved: true`. A backfill also
-  requires the table's complete, non-null, single-column primary key with a
-  supported orderable type, and the transform must not assign it. Every MySQL
+  requires an exact ordered, non-null primary or unique candidate-key tuple with
+  compatible comparison semantics and explicit cursor stability; the transform
+  must not assign any component. Every MySQL
   insert, update, delete, and backfill target must use InnoDB and have no user
   triggers. A MySQL backfill cursor cannot be a generated column or be
   automatically updated. PostgreSQL backfills reject pre-existing enabled user
   triggers; the managed online rename workflow remains supported.
 - Before the first batch, a backfill captures a fixed terminal cursor. It commits
   bounded batches, resumes after its saved cursor, and stops at that original
-  boundary. Rows inserted after capture are not guaranteed to be included and
-  need a later migration. Integer and decimal cursors remain exact across the
+  boundary. The bounded cohort does not cover concurrent inserts by itself: make
+  new rows fail the filter before capture or arrange a final catch-up while
+  writes are stopped. Integer and decimal cursors remain exact across the
   JavaScript boundary. Final completion is recorded in the normal journal.
 - Keep paging primary-key values unchanged until the backfill completes. The
   migration cannot assign its own cursor, and application writes must not move
@@ -912,7 +914,7 @@ whether to retry.
 | Plan succeeds but apply rejects | Plan is offline and does not run every apply-time check |
 | PostgreSQL rename conflicts with another operation | Keep the rename as that table's only operation; move same-table schema and data work to a later migration applied after resolution |
 | A delete or backfill is refused | Review the exact migration, then set `approved: true` in trusted operator code |
-| A backfill cursor is rejected | Use the table's complete, non-null, single-column primary key with a supported orderable type |
+| A backfill cursor is rejected | Use an exact ordered, non-null primary or unique candidate-key tuple with compatible comparison semantics and choose `guardUpdates` or an approved named `externalInvariant` |
 | A MySQL data step is refused | Use an InnoDB target without user triggers |
 | Destructive work is refused | Review the change, then set `approved: true` in trusted operator code |
 | MySQL status lacks pending/step detail | Pass the ordered `migrations` set and matching registry to `status()`; MySQL `history()` is not public |

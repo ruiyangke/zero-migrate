@@ -635,7 +635,7 @@ command also prints usage.
 | PostgreSQL rename validation reports another operation on the table | Keep the rename as that table's only operation; move same-table schema and data work to a later migration and apply it after resolution |
 | Data step is skipped | Run `status --dir ...`; an unchanged applied step skips by design, while edited content reports checksum drift |
 | MySQL data step is refused | Use an InnoDB target without user triggers; zero-migrate refuses data migrations whose transactional side effects cannot be proven |
-| Backfill cursor is refused | Use the table's complete, non-null, single-column primary key with a supported orderable type |
+| Backfill cursor is refused | Use an exact ordered, non-null primary or unique candidate-key tuple with compatible comparison semantics and choose `guardUpdates` or an approved named `externalInvariant`; otherwise use a maintenance-window one-shot, rebuild/temporary surrogate, or create a stable unique cursor first |
 | MySQL history is needed | The public history API is PostgreSQL-only; use plan-aware MySQL `status` for current migration state |
 | Project schema/database is missing | Create it first and grant access to it and its journal namespace |
 | Reapplying an edited migration reports drift | Restore the applied source and add a new uniquely named migration for the change |

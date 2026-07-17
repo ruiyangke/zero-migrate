@@ -258,9 +258,12 @@ See [Dialect support](dialects.md).
 - Pending deletes and backfills require explicit approval. Approval is
   preflighted across the complete plan before any authored step executes.
 - Backfills capture a fixed terminal cursor before the first batch, resume after
-  the last committed cursor, and do not chase later rows. Their cursor must be
-  the table's complete, non-null, single-column primary key. Rows inserted after
-  capture need a later migration.
+  the last committed cursor tuple, and do not chase later rows. `cursorColumns`
+  must be the exact ordered, non-null tuple of a primary or unique candidate key
+  with compatible comparison semantics. Authors must select either a managed
+  `guardUpdates` cursor guard or an approved, named `externalInvariant`.
+  Concurrent inserts require a write invariant that makes new rows miss the
+  filter, or a final catch-up while writes are stopped.
 - MySQL structured data migrations require trigger-free InnoDB targets.
 - PostgreSQL backfills require no pre-existing enabled user triggers; the
   managed online rename workflow remains supported.

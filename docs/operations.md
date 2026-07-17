@@ -272,12 +272,14 @@ backfill step before retry.
 Supported transactional schema work and ordinary insert, update, or delete work
 can commit together with the corresponding journal event. Explicitly
 non-transactional operations use recovery state instead. Backfills commit
-bounded batches. They capture a fixed terminal cursor before the first batch and
-save the last committed cursor after each batch. The project lock prevents two
-zero-migrate deployments for the same project from running at once. A backfill
-target with a pre-existing enabled user trigger is rejected before its first
-mutation. The managed online rename workflow remains supported. If a row-level
-policy lets the backfill select a row but suppresses
+bounded batches. They capture a fixed terminal cursor tuple before the first
+batch and atomically save the last committed typed tuple after each batch. The
+project lock prevents two zero-migrate deployments for the same project from
+running at once. `guardUpdates` installs a durable managed trigger before cohort
+capture; pre-existing trigger interactions or target shapes whose behavior
+cannot be proved are rejected. `externalInvariant` records the explicitly
+approved invariant name in preview, progress, and status. The managed online
+rename workflow remains supported. If a row-level policy lets the backfill select a row but suppresses
 its update, the whole batch rolls back and progress does not advance. Correct
 that database rule before retrying.
 
@@ -417,10 +419,12 @@ not pending.
 DDL auto-commits. A crash can therefore occur after the schema changes but
 before completion is written to history. Insert, update, delete, and backfill
 targets must use InnoDB so each data mutation can stay consistent with its
-journal state. Structured data migrations fail closed when the target has user
-triggers because their transactional side effects cannot be proven. Backfills
-capture a fixed terminal cursor, commit bounded batches, and save their cursor
-after each one. During apply, zero-migrate enables autocommit, foreign-key checks,
+journal state. Structured data migrations fail closed on unrecognized user
+triggers because their transactional side effects cannot be proven. A managed
+cursor-update guard is installed and recovered through a journaled obligation
+around cohort capture. Backfills capture a fixed terminal tuple, commit bounded
+batches, and save a typed tuple checkpoint after each one. During apply,
+zero-migrate enables autocommit, foreign-key checks,
 and unique checks, then restores the connection's previous values.
 Use a dedicated, idle database session. If the supplied MySQL session already
 has an active transaction, zero-migrate stops before changing autocommit or
@@ -450,12 +454,12 @@ or missing audit context is rejected without changing the marker.
 
 SQLite apply is available only through Rust. Supported transactional schema and
 ordinary data work commit atomically with their journal event; backfills commit
-bounded resumable batches. A backfill cursor must be the table's complete,
-non-null, single-column primary key with declared `INTEGER` or `TEXT` affinity,
-and live cursor values must use the matching storage class. `TEXT` cursor values
-must be valid UTF-8; embedded NUL characters are handled as data. A target table
-with a user trigger is rejected before the first batch because a trigger can
-suppress rows or add side effects that progress cannot describe. Some
+bounded resumable batches. Every component of a proven primary/unique cursor
+tuple must have declared `INTEGER` or `TEXT` affinity, and live values must use
+the matching storage class. `TEXT` values must be valid UTF-8; embedded NUL
+characters are handled as data. A managed update guard is persisted in the main
+database through interruption. Unrecognized target triggers are rejected because
+they can suppress rows or add side effects that progress cannot describe. Some
 alterations require a table rebuild.
 
 Apply coordinates zero-migrate processes for the same application database and
@@ -465,14 +469,12 @@ DELETE rollback-journal mode and uses `synchronous=FULL` on the migration
 connection. Opening a database that uses WAL therefore changes its persistent
 journal mode. Plan this operational change before using SQLite apply.
 
-On every target, the cursor must be the table's complete, non-null,
-single-column primary key, and the backfill must not assign it. The captured
-terminal cursor bounds one backfill run. A retry resumes after the last
-committed cursor and stops at that original boundary. Rows inserted after the
-boundary is captured are not guaranteed to be included; use a later migration
-for them. Application writes must also leave every paging primary-key value
-unchanged until completion. Moving a key behind the saved cursor can skip its
-row; moving a processed key ahead can update that row again.
+On every target, the ordered cursor tuple must be an exact, complete, non-null
+primary or unique candidate key, and the backfill must not assign any component.
+The captured terminal tuple bounds one run. A retry resumes lexicographically
+after the last committed typed tuple and stops at that original boundary. Rows
+inserted later are not covered automatically: establish a write invariant that
+makes them fail the filter, or run a final catch-up with writes stopped.
 
 ## Status, history, and drift
 
@@ -487,7 +489,8 @@ Status reconciles every schema, insert, update, delete, and backfill step and
 reports applied, aborted, pending, partial, drifted, blocked, or
 unknown-dependency migrations. A backfill that has saved progress without its
 final completion event produces an `inflight` step and a `partial` plan. Use the
-same names, owner, registry, and policy ceiling as apply.
+same names, owner, registry, and policy ceiling as apply. Backfill steps expose
+their cursor-stability mode, including the approved external-invariant name.
 
 The reply also reports `pendingContracts` for outstanding PostgreSQL online
 renames, `blocked` plans that wait on one of those obligations, and
@@ -592,12 +595,12 @@ Plan the forward fix and restore path before approving a destructive migration.
 
 ### Interrupted backfill
 
-- keep the migration name, source, cursor column, and batch definition
+- keep the migration name, source, ordered cursor tuple, and batch definition
   unchanged;
-- inspect plan-aware status, the last committed cursor, and the captured terminal
-  cursor;
+- inspect plan-aware status, the last committed typed tuple checkpoint, and the
+  captured typed end tuple;
 - correct the external cause without editing journal rows;
-- rerun the same migration with approval so it resumes after the saved cursor;
+- rerun the same migration with approval so it resumes after the saved tuple;
 - verify the final row set and completion event;
 - use a later migration for rows inserted after this backfill began.
 

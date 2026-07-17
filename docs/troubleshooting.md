@@ -367,19 +367,19 @@ failed. Choose based on which column the deployed application currently uses.
 
 ### A backfill cursor is rejected
 
-On PostgreSQL and MySQL, use the table's complete, non-null, single-column
-primary key with a supported orderable type. A unique-only key or one column
-from a composite primary key is not sufficient, and the backfill cannot assign
-the cursor. A MySQL cursor cannot be a generated column or be automatically
+On PostgreSQL and MySQL, use an exact ordered, non-null primary or unique
+candidate-key tuple with supported comparison semantics. One column from a
+composite key is not sufficient, and the backfill cannot assign any cursor
+component. A MySQL cursor component cannot be generated or automatically
 updated. Keep integer and decimal cursor values exact; the JavaScript host
 carries them as text where needed rather than rounding them through `Number`.
 
-On SQLite, use the table's non-null, single-column primary key with declared
-`INTEGER` or `TEXT` affinity. Every existing cursor value must use the matching
-`integer` or `text` storage class. A unique-only key, composite primary key,
-nullable legacy key, or other or mixed storage class is rejected before that
-backfill changes rows. `WITHOUT ROWID` is supported when its primary key meets
-these rules.
+On SQLite, use an exact ordered, non-null primary or unique candidate-key tuple
+whose components have supported declared `INTEGER` or `TEXT` affinity. Every
+existing cursor value must use the matching `integer` or `text` storage class.
+A partial composite key, nullable legacy key, or unsupported/mixed storage class
+is rejected before that backfill changes rows. `WITHOUT ROWID` is supported when
+its candidate key meets these rules.
 
 ### A backfill did not include rows written while it was running
 

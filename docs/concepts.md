@@ -133,15 +133,16 @@ migration keeps its schema and data steps together. SQLite executes the same
 operation set through the Rust API; it is not a Node or CLI target.
 
 Pending deletes and backfills require explicit operator approval. Backfills also
-require the table's complete, non-null, single-column primary key as their
-cursor. Under the project lock, apply checks every pending approval-gated step
+require an exact ordered, non-null primary or unique candidate-key tuple plus an
+explicit cursor-stability mode. Under the project lock, apply checks every pending approval-gated step
 in the complete plan before the first authored step executes. A later
 unapproved delete or backfill cannot follow an earlier step from that plan.
 
 A backfill captures a fixed terminal cursor before its first batch. Each batch
 saves the last committed cursor, and retries stop at that original boundary.
-Rows inserted after capture are not guaranteed to be included and need a later
-migration. MySQL data targets must be trigger-free InnoDB tables. SQLite
+The bounded cohort does not cover concurrent inserts by itself: before capture,
+new rows must be made to fail the filter, or a final catch-up must run while
+writes are stopped. MySQL data targets must be trigger-free InnoDB tables. SQLite
 backfills additionally require declared `INTEGER` or `TEXT` affinity with
 consistently typed live cursor values. PostgreSQL and SQLite backfills reject
 pre-existing enabled user triggers; the managed PostgreSQL online rename
