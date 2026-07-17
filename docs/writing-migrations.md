@@ -166,6 +166,7 @@ Build every column with the immutable `t` and `ids` helpers:
 | Factory | Use |
 | --- | --- |
 | `ids.typeId({ prefix })` | TypeID 0.3 text |
+| `ids.ulid()` | ULID text |
 | `t.text({ caseSensitive? })` | Text |
 | `t.textArray()` | Text array |
 | `t.numeric({ precision?, scale? })` | Exact decimal number |
@@ -263,6 +264,13 @@ nonempty prefix can contain at most 63 characters, can use only lowercase
 letters and underscores, and must start and end with a lowercase letter. An
 empty prefix is also permitted; the examples in this guide use nonempty
 prefixes.
+
+Compose a ULID column as `ids.ulid()` (add `.primaryKey()` for a public ULID
+key). A ULID is 26 characters of canonical uppercase Crockford base32; the
+column carries no database default, so the application or migration supplies
+each value. Both TypeID and ULID keep their exact format metadata across a
+`.references()` foreign key, so a reference to a TypeID or ULID column stays
+format-safe on every dialect.
 
 Generated columns cannot also have a default or identity. PostgreSQL supports
 stored generated columns; SQLite and MySQL also support virtual generated
@@ -368,6 +376,37 @@ table("memberships").create({
   ],
 });
 ```
+
+A single-column relationship is usually a column-level `.references()`. For a
+relationship over more than one column, declare a table-level `foreignKeys`
+entry whose ordered `columns` line up positionally with the referenced key's
+ordered `columns`:
+
+```ts
+table("membership_events").create({
+  columns: {
+    account_id: t.uuid().notNull(),
+    organization_id: t.uuid().notNull(),
+    occurred_at: t.timestamp().notNull(),
+  },
+  foreignKeys: [
+    {
+      name: "membership_events_membership_fk",
+      columns: ["account_id", "organization_id"],
+      references: {
+        table: "memberships",
+        columns: ["account_id", "organization_id"],
+      },
+      onDelete: "cascade",
+    },
+  ],
+});
+```
+
+Repeating `.references()` on separate columns creates independent single-column
+foreign keys, never one composite relationship. A composite foreign key must
+reference a primary-key or unique tuple, and the two column lists must match in
+order and per-position type; the portable null rule is `MATCH SIMPLE`.
 
 Some table-level features are target-specific. If the same migration must run
 on all three databases, prefer a named unique index over `uniques`, and review
