@@ -880,10 +880,10 @@ For a composite foreign key, validation requires:
 - matching value format, TypeID prefix, ULID rules, and collation;
 - a referenced tuple backed by a primary-key or unique candidate-key contract.
 
-PostgreSQL, MySQL, and SQLite all support composite foreign keys. The current
-engine's PostgreSQL-only lowering is an implementation gap, not part of the
-public design. MySQL and SQLite lowering and introspection must be completed
-before zero-migrate claims cross-database composite-reference support.
+PostgreSQL, MySQL, and SQLite all support composite foreign keys. The transition
+implements ordered lowering and live introspection on all three targets; that
+catalog contract, rather than a PostgreSQL-only shortcut, is the basis for
+cross-database composite-reference support.
 
 The portable null contract is SQL `MATCH SIMPLE`: if any local component is
 null, the row does not need a matching parent. Required relationships declare
@@ -1466,7 +1466,7 @@ wire representation.
 
 ## Pre-release transition
 
-The current surface contains correctness hazards:
+The pre-transition surface contained correctness hazards:
 
 - `t.id()` hides storage, generation, nullability, and key semantics behind a
   single shortcut.
@@ -1474,7 +1474,15 @@ The current surface contains correctness hazards:
   for an injected text ID.
 - the existing internal typed ID uses 22-character Base62 UUIDv7, not TypeID;
 - `t.ref()` always becomes text;
-- identity metadata is not fully introspected for drift.
+- identity, ID-default, format-CHECK, and reference metadata was not fully
+  introspected for drift.
+
+The transition closes the final drift gap on PostgreSQL, MySQL, and SQLite:
+identity and auto-increment state, semantic ID defaults, TypeID/ULID format
+contracts, and ordered single/composite references with referential actions are
+now live-catalog comparison surfaces. Ordinary emission-only defaults remain
+outside drift comparison so catalog normalization does not create false
+positives.
 
 Because zero-migrate is pre-release, make these corrections in place. Do not
 change package versions or `CURRENT_IR_VERSION`. Keep one current recorder, one
@@ -1503,7 +1511,11 @@ Transition steps:
 11. Update policy so it validates or injects a declared shape without
    reinterpreting authored columns.
 12. Add identity, default, format, and reference drift introspection before
-   advertising complete drift detection.
+    advertising complete drift detection. Recover those facets from each live
+    catalog and compare their semantic contracts, including identity mode where
+    the dialect exposes one,
+    ID-generator swaps, TypeID prefix/ULID CHECK changes, ordered FK tuples,
+    target identity, and referential actions.
 
 The SDK, engine, generated IR types, fixtures, and documentation change together.
 Committed migration artifacts and checksums are regenerated as part of the
@@ -1554,7 +1566,9 @@ mismatch.
   and explicit no-cursor fallbacks.
 - Add `AlterPrimaryKey` planning for PostgreSQL constraint DDL, combined MySQL
   alteration, SQLite rebuilds, and generated-integer transitions.
-- Add identity and ID-default introspection and drift comparison.
+- Add identity, ID-default, TypeID/ULID format-CHECK, and ordered
+  single/composite-reference introspection and drift comparison on all three
+  targets.
 - Extend backfill cursor support before compact binary UUID storage is offered.
 
 ## Required test matrix
@@ -1609,6 +1623,11 @@ Tests must cover:
   plans on every target;
 - MySQL `AUTO_INCREMENT`, SQLite rowid and `AUTOINCREMENT`, and PostgreSQL
   identity transitions during primary-key replacement or removal;
+- clean-schema non-drift plus out-of-band identity add/drop and mode flips where
+  the dialect exposes a mode,
+  ID-default add/remove/generator swaps, TypeID-prefix and ULID CHECK
+  drop/alteration, and single/composite FK drop/repoint/order/action changes on
+  PostgreSQL, MySQL, and SQLite;
 - SQLite rebuild ordering, schema-object recreation, `foreign_key_check`,
   rollback, and unconditional foreign-key-enforcement restoration;
 - MySQL composite-foreign-key in-place and copying alteration plans without
