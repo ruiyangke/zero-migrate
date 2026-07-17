@@ -157,6 +157,17 @@ drop require an exact ordered `expectedColumns` precondition; their optional
 also refuses to strand an inbound foreign key without an exact alternate unique
 key.
 
+After preserving explicit integer IDs during an import, call
+`table(name).column(column).synchronizeIdentity({ writesQuiesced: "…" })`.
+PostgreSQL monotonically reconciles the column's owned identity/serial sequence,
+including non-unit and descending increments; cycling sequences are rejected
+because they cannot satisfy the no-backward contract. MySQL advances only an
+`AUTO_INCREMENT` column and pins `NO_AUTO_VALUE_ON_ZERO` so a structured import
+cannot silently replace an explicit legacy zero. SQLite validates an ordinary
+integer rowid as a no-op and monotonically reconciles `sqlite_sequence` only for
+`AUTOINCREMENT`. The required `writesQuiesced` name is coordination metadata
+shown in preview and status; the engine cannot prove the external invariant.
+
 ### Features inside `table(...).create({...})`
 
 | Create-time feature | PostgreSQL | SQLite | MySQL 8 |

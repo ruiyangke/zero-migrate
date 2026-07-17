@@ -612,6 +612,49 @@ table("users").backfill({
 });
 ```
 
+### Importing explicit integer identities
+
+Use the structured `insert` operation when an import must preserve explicit
+integer identity values, then reconcile the generator after the last imported
+row:
+
+```ts
+const orders = table("orders");
+
+orders.insert({
+  rows: [
+    { id: int64("0"), description: "legacy order" },
+    { id: int64("5000"), description: "imported order" },
+  ],
+});
+
+orders.column("id").synchronizeIdentity({
+  writesQuiesced: "orders_import_window",
+});
+```
+
+`writesQuiesced` is required, must contain non-whitespace text, and names the
+maintenance window or external invariant under which no concurrent writer can
+allocate a colliding value. The assertion is recorded in plan status and shown
+prominently in preview. Zero-migrate cannot prove that the named coordination
+actually exists.
+
+Synchronization is monotonic: it advances a behind generator to the next value
+that cannot collide with imported rows and never moves an already-ahead
+generator backward. PostgreSQL requires an owned identity or serial sequence.
+MySQL requires the selected column to be `AUTO_INCREMENT`. SQLite validates an
+ordinary `INTEGER PRIMARY KEY` as a no-op because rowid generation has no
+separate sequence; for `AUTOINCREMENT`, it reconciles `sqlite_sequence` without
+decreasing it. Apply rejects any other target shape.
+
+On MySQL, the structured import path pins `NO_AUTO_VALUE_ON_ZERO` for its
+session and restores the previous mode afterward. This is required so an
+explicit legacy `0` remains `0` instead of silently allocating a different ID.
+An external bulk loader or application connection is outside zero-migrate's
+session control and must enable that SQL mode itself before inserting a legacy
+zero; `synchronizeIdentity` cannot repair an ID that was already substituted.
+Keep writers quiesced through both the import and synchronization.
+
 Behavior to know:
 
 - Schema and data operations run in authored order. A mixed migration does not

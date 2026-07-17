@@ -425,7 +425,9 @@ cursor-update guard is installed and recovered through a journaled obligation
 around cohort capture. Backfills capture a fixed terminal tuple, commit bounded
 batches, and save a typed tuple checkpoint after each one. During apply,
 zero-migrate enables autocommit, foreign-key checks,
-and unique checks, then restores the connection's previous values.
+unique checks, and `NO_AUTO_VALUE_ON_ZERO`, then restores the connection's
+previous values. The SQL mode prevents a structured import containing an
+explicit legacy zero identity from silently receiving a generated value.
 Use a dedicated, idle database session. If the supplied MySQL session already
 has an active transaction, zero-migrate stops before changing autocommit or
 running migration SQL. The migration account needs read access to MySQL's
@@ -433,12 +435,14 @@ Performance Schema transaction tables, and the `transaction` instrument plus
 `events_transactions_current` consumer must be enabled. Zero-migrate stops if it
 cannot prove the session is idle.
 
-An explicit primary-key add, replace, or drop also requires the MySQL
-`LOCK TABLES` privilege for the target table and migration inflight table.
-Zero-migrate holds those locks while checking the exact live preconditions and
-writing the started marker, then performs the key swap and any declared
-`AUTO_INCREMENT` removal in one `ALTER TABLE`. It never disables
-`foreign_key_checks` for this operation.
+An explicit primary-key add, replace, or drop, and an identity synchronization,
+also require the MySQL `LOCK TABLES` privilege for the target table and
+migration inflight table. Zero-migrate holds those locks while checking the
+exact live preconditions and writing the started marker. A primary-key change
+then performs the key swap and any declared `AUTO_INCREMENT` removal in one
+`ALTER TABLE`; identity synchronization issues an `AUTO_INCREMENT` advance only
+when the uncached live counter is behind `MAX(column) + increment`. Neither path
+disables `foreign_key_checks`.
 
 If an interrupted schema step leaves an inflight marker, automatic apply stops.
 The marker is preserved and the schema statement is not replayed because MySQL
@@ -498,6 +502,8 @@ unknown-dependency migrations. A backfill that has saved progress without its
 final completion event produces an `inflight` step and a `partial` plan. Use the
 same names, owner, registry, and policy ceiling as apply. Backfill steps expose
 their cursor-stability mode, including the approved external-invariant name.
+Identity-synchronization steps retain the authored `writesQuiesced` assertion
+for operator review.
 
 The reply also reports `pendingContracts` for outstanding PostgreSQL online
 renames, `blocked` plans that wait on one of those obligations, and
@@ -514,8 +520,9 @@ list. `rolledBack` lists versions whose latest journal event is a rollback.
 
 Plan states are `applied`, `aborted`, `pending`, `partial`, `drifted`, `blocked`,
 and `unknownDependency`. Step kinds are `ddl`, `dml`, `backfill`,
-`onlineExpand`, `onlineContract`, and `sqliteRebuild`; step states are `pending`,
-`inflight`, `applied`, `aborted`, and `drifted`. Unexpected journal entries use
+`synchronizeIdentity`, `onlineExpand`, `onlineContract`, and `sqliteRebuild`;
+step states are `pending`, `inflight`, `applied`, `aborted`, and `drifted`.
+Unexpected journal entries use
 state `applied` or `inflight`, with completed kinds `apply`, `baseline`,
 `squash`, or `repeatable`. An expanded but unresolved rename normally appears
 as a `partial` plan with applied `onlineExpand` steps and pending
