@@ -99,8 +99,9 @@ jobs:
         run: pnpm --filter zero-migrate-cli test:docs
 
   # ---------------------------------------------------------------------------
-  # napi: build the shipped release `.node` addon to prove it links + loads (a
-  # single linux-x64 target; the full cross-target matrix is a release concern).
+  # napi: build the shipped release `.node` addon, then compile its generated
+  # schema artifact against the real authoring package (a single linux-x64
+  # target; the full cross-target matrix is a release concern).
   # ---------------------------------------------------------------------------
   napi:
     name: napi (release .node build)
@@ -122,8 +123,12 @@ jobs:
 
       - name: pnpm install
         run: pnpm install --frozen-lockfile
+      - name: build zero-migrate authoring package
+        run: pnpm --filter zero-migrate build
       - name: build release addon
         run: pnpm --filter zero-migrate-node build
+      - name: typecheck generated schema artifact
+        run: pnpm --filter zero-migrate-node test:codegen
 
   # ---------------------------------------------------------------------------
   # host: the CLI host e2e suite (test:host), which drives the REAL napi addon
