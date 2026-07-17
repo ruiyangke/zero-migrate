@@ -43,7 +43,9 @@ zero-migrate plan [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-
 zero-migrate preview [--dir <dir>] [--json]
 zero-migrate apply [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
 zero-migrate status [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+zero-migrate history --database-url <url> [--owner-app <app>] [--schema <schema>] [--json]
 zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
+zero-migrate --version
 ```
 
 There are no short flags. For flags that take a value, both `--flag value` and
@@ -61,26 +63,28 @@ rejects a positional directory after `plan`, `preview`, `apply`, or `status`.
 | `plan` | None | Validate migrations for PostgreSQL, MySQL, or SQLite |
 | `apply` | PostgreSQL or MySQL | Apply complete migrations in filename and authored-step order |
 | `status` | PostgreSQL or MySQL | Reconcile the migration directory with journal state |
+| `history` | PostgreSQL | Print the append-only migration audit trail |
 | `resolve-pending` | PostgreSQL | Complete or abort one outstanding online column rename |
 
-There is no CLI command for history, rollback, rendered SQL, SQLite apply, or a
-full database-backed dry run.
+There is no CLI command for rollback, rendered SQL, SQLite apply, or a full
+database-backed dry run.
 
 ## Flags and environment
 
 | Flag | Commands | Meaning |
 | --- | --- | --- |
 | `--dir <dir>` | `new`, `plan`, `preview`, `apply`, `status` | Migration directory; default `./migrations` |
-| `--database-url <url>` | `apply`, `status`, `resolve-pending` | PostgreSQL or MySQL connection URL; rename resolution requires PostgreSQL |
+| `--database-url <url>` | `apply`, `status`, `history`, `resolve-pending` | PostgreSQL or MySQL connection URL; `history` and rename resolution require PostgreSQL |
 | `--dialect <name>` | `plan` | Validation target: `postgres`, `mysql`, or `sqlite`; default `postgres` |
 | `--registry <file>` | `plan`, `apply`, `status` | Trusted JSON map of existing table names to owner application IDs |
-| `--owner-app <app>` | `plan`, `apply`, `status`, `resolve-pending` | Deploying application ID; default `app_cli` |
-| `--schema <schema>` | `plan`, `apply`, `status`, `resolve-pending` | Project schema/database; default `public` |
+| `--owner-app <app>` | `plan`, `apply`, `status`, `history`, `resolve-pending` | Deploying application ID; default `app_cli` |
+| `--schema <schema>` | `plan`, `apply`, `status`, `history`, `resolve-pending` | Project schema/database; default `public` |
 | `--approve` | `apply`, `resolve-pending` | Approve the exact reviewed destructive work |
 | `--apply` | `resolve-pending` | Keep the destination column and drop the source column |
 | `--abort` | `resolve-pending` | Keep the source column and drop the destination column |
-| `--json` | `plan`, `preview`, `status` | Machine-readable output |
+| `--json` | `plan`, `preview`, `status`, `history` | Machine-readable output |
 | `--help` | all | Print help and exit 0 |
+| `--version` | all | Print the zero-migrate version and exit 0 |
 
 On the offline `plan` command, `--schema` sets the project confinement boundary
 used to check explicit schema references. Pass the same value to plan, apply, and
@@ -588,15 +592,15 @@ On a fresh database, status may create the journal schema and tables before
 reporting the discovered migrations as pending. It is therefore not a strictly
 read-only probe.
 
-Use the Node `history()` function for full PostgreSQL journal events; there is no
-CLI history command.
+Use `zero-migrate history --database-url <url>` (PostgreSQL only) or the Node
+`history()` function for full PostgreSQL journal events.
 
 ## Exit codes
 
 | Result | Exit code |
 | --- | --- |
-| `help` or `--help` | 0 |
-| successful `new`, `preview`, `apply`, `status`, or `resolve-pending` | 0 |
+| `help` or `--help`, or `--version` | 0 |
+| successful `new`, `preview`, `apply`, `status`, `history`, or `resolve-pending` | 0 |
 | every `plan` result is valid | 0 |
 | any validation, import, runtime, configuration, or database error | 1 |
 
@@ -620,7 +624,7 @@ command also prints usage.
   migrator role and audit actor are not configurable.
 - Migration names are durable identity. Unchanged completed steps skip, while
   changes to applied content stop with checksum drift.
-- Rollback, history, rendered SQL, and a full database-backed dry run are absent.
+- Rollback, rendered SQL, and a full database-backed dry run are absent.
 
 ## Troubleshooting
 
@@ -636,7 +640,7 @@ command also prints usage.
 | Data step is skipped | Run `status --dir ...`; an unchanged applied step skips by design, while edited content reports checksum drift |
 | MySQL data step is refused | Use an InnoDB target without user triggers; zero-migrate refuses data migrations whose transactional side effects cannot be proven |
 | Backfill cursor is refused | Use an exact ordered, non-null primary or unique candidate-key tuple with compatible comparison semantics and choose `guardUpdates` or an approved named `externalInvariant`; otherwise use a maintenance-window one-shot, rebuild/temporary surrogate, or create a stable unique cursor first |
-| MySQL history is needed | The public history API is PostgreSQL-only; use plan-aware MySQL `status` for current migration state |
+| MySQL history is needed | `zero-migrate history` and the public history API are PostgreSQL-only; use plan-aware MySQL `status` for current migration state |
 | Project schema/database is missing | Create it first and grant access to it and its journal namespace |
 | Reapplying an edited migration reports drift | Restore the applied source and add a new uniquely named migration for the change |
 | A table is blocked by a pending rename | Finish the application cutover and run `resolve-pending <version> --apply --approve`, or return the application to the source column and use `--abort --approve` |

@@ -32,7 +32,7 @@ pre-release runtime.
 
 Run TypeScript integration scripts with the `tsx` setup from that guide, or
 compile them to JavaScript first. The current project is tested with Node.js 22,
-PostgreSQL 16, and MySQL 8. Offline `plan()` and `validate()` do not open a
+PostgreSQL 18, and MySQL 8. Offline `plan()` and `validate()` do not open a
 database, but they still require the completed source setup.
 
 ## Quick start

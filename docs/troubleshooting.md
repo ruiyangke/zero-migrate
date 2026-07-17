@@ -485,7 +485,7 @@ Saved backfill progress without a completion event reports that step as
 An explicitly aborted online rename appears in top-level `aborted`, not
 `applied` or `pending`. Its plan and deferred `onlineContract` steps have state
 `aborted`, while completed expansion steps stay `applied`. The original rename
-cannot become pending again. A plan that `dependsOn` that aborted identity stays
+cannot become pending again. A plan that depends on that aborted identity stays
 `blocked`; point it to a newly authored replacement migration instead.
 
 Also inspect `pendingContracts`, `blocked`, and `unexpectedJournal`.
