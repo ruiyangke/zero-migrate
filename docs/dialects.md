@@ -7,6 +7,11 @@ deployment paths can execute each kind of migration.
 MariaDB is not a supported target. Do not assume that MySQL 8 compatibility
 also covers MariaDB.
 
+**For the authoritative operation/feature compatibility tables, see the
+[generated support matrix](support-matrix.md).** It is generated directly from
+the engine's capability model and cannot drift without failing the Rust test
+suite.
+
 ## Start with two questions
 
 For every migration, ask:
@@ -175,8 +180,8 @@ shown in preview and status; the engine cannot prove the external invariant.
 | Columns and primary key | Yes | Yes | Yes |
 | Column-level unique | Yes | Yes | Yes |
 | Table-level `uniques` | Yes | No | Yes |
-| Table-level simple foreign key to `id` | Yes | No | Yes |
-| Table-level composite/non-`id` foreign key | Yes | No | No |
+| Table-level simple foreign key to `id` | Yes | Yes | Yes |
+| Table-level composite/non-`id` foreign key | Yes | Yes | Yes |
 | Table-level `checks` | Yes | No | No |
 | Exclusion constraints | Yes | No | No |
 | Plain btree indexes | Yes | Yes | Yes |
@@ -200,10 +205,10 @@ table("accounts").create({
 });
 ```
 
-For portable foreign keys, a follow-up named one-column foreign key to `id` has
-the widest support. Validate the complete migration on SQLite rather than
-assuming that a foreign key accepted in another position will also work inside
-the create call.
+Table-level foreign keys are portable across all three targets, including
+composite keys and references to non-`id` columns. Local and referenced column
+tuples must be nonempty, have the same arity, and preserve their intended
+positional order. Validate the complete migration for every target.
 
 ## Indexes
 
@@ -237,8 +242,8 @@ operator setup. Provision those prerequisites before apply.
 | --- | --- | --- | --- |
 | Add unique constraint | Yes | Yes | Yes |
 | Add one-column foreign key to `id` | Yes | Yes | Yes |
-| Composite or non-`id` foreign key | Yes | No | No |
-| Deferrable foreign key | Yes | No | No |
+| Composite or non-`id` foreign key | Yes | Yes | Yes |
+| Deferrable foreign key | Yes | Yes | No |
 | Add standalone check | Yes | No | No |
 | Exclusion constraint | Yes | No | No |
 | Drop constraint | Yes | Yes | Yes |
