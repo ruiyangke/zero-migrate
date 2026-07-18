@@ -207,6 +207,7 @@ The Node API exposes:
 ```ts
 await apply({
   // migration, identity, registry, and driver...
+  policyCeiling,
   approved: true,
 });
 ```
@@ -214,7 +215,8 @@ await apply({
 The CLI uses the equivalent non-interactive flag:
 
 ```bash
-zero-migrate apply --dir ./migrations --database-url "$DATABASE_URL" --approve
+zero-migrate apply --dir ./migrations --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml --approve
 ```
 
 Bind approval to the exact reviewed content and checksum, not only a mutable
@@ -235,10 +237,10 @@ executes the first authored step. A later unapproved delete or backfill therefor
 cannot leave an earlier insert, update, or schema step from that same plan
 committed. This guarantee covers approval refusal, not every runtime failure.
 
-The public Node API uses a confined default and optionally accepts a trusted
-table-shape `policyCeiling`. A platform may make additional policy decisions in
-a Rust host, but arbitrary custom executor policy is not accepted by the public
-Node `apply()` options yet.
+The public Node API requires a trusted table-shape `policyCeiling`; CLI apply
+and plan-aware status require the same policy through `--policy-ceiling`. A
+platform may make additional policy decisions in a Rust host, but arbitrary
+custom executor policy is not accepted by the public Node `apply()` options yet.
 
 ## Apply behavior
 
@@ -316,8 +318,11 @@ The approved initial `apply()` returns the outstanding obligation in
 `pendingContracts`:
 
 ```ts
+import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as renameUsersDisplayName from "./migrations/20260716120000_rename_users_display_name.js";
+
+const policyCeiling = await readFile("./policy.toml", "utf8");
 
 const result = await apply({
   migration: renameUsersDisplayName,
@@ -325,6 +330,7 @@ const result = await apply({
   projectSchema: "app_demo",
   registry: { users: "app_demo" },
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
+  policyCeiling,
   approved: true,
   appliedBy: "deploy:rename-start",
 });

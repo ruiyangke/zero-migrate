@@ -105,9 +105,11 @@ An untrusted project policy can narrow a trusted ceiling but cannot widen it.
 Hard safety rules still win even when a capability is granted.
 
 Custom policy can drive Rust planning and host decisions. JavaScript `apply()`
-and plan-aware `status()` can receive a trusted table-shape `policyCeiling`;
-without one, they use the confined no-injection posture. A general end-to-end
-custom executor policy is not exposed yet. See [Policy model](policy.md).
+and plan-aware `status()` require a trusted table-shape `policyCeiling`; the CLI
+requires the same input as a file. There is no confined no-injection fallback:
+hosts that want author-owned shape must supply an explicit no-inject policy. A
+general end-to-end custom executor policy is not exposed yet. See
+[Policy model](policy.md).
 
 ## Approval
 

@@ -1077,8 +1077,9 @@ The package also supports privileged PostgreSQL administration:
 
 These operations require explicit capabilities from the apply policy. Merely
 targeting PostgreSQL does not grant them. The Node `policyCeiling` option is for
-trusted table-shape policy and the CLI has no policy option; neither path grants
-these privileged capabilities. Use a trusted Rust/custom host.
+trusted table-shape policy, as is the CLI's required `--policy-ceiling` file;
+neither path grants these privileged capabilities. Use a trusted Rust/custom
+host.
 See [Security model](security-model.md) and
 [Policy configuration](policy.md).
 

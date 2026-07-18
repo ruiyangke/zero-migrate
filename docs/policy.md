@@ -4,9 +4,10 @@ Policy lets a platform operator decide what a migration may do, where it may do
 it, and which safety requirements it must satisfy.
 
 > Custom policy can currently drive Rust planning, table-shape, and host
-> decisions. JavaScript `apply()` and plan-aware `status()` accept an optional
-> trusted table-shape ceiling through `policyCeiling`. That option is not a
-> general custom executor policy, which is not exposed yet.
+> decisions. JavaScript `apply()` and plan-aware `status()` require a trusted
+> table-shape ceiling through `policyCeiling`; CLI apply/status require the same
+> input through `--policy-ceiling <file>`. These inputs are not a general custom
+> executor policy, which is not exposed yet.
 
 ## The model
 
@@ -211,8 +212,9 @@ shape needs explicit authority and should be reserved for trusted workflows.
 Current injection support is intentionally narrow:
 
 - injected column types are limited to `text`, `timestamptz`, and `integer`;
-- an injected column `default` can be parsed but is not applied to the resolved
-  table yet, so do not rely on it;
+- injected column defaults use a closed mapping: timestamps accept `now`, `now()`,
+  or `current_timestamp`; integers accept an `i64` literal; and text accepts a
+  single-quoted SQL string literal (including doubled-quote escaping);
 - injected index columns are applied, but the configured index name is not
   preserved in the resolved migration.
 

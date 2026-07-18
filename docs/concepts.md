@@ -225,10 +225,10 @@ Policy controls which capabilities a migration may use, including destructive
 changes, raw SQL, cross-schema access, roles, extensions, and optional required
 table shape.
 
-The public Node API uses a confined default and optionally accepts a trusted
-table-shape `policyCeiling`. Platforms that need broader custom policy can make
-those decisions in a Rust host, but arbitrary executor policy is not available
-to the public apply API yet.
+The public Node API requires a trusted table-shape `policyCeiling` for apply and
+plan-aware status. The CLI requires the same policy as a file. Platforms that
+need broader custom policy can make those decisions in a Rust host, but
+arbitrary executor policy is not available to the public apply API yet.
 
 Pending destructive work and backfills require explicit operator approval. The
 Node API uses `approved: true`; the CLI uses `--approve`. Approval should always

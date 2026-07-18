@@ -238,8 +238,11 @@ Review the actual destructive change, then pass approval from trusted deployment
 code:
 
 ```typescript
+import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715120000_remove_legacy_field.js";
+
+const policyCeiling = await readFile("./policy.toml", "utf8");
 
 await apply({
   migration,
@@ -252,6 +255,7 @@ await apply({
     kind: "postgres",
     url: process.env.DATABASE_URL!,
   },
+  policyCeiling,
   approved: true,
   appliedBy: "deploy:release-2026-07-15",
 });
@@ -261,7 +265,8 @@ await apply({
 migration module. For a reviewed CLI run, use:
 
 ```bash
-zero-migrate apply --dir ./migrations --database-url "$DATABASE_URL" --approve
+zero-migrate apply --dir ./migrations --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml --approve
 ```
 
 Pending deletes and backfills require approval even when no schema object is
@@ -308,6 +313,7 @@ Run plan-aware status and find the table in `pendingContracts`:
 zero-migrate status \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo \

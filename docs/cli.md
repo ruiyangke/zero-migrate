@@ -41,8 +41,8 @@ setup before using commands other than `new`.
 zero-migrate new <name> [--dir <dir>]
 zero-migrate plan [--dir <dir>] [--dialect <name>] [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
 zero-migrate preview [--dir <dir>] [--json]
-zero-migrate apply [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
-zero-migrate status [--dir <dir>] --database-url <url> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
+zero-migrate apply [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--approve]
+zero-migrate status [--dir <dir>] --database-url <url> --policy-ceiling <file> [--registry <file>] [--owner-app <app>] [--schema <schema>] [--json]
 zero-migrate history --database-url <url> [--owner-app <app>] [--schema <schema>] [--json]
 zero-migrate resolve-pending <pending-version> (--apply | --abort) --approve --database-url <url> [--owner-app <app>] [--schema <schema>]
 zero-migrate --version
@@ -77,6 +77,7 @@ database-backed dry run.
 | `--database-url <url>` | `apply`, `status`, `history`, `resolve-pending` | PostgreSQL or MySQL connection URL; `history` and rename resolution require PostgreSQL |
 | `--dialect <name>` | `plan` | Validation target: `postgres`, `mysql`, or `sqlite`; default `postgres` |
 | `--registry <file>` | `plan`, `apply`, `status` | Trusted JSON map of existing table names to owner application IDs |
+| `--policy-ceiling <file>` | `apply`, `status` | Required operator-controlled table-shape policy ceiling in TOML |
 | `--owner-app <app>` | `plan`, `apply`, `status`, `history`, `resolve-pending` | Deploying application ID; default `app_cli` |
 | `--schema <schema>` | `plan`, `apply`, `status`, `history`, `resolve-pending` | Project schema/database; default `public` |
 | `--approve` | `apply`, `resolve-pending` | Approve the exact reviewed destructive work |
@@ -100,6 +101,15 @@ status.
 An explicit flag wins over its environment fallback. Prefer a secret manager or
 injected environment variable to putting production credentials in shell
 history.
+
+`--policy-ceiling` has no environment fallback or embedded default. The CLI
+reads the file and passes its exact TOML bytes to both apply and plan-aware
+status. Use the same file for both commands. If the platform injects no columns,
+the file can be the explicit no-inject document:
+
+```toml
+policy_version = 1
+```
 
 The URL scheme selects the database:
 
@@ -275,6 +285,7 @@ PostgreSQL:
 zero-migrate apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
@@ -286,6 +297,7 @@ MySQL:
 zero-migrate apply \
   --dir ./migrations \
   --database-url "$MYSQL_URL" \
+  --policy-ceiling ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
@@ -302,6 +314,7 @@ For a reviewed delete or backfill, add approval explicitly:
 zero-migrate apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --schema app_demo \
   --owner-app app_demo \
   --approve
@@ -344,6 +357,7 @@ Current CLI defaults are:
 | Setting | Value |
 | --- | --- |
 | ownership registry | `{}` unless `--registry` is supplied |
+| table-shape policy | none; `--policy-ceiling` is required |
 | destructive approval | `false` |
 | PostgreSQL migrator role | none |
 | audit actor | `host` for apply; `cli` for rename resolution |
@@ -421,6 +435,7 @@ Run the initial apply with approval because it includes a bounded backfill:
 zero-migrate apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo \
@@ -496,6 +511,7 @@ not pending.
 zero-migrate status \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
@@ -584,9 +600,9 @@ An aborted plan does not satisfy `dependsOn`. A dependent supplied plan remains
 `blocked`, and apply refuses to run it. Author a new replacement migration and
 update the dependency to its new identity before continuing.
 
-Use the same `--owner-app`, `--schema`, migration names, and source used for
-apply. Changing identity inputs or editing an applied migration can make status
-report a different plan or checksum drift.
+Use the same `--owner-app`, `--schema`, `--policy-ceiling`, migration names, and
+source used for apply. Changing identity inputs or editing an applied migration
+can make status report a different plan or checksum drift.
 
 On a fresh database, status may create the journal schema and tables before
 reporting the discovered migrations as pending. It is therefore not a strictly

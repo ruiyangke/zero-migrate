@@ -214,6 +214,19 @@ export DATABASE_URL="postgres://user:password@127.0.0.1:5432/example"
 
 In a real deployment, inject this value from your secret manager.
 
+Create the operator-controlled table-shape policy used by both apply and
+plan-aware status. This walkthrough keeps every column author-owned, so its
+explicit no-inject ceiling is:
+
+```toml
+# policy.toml
+policy_version = 1
+```
+
+There is no CLI or Node default for this input. Platforms that inject columns,
+indexes, or a primary key should put those rules in this file instead; see
+[Policy model](policy.md).
+
 ## 6. Apply the migration
 
 > **Authored order is execution order:** the table creation, index, and insert in
@@ -226,6 +239,7 @@ Apply the directory:
 pnpm exec tsx dist/cli-bin.js apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --schema app_demo \
   --owner-app app_demo
 ```
@@ -265,6 +279,7 @@ transform, stops with checksum drift.
 pnpm exec tsx dist/cli-bin.js status \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --schema app_demo \
   --owner-app app_demo \
   --json
@@ -295,8 +310,11 @@ Applications and deployment tools can validate and apply an imported migration
 directly:
 
 ```ts
+import { readFile } from "node:fs/promises";
 import { apply, plan } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_users.js";
+
+const policyCeiling = await readFile("./policy.toml", "utf8");
 
 const report = plan({
   migration,
@@ -318,6 +336,7 @@ const result = await apply({
     kind: "postgres",
     url: process.env.DATABASE_URL!,
   },
+  policyCeiling,
   approved: false,
   appliedBy: "deploy",
   nameFallback: "create_users",
@@ -354,6 +373,10 @@ provide the trusted ownership registry:
 import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715100000_add_user_timezone.js";
 
+const policyCeiling = await import("node:fs/promises").then(({ readFile }) =>
+  readFile("./policy.toml", "utf8"),
+);
+
 await apply({
   migration,
   ownerApp: "app_demo",
@@ -365,6 +388,7 @@ await apply({
     kind: "postgres",
     url: process.env.DATABASE_URL!,
   },
+  policyCeiling,
   appliedBy: "deploy",
   nameFallback: "add_user_timezone",
 });
@@ -448,6 +472,7 @@ Then start the rename with approval because it includes a bounded backfill:
 pnpm exec tsx dist/cli-bin.js apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo \
@@ -516,6 +541,7 @@ export DATABASE_URL="mysql://user:password@127.0.0.1:3306/app_demo"
 pnpm exec tsx dist/cli-bin.js apply \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
+  --policy-ceiling ./policy.toml \
   --schema app_demo \
   --owner-app app_demo
 ```

@@ -479,8 +479,8 @@ These PostgreSQL-only features require an explicit capability:
 
 Capabilities must come from trusted host policy. A migration cannot grant
 itself permission by importing an API or targeting PostgreSQL. The Node
-`policyCeiling` option is limited to trusted table-shape policy, and the CLI has
-no policy option. These operations require a reviewed Rust/custom host.
+`policyCeiling` input and CLI `--policy-ceiling` file are limited to trusted
+table-shape policy. These operations require a reviewed Rust/custom host.
 
 ## Using `dialect()`
 
