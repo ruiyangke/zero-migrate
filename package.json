@@ -7,5 +7,8 @@
   "scripts": {
     "build": "pnpm --filter zero-migrate build && pnpm --filter zero-migrate-cli build",
     "test": "pnpm --filter zero-migrate test"
+  },
+  "devDependencies": {
+    "tsx": "catalog:"
   }
 }

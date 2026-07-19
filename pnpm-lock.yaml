@@ -15,7 +15,11 @@ catalogs:
 
 importers:
 
-  .: {}
+  .:
+    devDependencies:
+      tsx:
+        specifier: 'catalog:'
+        version: 4.23.1
 
   crates/zero-migrate-node:
     devDependencies:
