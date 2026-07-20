@@ -4,20 +4,21 @@ Policy lets a platform operator decide what a migration may do, where it may do
 it, and which safety requirements it must satisfy.
 
 > Custom policy can currently drive Rust planning, table-shape, and host
-> decisions. JavaScript `apply()` and plan-aware `status()` require a trusted
-> table-shape ceiling through `policyCeiling`; CLI apply/status require the same
-> input through `--policy-ceiling <file>`. These inputs are not a general custom
+> decisions. JavaScript database verbs require an ordered table-shape charter
+> stack through `policy`; CLI database verbs accept the same stack by
+> repeating `--policy <file>`. The first entry is the trusted root/bound
+> and later entries may only narrow it. These inputs are not a general custom
 > executor policy, which is not exposed yet.
 
 ## The model
 
 ```text
-trusted root ceiling
+trusted root charter
         │
         ├── optional trusted environment rules
         │
         ▼
-finalized ceiling
+finalized charter
         ▲
         │ admits
 untrusted project draft
@@ -29,8 +30,8 @@ effective policy
         └── host approval decisions
 ```
 
-A project draft can narrow a trusted ceiling. It cannot grant itself authority
-that the ceiling did not allow.
+A project draft can narrow a trusted charter. It cannot grant itself authority
+that the charter did not allow.
 
 ## Public Rust types
 
@@ -38,25 +39,25 @@ that the ceiling did not allow.
 | --- | --- |
 | `PolicyRegistry` | Defines available policy keys and their value/scope rules |
 | `KnobDef` / `KnobKey` / `KnobKind` | Define a policy capability or obligation |
-| `RootCeiling` | Trusted outer authority |
+| `RootCharter` | Trusted outer authority |
 | `TrustedDoc` | Trusted environment/catalog policy |
 | `PolicyDoc` | Ordinary policy document, including an untrusted project draft |
-| `AssembledCeiling` | Trusted layers waiting for final validation |
-| `Ceiling` | Finalized trusted ceiling accepted by admission |
+| `AssembledCharter` | Trusted layers waiting for final validation |
+| `Charter` | Finalized trusted charter accepted by admission |
 | `EffectivePolicy` | Admitted, queryable result used by the engine and host |
 | `SealedPolicy` | Authenticated representation for crossing a storage/process boundary |
 
 ## Quick start
 
-For one simple trusted ceiling, no separate project draft, and no mandatory
+For one simple trusted charter, no separate project draft, and no mandatory
 injection rule:
 
 ```rust
 use zero_migrate::{
-    GuardConfig, SqlDialect, effective_policy_from_ceiling_toml,
+    GuardConfig, SqlDialect, effective_policy_from_charter_toml,
 };
 
-let effective = effective_policy_from_ceiling_toml(policy_toml)?;
+let effective = effective_policy_from_charter_toml(policy_toml)?;
 let guard =
     GuardConfig::from_policy(effective.clone(), SqlDialect::Postgres);
 ```
@@ -67,7 +68,7 @@ integration beyond the current public executor configuration; do not advertise a
 custom plan as an end-to-end apply guarantee.
 
 The convenience helper admits the root directly. Use the full
-`finalize_ceiling` flow below whenever trusted layers are composed or mandatory
+`finalize_charter` flow below whenever trusted layers are composed or mandatory
 injection must be checked against the complete create-table scope.
 
 ## Full admission flow
@@ -77,17 +78,17 @@ For trusted layering plus an untrusted project draft:
 ```rust
 use zero_migrate_ir::policy_registry::builtin_registry;
 use zero_migrate_policy::{
-    LoadContext, PolicyDoc, RootCeiling, TrustedDoc,
-    admit, finalize_ceiling, overlay,
+    LoadContext, PolicyDoc, RootCharter, TrustedDoc,
+    admit, finalize_charter, overlay,
 };
 
 let registry = builtin_registry();
-let root = RootCeiling::parse_toml(root_toml, &registry)?;
+let root = RootCharter::parse_toml(root_toml, &registry)?;
 let environment =
     TrustedDoc::register_catalog_entry(environment_toml, &registry)?;
 
 let assembled = overlay(root.as_trusted(), &environment, &registry)?;
-let ceiling = finalize_ceiling(assembled)?;
+let charter = finalize_charter(assembled)?;
 
 let draft = PolicyDoc::parse_toml(
     project_toml,
@@ -95,14 +96,14 @@ let draft = PolicyDoc::parse_toml(
     LoadContext::NonRootLayer,
 )?;
 
-let effective = admit(&ceiling, &draft, &registry)?;
+let effective = admit(&charter, &draft, &registry)?;
 ```
 
 Only register operator-controlled bytes as `TrustedDoc`. Creator-controlled
 documents must use `LoadContext::NonRootLayer`.
 
 Use `restrict` instead of `overlay` when one trusted layer must only tighten
-another. Always finalize an assembled ceiling before admitting a draft.
+another. Always finalize an assembled charter before admitting a draft.
 
 ## Policy document
 
@@ -117,7 +118,7 @@ include = ["app_acme"]
 
 Unknown fields, keys, value shapes, and future policy versions are rejected.
 
-A practical ceiling:
+A practical charter:
 
 ```toml
 policy_version = 1
@@ -154,7 +155,7 @@ columns = [
 
 | Section | Meaning |
 | --- | --- |
-| `[[grant]]` | Capability or resource ceiling |
+| `[[grant]]` | Capability or resource charter |
 | `[[require]]` | Safety obligation |
 | `[[inject]]` | Operator-owned columns, indexes, or primary-key shape |
 | `[[validate]]` | Structural rule for matching tables |

@@ -242,7 +242,7 @@ import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715120000_remove_legacy_field.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = [await readFile("./policy.toml", "utf8")];
 
 await apply({
   migration,
@@ -255,7 +255,7 @@ await apply({
     kind: "postgres",
     url: process.env.DATABASE_URL!,
   },
-  policyCeiling,
+  policy,
   approved: true,
   appliedBy: "deploy:release-2026-07-15",
 });
@@ -266,7 +266,7 @@ migration module. For a reviewed CLI run, use:
 
 ```bash
 zero-migrate apply --dir ./migrations --database-url "$DATABASE_URL" \
-  --policy-ceiling ./policy.toml --approve
+  --policy ./policy.toml --approve
 ```
 
 Pending deletes and backfills require approval even when no schema object is
@@ -313,7 +313,7 @@ Run plan-aware status and find the table in `pendingContracts`:
 zero-migrate status \
   --dir ./migrations \
   --database-url "$DATABASE_URL" \
-  --policy-ceiling ./policy.toml \
+  --policy ./policy.toml \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo \
@@ -481,7 +481,7 @@ the interrupted backfill began.
 Node status calculates plan-aware state on PostgreSQL and MySQL when you pass
 the ordered `migrations` set. The CLI loads that set from `--dir` automatically.
 If `pending` is unexpectedly empty, confirm the intended directory, exported
-names, `ownerApp`, `projectSchema`, registry, and policy ceiling match apply.
+names, `ownerApp`, `projectSchema`, registry, and policy charter match apply.
 
 Inspect `plans` for each migration and its schema, data, and backfill step. A
 mixed migration can be `partial`, and edited applied content is `drifted`.

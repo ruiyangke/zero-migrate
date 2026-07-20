@@ -1076,10 +1076,10 @@ The package also supports privileged PostgreSQL administration:
 - whole-statement `raw({ sql, reason })`.
 
 These operations require explicit capabilities from the apply policy. Merely
-targeting PostgreSQL does not grant them. The Node `policyCeiling` option is for
-trusted table-shape policy, as is the CLI's required `--policy-ceiling` file;
-neither path grants these privileged capabilities. Use a trusted Rust/custom
-host.
+targeting PostgreSQL does not grant them. The Node `policy` option is an
+ordered table-shape policy stack, as are the CLI's repeatable required
+`--policy` files; neither path grants these privileged capabilities. Use
+a trusted Rust/custom host.
 See [Security model](security-model.md) and
 [Policy configuration](policy.md).
 

@@ -62,14 +62,14 @@ Validate it and apply it:
 
 The host must supply an operator-controlled policy document. For an
 author-owned table shape, `policy.toml` can contain the explicit no-inject
-ceiling `policy_version = 1`.
+charter `policy_version = 1`.
 
 ```ts
 import { readFile } from "node:fs/promises";
 import { apply, plan } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715153045_create_users.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = [await readFile("./policy.toml", "utf8")];
 
 const check = plan({
   migration,
@@ -92,7 +92,7 @@ const outcome = await apply({
     url: process.env.DATABASE_URL!,
   },
   registry: {},
-  policyCeiling,
+  policy,
   appliedBy: "deploy-service",
 });
 
@@ -313,7 +313,7 @@ await apply({
   projectSchema: "app_demo",
   registry: { users: "app_demo" },
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
-  policyCeiling,
+  policy,
 });
 ```
 
@@ -333,7 +333,7 @@ interface HostApplyOptions {
   projectSchema: string;
   driver: DriverConfig;
   registry?: Record<string, string>;
-  policyCeiling: string;
+  policy: readonly string[];
   migratorRole?: string;
   approved?: boolean;
   appliedBy?: string;
@@ -362,7 +362,7 @@ function apply(options: HostApplyOptions): Promise<ApplyOutcome>;
 | `projectSchema` | Yes | PostgreSQL schema or MySQL database |
 | `driver` | Yes | Database kind and URL |
 | `registry` | No | Table-owner map; default `{}` |
-| `policyCeiling` | Yes | Trusted table-shape ceiling in TOML; use the same bytes for plan-aware status |
+| `policy` | Yes | Ordered TOML documents; first is the trusted root/bound, later entries may only narrow |
 | `migratorRole` | No | PostgreSQL role used for migration work; ignored by MySQL |
 | `approved` | No | Approval for destructive work and backfills; default `false` |
 | `appliedBy` | No | Audit actor; default `host` |
@@ -377,7 +377,7 @@ const outcome = await apply({
   projectSchema: "app_demo",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
   registry: {},
-  policyCeiling,
+  policy,
   migratorRole: "migrator_app_demo",
   approved: false,
   appliedBy: "deploy-service",
@@ -396,7 +396,7 @@ const outcome = await apply({
   projectSchema: "app_demo",
   driver: { kind: "mysql", url: process.env.MYSQL_URL! },
   registry: {},
-  policyCeiling,
+  policy,
   approved: false,
   appliedBy: "deploy-service",
 });
@@ -429,11 +429,14 @@ follow an already-committed earlier step from that plan.
 Each call opens and closes its own database connection. The caller does not need
 to close it manually.
 
-`policyCeiling` is required trusted host input for table-shape policy. There is
-no ambient default: callers that want author-owned columns must explicitly pass
-a no-inject document such as `policy_version = 1`. It is not a
-migration-supplied setting or a general custom executor policy, and it does not
-make privileged PostgreSQL operations available through this API.
+`policy` is a required, non-empty ordered array of table-shape policy
+documents. The first document is the trusted root charter and bound. Each later
+document is an untrusted narrowing layer; only the root may declare mandatory
+injects. There is no ambient default: callers that want author-owned columns
+must explicitly pass a one-element no-inject array such as
+`["policy_version = 1\n"]`. These are not migration-supplied settings or a
+general custom executor policy, and they do not make privileged PostgreSQL
+operations available through this API.
 
 ### Understanding the result
 
@@ -523,7 +526,7 @@ import { readFile } from "node:fs/promises";
 import { apply, resolvePending } from "zero-migrate-cli";
 import * as renameUsersDisplayName from "./migrations/20260716120000_rename_users_display_name.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = [await readFile("./policy.toml", "utf8")];
 
 const outcome = await apply({
   migration: renameUsersDisplayName,
@@ -531,7 +534,7 @@ const outcome = await apply({
   projectSchema: "app_demo",
   registry: { users: "app_demo" },
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
-  policyCeiling,
+  policy,
   approved: true,
   appliedBy: "deploy:rename-start",
 });
@@ -598,6 +601,7 @@ interface ResolvePendingOptions {
   driver: { kind: "postgres"; url: string };
   approved: true;
   migratorRole?: string;
+  policy: readonly string[];
   appliedBy?: string;
 }
 
@@ -615,6 +619,7 @@ await resolvePending({
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
   approved: true,
   migratorRole: "migrator_app_demo",
+  policy,
   appliedBy: "deploy:rename-finish",
 });
 ```
@@ -657,19 +662,18 @@ interface HostStatusBaseOptions {
   projectSchema: string;
   driver: DriverConfig;
   registry?: Record<string, string>;
+  policy: readonly string[];
 }
 
 interface HostReconciledStatusOptions extends HostStatusBaseOptions {
   migrations: readonly MigrationModule[];
   nameFallbacks?: readonly string[];
-  policyCeiling: string;
   nameFallback?: string;
 }
 
 interface HostJournalStatusOptions extends HostStatusBaseOptions {
   migrations?: undefined;
   nameFallbacks?: never;
-  policyCeiling?: never;
   nameFallback?: never;
 }
 
@@ -744,14 +748,14 @@ import { readFile } from "node:fs/promises";
 import * as createUsers from "./migrations/20260715153045_create_users.js";
 import * as backfillUsers from "./migrations/20260715154500_backfill_users.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = [await readFile("./policy.toml", "utf8")];
 
 const state = await status({
   ownerApp: "app_demo",
   projectSchema: "app_demo",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
   registry: { users: "app_demo" },
-  policyCeiling,
+  policy,
   migrations: [createUsers, backfillUsers],
   nameFallbacks: ["20260715153045_create_users", "20260715154500_backfill_users"],
 });
@@ -761,7 +765,7 @@ for (const plan of state.plans ?? []) {
 }
 ```
 
-Pass the ordered `migrations` set and the same required `policyCeiling` bytes
+Pass the ordered `migrations` set and the same required `policy` stack
 used by apply for plan-aware status on PostgreSQL or MySQL.
 The modules follow the same planning rules as apply, so `plans[].steps` includes
 every DDL, insert/update/delete, backfill, and online step. Top-level `applied`,
@@ -815,13 +819,13 @@ is `partial`. A progress checksum that no longer matches the supplied migration
 is `drifted`.
 
 If `nameFallbacks` is present, it must have the same length as `migrations`.
-Supply the same `ownerApp`, registry, names, and policy ceiling used for apply so
-status derives the same identities and plan shape.
+Supply the same `ownerApp`, registry, names, and policy charter stack used for
+apply so status derives the same identities and plan shape.
 
 When `migrations` is omitted, status preserves the older journal-only view. It
-does not lower a table shape, so `policyCeiling` is omitted too. It cannot
-calculate pending plans or complete mixed-plan state, so prefer the supplied-set
-form for deployment decisions.
+does not lower a table shape, but still requires the executor's explicit
+`policy` stack. It cannot calculate pending plans or complete mixed-plan
+state, so prefer the supplied-set form for deployment decisions.
 
 On a fresh database, the call may create the journal namespace. With supplied
 migrations it reports those plans as pending; the journal-only form can return
@@ -837,6 +841,7 @@ interface HostHistoryOptions {
   ownerApp: string;
   projectSchema: string;
   driver: DriverConfig;
+  policy: readonly string[];
 }
 ```
 
@@ -863,6 +868,7 @@ const audit = await history({
   ownerApp: "app_demo",
   projectSchema: "app_demo",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
+  policy,
 });
 
 for (const event of audit.events) {

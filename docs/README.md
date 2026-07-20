@@ -82,7 +82,7 @@ from the longer-term platform direction.
 | Pending migration calculation in Node | Available when `status()` receives the migration modules; CLI `status` loads its directory |
 | High-level rollback | Not available; use reviewed roll-forward migrations |
 | Database-backed dry run from Node | Not available |
-| Trusted table-shape policy ceiling in Node | Required on `apply()` and plan-aware `status()`; CLI apply/status require `--policy-ceiling` |
+| Trusted table-shape policy charter in Node | Required on `apply()` and plan-aware `status()`; CLI apply/status require `--policy` |
 | Arbitrary custom executor policy in Node | Not exposed by the current public options |
 | JavaScript package installation | Not published to npm; use the source-checkout setup |
 

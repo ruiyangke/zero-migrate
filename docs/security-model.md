@@ -101,15 +101,16 @@ Policy can limit raw SQL, schema access, role/grant operations, extensions,
 functions, partitions, RLS, destructive changes, and operator-owned table
 shape.
 
-An untrusted project policy can narrow a trusted ceiling but cannot widen it.
+An untrusted project policy can narrow a trusted charter but cannot widen it.
 Hard safety rules still win even when a capability is granted.
 
-Custom policy can drive Rust planning and host decisions. JavaScript `apply()`
-and plan-aware `status()` require a trusted table-shape `policyCeiling`; the CLI
-requires the same input as a file. There is no confined no-injection fallback:
-hosts that want author-owned shape must supply an explicit no-inject policy. A
-general end-to-end custom executor policy is not exposed yet. See
-[Policy model](policy.md).
+Custom policy can drive Rust planning and host decisions. JavaScript database
+verbs require an ordered table-shape `policy` array: the first document
+is the trusted root/bound and later documents may only narrow it. The CLI accepts
+the same stack through repeatable `--policy` flags. There is no confined
+no-injection fallback: hosts that want author-owned shape must supply an explicit
+no-inject root policy. A general end-to-end custom executor policy is not exposed
+yet. See [Policy model](policy.md).
 
 ## Approval
 

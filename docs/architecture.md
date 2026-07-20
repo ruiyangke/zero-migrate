@@ -87,7 +87,7 @@ import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as migration from "./migrations/20260715090000_create_projects.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = [await readFile("./policy.toml", "utf8")];
 
 await apply({
   migration,
@@ -100,7 +100,7 @@ await apply({
     kind: "postgres",
     url: process.env.DATABASE_URL!,
   },
-  policyCeiling,
+  policy,
   approved: false,
   appliedBy: "deploy:production",
 });
@@ -146,12 +146,13 @@ Policy controls sensitive capabilities such as destructive operations, raw SQL,
 cross-schema access, roles, extensions, and optional platform-owned table
 requirements.
 
-The public Node API requires a trusted table-shape `policyCeiling` for apply and
-plan-aware status, and the CLI accepts those same bytes through a required
-policy file. Custom policy composition is available to Rust hosts for planning
-and host decisions. Node `apply()` and `resolvePending()` use their documented
-options and coarse approval boolean; neither accepts an arbitrary custom
-executor policy.
+The public Node API requires a non-empty ordered table-shape `policy`
+array for database verbs. The first entry is the trusted root/bound and later
+entries may only narrow it. The CLI accepts the same stack through repeatable
+required `--policy` files. Custom policy composition is available to
+Rust hosts for planning and host decisions. Node `apply()` and
+`resolvePending()` use their documented options and coarse approval boolean;
+neither accepts an arbitrary custom executor policy.
 
 Pending destructive work and backfills need explicit operator approval. Node
 uses `approved: true`; the CLI uses `--approve`. Review and approve the exact

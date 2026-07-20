@@ -57,7 +57,7 @@ Backfills capture a fixed terminal cursor before the first batch, record progres
 after every bounded batch, and resume only within that original cursor range.
 
 Privileged PostgreSQL capabilities are another host boundary. The public
-Node/CLI host cannot provide the required capability ceiling, so schemas,
+Node/CLI host cannot provide the required capability charter, so schemas,
 extensions, roles, grants, RLS policies, functions, raw statements,
 materialized views, and partition attachment require a Rust/custom
 host.
@@ -479,8 +479,9 @@ These PostgreSQL-only features require an explicit capability:
 
 Capabilities must come from trusted host policy. A migration cannot grant
 itself permission by importing an API or targeting PostgreSQL. The Node
-`policyCeiling` input and CLI `--policy-ceiling` file are limited to trusted
-table-shape policy. These operations require a reviewed Rust/custom host.
+`policy` stack and CLI's repeatable `--policy` files are limited
+to table-shape policy bounded by the trusted root entry. These operations require
+a reviewed Rust/custom host.
 
 ## Using `dialect()`
 

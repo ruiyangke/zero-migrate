@@ -207,7 +207,7 @@ The Node API exposes:
 ```ts
 await apply({
   // migration, identity, registry, and driver...
-  policyCeiling,
+  policy,
   approved: true,
 });
 ```
@@ -216,7 +216,7 @@ The CLI uses the equivalent non-interactive flag:
 
 ```bash
 zero-migrate apply --dir ./migrations --database-url "$DATABASE_URL" \
-  --policy-ceiling ./policy.toml --approve
+  --policy ./policy.toml --approve
 ```
 
 Bind approval to the exact reviewed content and checksum, not only a mutable
@@ -237,10 +237,12 @@ executes the first authored step. A later unapproved delete or backfill therefor
 cannot leave an earlier insert, update, or schema step from that same plan
 committed. This guarantee covers approval refusal, not every runtime failure.
 
-The public Node API requires a trusted table-shape `policyCeiling`; CLI apply
-and plan-aware status require the same policy through `--policy-ceiling`. A
-platform may make additional policy decisions in a Rust host, but arbitrary
-custom executor policy is not accepted by the public Node `apply()` options yet.
+The public Node API requires a non-empty ordered table-shape `policy`
+array. CLI database verbs accept the same stack through repeatable
+`--policy` flags. The first entry is the trusted root/bound and each
+later entry may only narrow it. A platform may make additional policy decisions
+in a Rust host, but arbitrary custom executor policy is not accepted by the
+public Node `apply()` options yet.
 
 ## Apply behavior
 
@@ -322,7 +324,7 @@ import { readFile } from "node:fs/promises";
 import { apply } from "zero-migrate-cli";
 import * as renameUsersDisplayName from "./migrations/20260716120000_rename_users_display_name.js";
 
-const policyCeiling = await readFile("./policy.toml", "utf8");
+const policy = [await readFile("./policy.toml", "utf8")];
 
 const result = await apply({
   migration: renameUsersDisplayName,
@@ -330,7 +332,7 @@ const result = await apply({
   projectSchema: "app_demo",
   registry: { users: "app_demo" },
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
-  policyCeiling,
+  policy,
   approved: true,
   appliedBy: "deploy:rename-start",
 });
@@ -385,6 +387,7 @@ await resolvePending({
   action: "apply",
   driver: { kind: "postgres", url: process.env.DATABASE_URL! },
   approved: true,
+  policy,
   appliedBy: "deploy:rename-finish",
 });
 ```
@@ -506,7 +509,7 @@ Status reconciles every schema, insert, update, delete, and backfill step and
 reports applied, aborted, pending, partial, drifted, blocked, or
 unknown-dependency migrations. A backfill that has saved progress without its
 final completion event produces an `inflight` step and a `partial` plan. Use the
-same names, owner, registry, and policy ceiling as apply. Backfill steps expose
+same names, owner, registry, and policy charter as apply. Backfill steps expose
 their cursor-stability mode, including the approved external-invariant name.
 Identity-synchronization steps retain the authored `writesQuiesced` assertion
 for operator review.
