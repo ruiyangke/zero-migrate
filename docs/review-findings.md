@@ -95,11 +95,20 @@ Update the status as items land.
   PG (`numeric`) were already exact and are unchanged.
 
 - [ ] **8. `apply` is O(n²) with per-file connect + advisory-lock cycles.** The CLI
-  loops per migration file (`cli.ts:862`), re-authoring the growing prior set each
-  iteration (`index.ts:166`) and opening/closing a fresh session + re-taking the
-  advisory lock per file (`index.ts:182`). Beyond wasted work, the lock is released
-  between files, widening the concurrent-interleave window and leaving earlier
-  migrations committed on a mid-set failure.
+  loops per migration file (`runApply`), re-authoring the growing prior set each
+  iteration and opening/closing a fresh session + re-taking the advisory lock per
+  file. Beyond wasted work, the lock is released between files, widening the
+  concurrent-interleave window and leaving earlier migrations committed on a mid-set
+  failure. **Analysis (2026 follow-up):** a TS-only batch (one session across all
+  applies) is INSUFFICIENT for the correctness half — `apply_ir_with_locked_backend`
+  (`bridge.rs:873`) explicitly `release_project_lock`s at the end of EVERY `apply_ir`
+  call, so even within one held session the lock churns per migration. The proper fix
+  is a new batch **deploy-over-host-driver** native verb that acquires the lock ONCE
+  and applies the full ordered pending set before releasing — the network mirror of
+  SQLite's `apply_ir_sqlite` → `deploy_envelopes` (which already batches). Scope:
+  `#[napi]` bridge verb + wire DTO + regenerated `index.d.ts` + `addon.ts`/`index.ts`
+  wrapper + `runApply` routing, then `napi build` and a live multi-migration PG/MySQL
+  apply test. Deferred: needs a native-addon rebuild + live-DB verification session.
 
 - [x] **9. `ZERO_MIGRATE_POLICY` silently collapsed multi-layer policy to one
   layer.** The env branch wrapped a single string (`[environmentPolicy]`) and took
