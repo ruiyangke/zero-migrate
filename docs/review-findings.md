@@ -146,6 +146,10 @@ Update the status as items land.
   and several fixtures use text-in-key as scenarios for other checks; landing it
   cleanly needs reordering the check after those passes + fixture updates.
 
-- [ ] **15. Regenerate the hr preview fixture.** `tests/fixtures/hr/migrations.json`
-  still holds pre-audit column types. SQLite-only (where string and text both render
-  `TEXT`), so `hr_sqlite` is unaffected, but it drifts from the edited `.ts`.
+- [x] **15. Regenerate the hr preview fixture.** `tests/fixtures/hr/migrations.json`
+  held pre-audit column types (all `text`). Regenerated from the current
+  hr-system `.ts` migrations through the CLI's authoritative path (`discover()`
+  order contract + `buildEnvelope`, the same single-source-of-truth emitter the CLI
+  uses), so the six keyed columns now carry `{"string":{"length":N}}` (254/255/32)
+  matching the `.ts`. Diff is exclusively the `text`→`string` conversions; `hr_sqlite`
+  green.
