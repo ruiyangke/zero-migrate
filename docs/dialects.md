@@ -233,6 +233,14 @@ without a prefix length.
 identically on PostgreSQL, MySQL, and SQLite. Use it for prose, descriptions,
 and other free text you do not index.
 
+**Case sensitivity is portable.** String comparison is case-SENSITIVE by default
+on every target — the same `WHERE email = 'Foo'` matches the same rows on
+PostgreSQL, MySQL, and SQLite. On MySQL this is pinned with an explicit
+`utf8mb4_bin` collation, overriding the server default (which is otherwise
+case-insensitive). For a case-insensitive column, author `t.text({ caseSensitive:
+false })`, which renders `citext`/`COLLATE NOCASE`/`utf8mb4_0900_ai_ci`
+respectively.
+
 > **MySQL note:** because `t.text()` is an unbounded `TEXT` on MySQL 8, it cannot
 > be a primary key, unique, or index member there (MySQL rejects a `TEXT` key
 > without a prefix length). Use `t.string({ length })` for any column you key or
