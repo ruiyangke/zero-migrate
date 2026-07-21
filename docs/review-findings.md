@@ -46,12 +46,17 @@ Update the status as items land.
 
 ## Medium severity
 
-- [ ] **4. `CreateView` source tables bypass the ownership gate.** `op_target_table`
-  returns `None` for `CreateView` (`ir/load.rs:232`), and a non-materialized view
-  needs no capability, so its `FROM`/`JOIN` tables never reach
-  `enforce_ir_ownership`. A confined creator can author a view SELECTing another
-  app's tables in the same permitted schema — a read-only cross-tenant disclosure
-  path the ownership model otherwise closes. Impact depends on runtime SQL grants.
+- [x] **4. `CreateView` source tables bypassed the ownership gate.** `op_target_table`
+  returns `None` for `CreateView`, and a non-materialized view needs no capability,
+  so its `FROM`/`JOIN` tables never reached `enforce_ir_ownership`. A confined creator
+  could author a view SELECTing another app's tables in the same permitted schema — a
+  read-only cross-tenant disclosure. Fixed: `collect_target_tables` now contributes a
+  structured view's FROM table and every JOIN table as ownership-checkable targets, so
+  a source table the deploying app does not own (or is unregistered) fails closed like
+  any other target. The `ViewQuery::Raw` body is opaque and remains gated by
+  `VendorCapability::RawViewBody`. Tests: view over own table allowed / over another
+  app's table refused / JOIN smuggling another app's table refused. Full suite green
+  (no legitimate view pattern regressed).
 
 - [ ] **5. `DeclaredOnly` non-default gate defined and documented but never
   enforced.** `forbids_nondefault_on_enforced_path` (`policy knob.rs:182`) is
