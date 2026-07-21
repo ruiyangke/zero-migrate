@@ -107,12 +107,17 @@ Update the status as items land.
   layer counts, so the override is no longer silent. Tests cover multi-layer
   parsing, blank handling, and the override warning.
 
-- [ ] **10. MySQL/PG TLS pinning, host allowlist, and per-verb timeout are dead
-  from the CLI.** `MysqlSessionOptions` (`driver-mysql2.ts:24`) advertises these as
-  first-class controls, but `openSession` (`index.ts:82`) passes no opts, so the
-  `ssl:{ca}` branch is never taken and `runVerb` always gets `undefined` timeout;
-  `openPgSession` has no TLS param at all. Transport TLS is still reachable via the
-  connection URL, but CA-pinning and per-verb timeout have no equivalent.
+- [x] **10. MySQL/PG TLS pinning, host allowlist, and per-verb timeout were dead
+  from the CLI.** `MysqlSessionOptions` advertised these controls, but `openSession`
+  passed no opts (so `ssl:{ca}` was never taken and `runVerb` always got `undefined`
+  timeout) and `openPgSession` had no TLS param at all. Fixed end-to-end: added a
+  `NetworkSecurityOptions` field to the postgres/mysql `DriverConfig`; `openSession`
+  threads it to both drivers; `openPgSession` gained parity (TLS `ssl:{ca}`,
+  pre-connect host allowlist, per-verb `query_timeout`); and the CLI now resolves
+  the controls from `--tls-ca`/`--host-allowlist`/`--query-timeout` flags (flag >
+  env: `ZERO_MIGRATE_TLS_CA`/`ZERO_MIGRATE_HOST_ALLOWLIST`/`ZERO_MIGRATE_QUERY_TIMEOUT_MS`)
+  through `driverFor`. Tests: `driverFor` attaches security; `resolveNetworkSecurity`
+  flag/env precedence, allowlist parsing, timeout validation, and CA-file pinning.
 
 ## Docs / consistency (low effort, high signal)
 
