@@ -48,7 +48,7 @@ export const name = "create_users";
 export function up() {
   table("users").create({
     columns: {
-      email: t.text().notNull(),
+      email: t.string({ length: 254 }).notNull(),
     },
   });
 

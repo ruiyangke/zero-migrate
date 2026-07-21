@@ -29,9 +29,11 @@ export default {
     table("accounts").create({
       columns: {
         id: ids.typeId({ prefix: "acct" }).primaryKey(),
-        email: t.text().notNull(),
-        display_name: t.text(),
-        state: t.text().notNull().default("invited"),
+        // `email` is uniquely indexed, so it is a bounded `t.string` (VARCHAR);
+        // MySQL cannot index an unbounded `t.text()`. `state` is a short vocabulary.
+        email: t.string({ length: 254 }).notNull(),
+        display_name: t.string({ length: 255 }),
+        state: t.string({ length: 32 }).notNull().default("invited"),
         created_at: t.timestamp().notNull().default(now()),
       },
       indexes: [
@@ -134,7 +136,7 @@ const auditEvents = table("events", { schema: "app_data" });
 auditEvents.create({
   columns: {
     id: t.uuid().primaryKey().default(uuidV4()),
-    kind: t.text().notNull(),
+    kind: t.string({ length: 32 }).notNull(),
   },
 });
 
@@ -357,7 +359,7 @@ table("memberships").create({
   columns: {
     account_id: t.uuid().notNull(),
     organization_id: t.uuid().notNull(),
-    role: t.text().notNull().default("member"),
+    role: t.string({ length: 32 }).notNull().default("member"),
   },
   primaryKey: ["account_id", "organization_id"],
   uniques: [

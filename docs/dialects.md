@@ -197,7 +197,9 @@ import { table, t, uuidV4 } from "zero-migrate";
 table("accounts").create({
   columns: {
     id: t.uuid().primaryKey().default(uuidV4()),
-    email: t.text().notNull(),
+    // `email` is uniquely indexed, so it is a bounded `t.string` (VARCHAR) — a
+    // MySQL index needs a bounded/prefix type, never unbounded `t.text()`.
+    email: t.string({ length: 254 }).notNull(),
   },
   indexes: [
     { name: "accounts_email_uq", on: ["email"], unique: true },

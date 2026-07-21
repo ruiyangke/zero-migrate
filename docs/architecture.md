@@ -47,7 +47,7 @@ export default {
     table("projects").create({
       columns: {
         id: ids.typeId({ prefix: "proj" }).primaryKey(),
-        name: t.text().notNull(),
+        name: t.string({ length: 255 }).notNull(),
         created_at: t.timestamp().notNull().default(now()),
       },
       indexes: [
