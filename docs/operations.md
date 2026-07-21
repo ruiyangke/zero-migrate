@@ -11,8 +11,8 @@ capabilities are summarized only where they affect an operator's choice.
 > credentials.
 
 > **Complete ordered apply:** the public Node API and CLI execute schema,
-> `insert`, `update`, `delete`, and `backfill` steps on PostgreSQL and MySQL 8 in
-> authored order. Pending deletes and backfills require explicit operator
+> `insert`, `update`, `delete`, and `backfill` steps on PostgreSQL, MySQL 8, and
+> SQLite in authored order. Pending deletes and backfills require explicit operator
 > approval. Approval is preflighted across the complete plan before its first
 > authored step; matching completed steps skip without renewed approval.
 
@@ -23,8 +23,8 @@ capabilities are summarized only where they affect an operator's choice.
 | Capability | PostgreSQL | MySQL 8 | SQLite |
 | --- | --- | --- | --- |
 | Offline validation and plan | Yes | Yes | Yes |
-| Schema and data apply with journal | Yes | Yes | No |
-| Insert/update/delete/backfill apply | Yes | Trigger-free InnoDB targets | No |
+| Schema and data apply with journal | Yes | Yes | Yes |
+| Insert/update/delete/backfill apply | Yes | Trigger-free InnoDB targets | Yes |
 | Destructive approval | Node API | Node API | No |
 | CLI approval | `--approve` | `--approve` | No |
 | Online column rename and explicit resolution | Yes | No | No |
@@ -43,10 +43,10 @@ The MySQL target means MySQL 8. MariaDB is not a supported or tested target.
 
 ### Additional Rust API capabilities
 
-Rust hosts can additionally apply SQLite migrations. The Rust API executes the
-four structured data operations: insert, update, delete, and backfill. It also
-reconciles a supplied migration set on PostgreSQL, SQLite, and MySQL and performs
-explicit PostgreSQL/SQLite structural drift checks. MySQL exposes a limited
+Rust hosts can execute the four structured data operations on SQLite -- insert,
+update, delete, and backfill -- the same as the Node API and CLI. The Rust API
+also reconciles a supplied migration set on PostgreSQL, SQLite, and MySQL and
+performs explicit PostgreSQL/SQLite structural drift checks. MySQL exposes a limited
 catalog snapshot of tables, columns, and ordered indexes for preparing
 live-dependent work, but a complete MySQL structural-drift comparison is not
 available today.
@@ -94,7 +94,7 @@ rather than a security boundary.
 ### 2. Preview the migration
 
 ```bash
-zero-migrate preview --dir ./migrations
+zero-migrate lint --dir ./migrations --explain
 ```
 
 The documentation uses `zero-migrate` as shorthand. Until the JavaScript
@@ -193,7 +193,7 @@ database.
 For PostgreSQL, use a dedicated least-privilege migration role when possible and
 keep migration history outside the application's writable namespace. For MySQL,
 the connecting account's grants are the main database-side enforcement layer.
-SQLite Rust apply coordinates zero-migrate processes that target the same
+SQLite apply coordinates zero-migrate processes that target the same
 application database. Do not run a different migration tool or uncoordinated
 writer against that file during a migration.
 
@@ -395,8 +395,8 @@ await resolvePending({
 The equivalent CLI command is:
 
 ```bash
-zero-migrate resolve-pending "$PENDING_VERSION" \
-  --apply \
+zero-migrate resolve "$PENDING_VERSION" \
+  --commit \
   --approve \
   --database-url "$DATABASE_URL" \
   --schema app_demo \
@@ -405,7 +405,7 @@ zero-migrate resolve-pending "$PENDING_VERSION" \
 
 Apply resolution keeps the destination and drops the source. To abandon the
 rename, move the application back to the source first, then use
-`action: "abort"` or CLI `--abort`; abort keeps the source and drops the
+`action: "abort"` or CLI `--rollback`; rollback keeps the source and drops the
 destination. Both choices require explicit approval.
 
 Retry the unchanged initial migration after an interruption. Completed work
@@ -472,7 +472,7 @@ or missing audit context is rejected without changing the marker.
 
 ### SQLite
 
-SQLite apply is available only through Rust. Supported transactional schema and
+SQLite apply is available through Node, the CLI, and Rust. Supported transactional schema and
 ordinary data work commit atomically with their journal event; backfills commit
 bounded resumable batches. Every component of a proven primary/unique cursor
 tuple must have declared `INTEGER` or `TEXT` affinity, and live values must use

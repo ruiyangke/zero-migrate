@@ -25,10 +25,11 @@ Keep these current limits in mind:
   reviewed Rust/custom-host workflow.
 - PostgreSQL and MySQL Node/CLI apply execute DDL, insert, update, delete, and
   backfill steps in authored order. Pending delete and backfill steps require
-  explicit approval. SQLite apply remains Rust-only and supports the same data
-  operations.
-- The Node API can apply to PostgreSQL and MySQL. It can validate for SQLite, but
-  SQLite apply currently requires a Rust host.
+  explicit approval. SQLite apply is available through Node, the CLI, and Rust,
+  and supports the same data operations.
+- The Node API can apply to PostgreSQL, MySQL, and SQLite. SQLite apply runs
+  through a bundled in-process backend that coordinates concurrent zero-migrate
+  processes against the same application database.
 - Later files that change an existing table need an ownership registry. Pass it
   with CLI `--registry` or the Node API `registry` option.
 
@@ -164,13 +165,13 @@ included to show that migrations remain ordinary typed TypeScript modules.
 Preview all files in filename order:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js preview --dir ./migrations
+pnpm exec tsx dist/cli-bin.js lint --dir ./migrations --explain
 ```
 
 For machine-readable output:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js preview --dir ./migrations --json
+pnpm exec tsx dist/cli-bin.js lint --dir ./migrations --explain --json
 ```
 
 Preview is offline; it does not connect to a database. Check the migration name,
@@ -296,7 +297,7 @@ fully applied.
 
 An expanded but unresolved PostgreSQL rename is also expected to appear as a
 `partial` plan, with its pending obligation in `pendingContracts`. This is the
-key used by `resolve-pending` later in the guide.
+key used by `resolve` later in the guide.
 
 After an abort, status places the terminal plan ID in top-level `aborted`. The
 plan and its deferred `onlineContract` steps report `aborted`; the ID is not in
@@ -461,7 +462,7 @@ Save that map as `table-owners.json`. Preview and validate the directory with
 the same owner, schema, and registry you will use for apply:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js preview --dir ./migrations
+pnpm exec tsx dist/cli-bin.js lint --dir ./migrations --explain
 
 pnpm exec tsx dist/cli-bin.js plan \
   --dir ./migrations \
@@ -510,17 +511,17 @@ resolve the rename.
 Complete the rename with the returned `pendingVersion`:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js resolve-pending "mig_..." \
-  --apply \
+pnpm exec tsx dist/cli-bin.js resolve "mig_..." \
+  --commit \
   --approve \
   --database-url "$DATABASE_URL" \
   --schema app_demo \
   --owner-app app_demo
 ```
 
-`--apply` keeps `full_name` and drops `display_name`. To abandon the rename,
+`--commit` keeps `full_name` and drops `display_name`. To abandon the rename,
 move the application back to `display_name` first and run the same command with
-`--abort`; that keeps `display_name` and drops `full_name`. Both choices require
+`--rollback`; that keeps `display_name` and drops `full_name`. Both choices require
 approval.
 
 If the initial apply is interrupted, rerun the unchanged migration with the
@@ -565,7 +566,7 @@ Node and CLI status support MySQL when supplied with the migration set. Public
 
 ## SQLite
 
-The Node API can validate for SQLite:
+The Node API can validate for SQLite before applying:
 
 ```typescript
 import { plan } from "zero-migrate-cli";
@@ -583,10 +584,10 @@ if (!report.ok) {
 }
 ```
 
-The public Node API and CLI do not apply to SQLite yet. Use a Rust host when you
-need SQLite execution; see [Rust API](embedding.md). SQLite Rust apply
-coordinates zero-migrate processes that use the same application database and
-refuses unsafe application or journal settings. SQLite backfills require a
+SQLite apply is available through Node, the CLI, and Rust, backed by a bundled
+in-process backend; advanced hosts can also use the [Rust API](embedding.md).
+SQLite apply coordinates zero-migrate processes that use the same application
+database and refuses unsafe application or journal settings. SQLite backfills require a
 complete, non-null, single-column `INTEGER` or `TEXT` primary-key cursor whose
 live values use the matching storage class.
 

@@ -15,7 +15,8 @@ from the longer-term platform direction.
 > updates, deletes, and backfills in authored order. Pending deletes and
 > backfills need explicit approval. Apply checks the complete plan before any
 > authored step runs; matching completed steps skip on retry without renewed
-> approval. SQLite supports all four data operations through its Rust backend.
+> approval. SQLite supports all four data operations through its bundled
+> in-process backend from Node, the CLI, or Rust.
 
 ## Choose your path
 
@@ -75,9 +76,9 @@ from the longer-term platform direction.
 | PostgreSQL schema and data apply | Node API, CLI, and Rust |
 | PostgreSQL online column rename | Initial approved apply, application cutover, then explicit Node or CLI apply/abort resolution |
 | MySQL 8 schema and data apply | Node API, CLI, and Rust; structured data targets must be trigger-free InnoDB |
-| SQLite schema and data apply | Rust only, with cross-process migration coordination |
+| SQLite schema and data apply | Node API, CLI, and Rust, through the bundled in-process backend with cross-process migration coordination |
 | Ordered data changes | Insert, update, delete, and backfill on every execution backend |
-| Migration status | PostgreSQL and MySQL in Node; backend-specific support in Rust |
+| Migration status | PostgreSQL, MySQL, and SQLite through Node/CLI; backend-specific support in Rust |
 | Detailed history | PostgreSQL in Node and Rust |
 | Pending migration calculation in Node | Available when `status()` receives the migration modules; CLI `status` loads its directory |
 | High-level rollback | Not available; use reviewed roll-forward migrations |
@@ -96,7 +97,6 @@ Additional limits to plan around:
   `--dialect`.
 - Node `plan()` and `validate()` are offline checks; they do not inspect a live
   database or guarantee apply will succeed.
-- SQLite apply is not exposed by the Node API or CLI.
 - MySQL support targets MySQL 8, not MariaDB.
 - MySQL structured data migrations require an InnoDB target with no user
   triggers.
@@ -108,7 +108,7 @@ Additional limits to plan around:
   the complete, non-null, single-column primary key, with no pre-existing
   enabled user triggers and no row policy that suppresses selected updates. Its
   source and destination coexist until an approved `resolvePending()` or
-  `resolve-pending` action keeps one and drops the other. Other migrations on
+  `resolve` action keeps one and drops the other. Other migrations on
   that table remain blocked. Cleanup is all-or-nothing, so a failed resolution
   leaves both columns and the managed rename trigger intact. Apply and abort are
   terminal for the original migration identity; retrying after abort requires a
@@ -126,7 +126,7 @@ Additional limits to plan around:
   write invariant that makes them fail the filter or run a final catch-up while
   writes are stopped. A completed cohort does not claim those inserts were
   covered.
-- SQLite Rust apply coordinates zero-migrate processes for the same application
+- SQLite apply coordinates zero-migrate processes for the same application
   database and refuses unsafe application or journal database settings.
 - Migration names are stable identities. Keep each name unique within the
   project, and never rename or edit an applied migration.

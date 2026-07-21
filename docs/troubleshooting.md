@@ -20,7 +20,7 @@ Remember two important boundaries:
 - Migration modules execute as ordinary JavaScript. Do not run an untrusted or
   generated module in a process that has secrets or database access.
 - JavaScript/CLI apply executes schema and data steps in authored order on
-  PostgreSQL and MySQL. SQLite apply is Rust-only.
+  PostgreSQL and MySQL. SQLite apply is available through Node, the CLI, and Rust.
 
 ## Setup and command problems
 
@@ -51,7 +51,7 @@ Rebuild after changing Node, Rust, the operating system, or CPU architecture.
 Run the source-checkout CLI with the TypeScript loader from `packages/zero-migrate-cli`:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js preview --dir ./migrations
+pnpm exec tsx dist/cli-bin.js lint --dir ./migrations --explain
 ```
 
 Alternatively, compile migrations to JavaScript and point `--dir` at the
@@ -112,7 +112,7 @@ module state inside `up()`. Use database expression helpers such as `now()`,
 Run preview repeatedly while investigating:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js preview --dir ./migrations --json
+pnpm exec tsx dist/cli-bin.js lint --dir ./migrations --explain --json
 ```
 
 The output should be identical for the same source and package versions.
@@ -325,15 +325,15 @@ obligation is pending. If the application cutover to the destination is
 complete, keep the destination and drop the source:
 
 ```bash
-zero-migrate resolve-pending "$PENDING_VERSION" \
-  --apply --approve \
+zero-migrate resolve "$PENDING_VERSION" \
+  --commit --approve \
   --database-url "$DATABASE_URL" \
   --schema app_demo \
   --owner-app app_demo
 ```
 
 If the rollout is being abandoned, first move all applications and consumers
-back to the source, then use `--abort --approve`; abort keeps the source and
+back to the source, then use `--rollback --approve`; rollback keeps the source and
 drops the destination. Use the same owner and project schema that opened the
 obligation. If status reports `orphaned: true`, restore the immutable migration
 source to the supplied set for diagnosis, but resolve the returned
@@ -351,10 +351,10 @@ rename. An aborted rename remains terminal, so create a new migration with a new
 exported name before trying it again. Resolving a settled version again reports
 that it is no longer pending.
 
-### `resolve-pending` or `resolvePending()` is refused
+### `resolve` or `resolvePending()` is refused
 
 - Use a PostgreSQL URL. MySQL and SQLite have no pending rename resolver.
-- Supply exactly one CLI action, `--apply` or `--abort`, and include
+- Supply exactly one CLI action, `--commit` or `--rollback`, and include
   `--approve`. Node uses `action: "apply" | "abort"` and `approved: true`.
 - Copy the exact `pendingVersion` from `apply()` or plan-aware `status()`.
 - Use the same database, `ownerApp`, and `projectSchema` that opened the
@@ -542,8 +542,8 @@ Do not convert sequence values to `Number`; large values can lose precision.
 
 ### SQLite
 
-- Node and CLI can validate but cannot apply to SQLite.
-- Apply requires the public Rust SQLite host.
+- Node, the CLI, and Rust can apply to SQLite, backed by the bundled in-process backend.
+- Apply coordinates concurrent zero-migrate processes against the same application database.
 - Non-transactional migrations are rejected.
 - zero-migrate processes targeting the same application database coordinate
   their complete migration plans across processes.

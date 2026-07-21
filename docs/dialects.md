@@ -20,19 +20,19 @@ For every migration, ask:
 2. **Can my chosen host execute it?**
 
 These are separate. For example, the migration API can describe and validate
-an update for every target, while SQLite apply is available only through the
-Rust API. Always check both compatibility and execution.
+an update for every target, while some operations depend on the chosen host.
+Always check both compatibility and execution.
 
 ## Target overview
 
 | Target | Best fit | Main limitations |
 | --- | --- | --- |
 | PostgreSQL | Full platform feature set, rich indexes, native types, partitions, RLS, administration, and complete schema/data execution | Advanced operations need explicit capabilities |
-| SQLite | Embedded/local databases applied through a Rust host | No public Node/CLI apply, no native partitions, sequences, comments, or PostgreSQL administration; backfill cursor components require supported `INTEGER` or `TEXT` semantics |
+| SQLite | Embedded/local databases applied through Node, the CLI, or Rust | No native partitions, sequences, comments, or PostgreSQL administration; backfill cursor components require supported `INTEGER` or `TEXT` semantics |
 | MySQL 8 | Portable application schema and data migrations through Node or Rust | No column rename, expression/partial indexes, comments, or partitions; data migrations require InnoDB and refuse targets with user triggers |
 
 Choose PostgreSQL when you need the broadest migration surface. Choose SQLite
-when you can use the Rust API with the database file. Choose
+for embedded or local database files. Choose
 MySQL 8 when its portable schema subset is enough.
 
 ## Execution paths
@@ -43,7 +43,7 @@ This table is the practical deployment boundary:
 | --- | --- | --- | --- |
 | Public Node/CLI, PostgreSQL | Yes, for supported non-privileged operations | Yes | Yes, with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
 | Public Node/CLI, MySQL 8 | Yes, for supported operations | Yes, on trigger-free InnoDB tables | Yes, on InnoDB with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
-| Public Node/CLI, SQLite | No apply driver | No | No |
+| Public Node/CLI, SQLite | Yes | Yes | Yes, with a supported exact ordered primary/unique candidate-key cursor tuple and explicit stability |
 | PostgreSQL Rust API | Yes | Yes | Yes, with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
 | SQLite Rust API | Yes | Yes | Yes, with a supported exact ordered primary/unique candidate-key cursor tuple and explicit stability |
 | MySQL 8 Rust API | Yes | Yes, on trigger-free InnoDB tables | Yes, on InnoDB with an exact ordered primary/unique candidate-key cursor tuple and explicit stability |
@@ -82,7 +82,7 @@ For the best chance of running the same schema migration on all three targets:
 - Validate the complete migration independently for each target.
 
 Even within this baseline, make sure your execution path supports the selected
-database. SQLite migrations need a Rust host.
+database. SQLite migrations apply through Node, the CLI, or Rust.
 
 ## Tables and columns
 
@@ -91,7 +91,7 @@ database. SQLite migrations need a Rust host.
 | Create/drop table | Yes | Yes | Yes |
 | Rename table | Yes | Yes | Yes |
 | Add/drop column | Yes | Yes | Yes |
-| Rename column | Yes, staged online workflow | Yes, through Rust apply | No |
+| Rename column | Yes, staged online workflow | Yes, one table rebuild | No |
 | Change base type | Yes | Yes | Yes |
 | Change type with custom `using` | No | No | No |
 | Set/drop nullability | Yes | Yes | Yes |
@@ -306,7 +306,8 @@ The authoring API supports these descriptions:
 | Insert with `onConflict` do-nothing | Yes, exact target | Yes, exact target | No exact native form |
 
 PostgreSQL and MySQL execute all four operations through the public Node API,
-CLI, or Rust API. SQLite executes all four through the Rust API. One-shot data
+CLI, or Rust API. SQLite executes all four through the public Node API, CLI, or
+Rust API. One-shot data
 statements keep values separate from statement structure; structured backfill
 expressions use dialect-safe literal encoding.
 
@@ -339,7 +340,7 @@ or run a final catch-up while writes are stopped.
 
 Every MySQL structured insert, update, delete, and backfill requires an InnoDB
 target table without user triggers. Apply refuses before changing target rows if
-the storage engine or trigger condition is unsafe. SQLite Rust apply coordinates
+the storage engine or trigger condition is unsafe. SQLite apply coordinates
 zero-migrate processes for the same application database and rejects backfills
 on tables with user triggers. PostgreSQL backfills also require no pre-existing
 enabled user triggers; the managed online rename workflow remains supported. A
@@ -608,7 +609,8 @@ table("users").update({
 ```
 
 The expression and data step work on all targets. Use the public Node API or CLI
-for PostgreSQL and MySQL 8, or the Rust API for any of the three targets.
+for PostgreSQL, MySQL 8, or SQLite; the Rust API is an additional host for any of
+the three targets.
 
 ### Use expand-and-contract for incompatible DDL
 

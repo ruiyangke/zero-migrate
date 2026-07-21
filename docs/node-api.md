@@ -1,7 +1,7 @@
 # Node API
 
 `zero-migrate-cli` is the JavaScript/TypeScript API for validating migration
-modules, applying ordered PostgreSQL or MySQL schema and data changes, resolving
+modules, applying ordered PostgreSQL, MySQL, or SQLite schema and data changes, resolving
 PostgreSQL online column renames, and reading migration state.
 
 [Documentation home](README.md) · [Getting started](getting-started.md) ·
@@ -446,7 +446,7 @@ operations available through this API.
   non-transactional recovery; and
 - `pendingContracts` contains every outstanding PostgreSQL online column rename
   after the call. Each `pendingVersion` is the stable key accepted by
-  `resolvePending()` and the CLI `resolve-pending` command.
+  `resolvePending()` and the CLI `resolve` command.
 
 One authored migration can contribute several IDs because each ordered DDL, DML,
 or backfill step is journaled independently. Use plan-aware `status()` when you
@@ -490,7 +490,9 @@ need the aggregate state of the migration.
 - Repeating an unchanged migration uses stable step identities and skips work
   already recorded with the same checksum. Renaming or editing an applied
   migration is not a way to rerun it; use a new uniquely named migration.
-- SQLite apply is not exposed.
+- SQLite schema and data apply and status are available through Node, the CLI,
+  and Rust, via the bundled in-process backend (`applyIrSqlite`/`statusIrSqlite`)
+  with cross-process coordination.
 - There is no rollback, rendered-SQL preview, or full database-backed dry run.
 - Driver configuration accepts only a URL; extra TLS, allowlist, or timeout
   objects are not part of the public type.
@@ -895,7 +897,7 @@ Like status, history can create a missing journal namespace before reading it.
 
 ## SQLite validation
 
-Node can run the offline check for SQLite even though it cannot apply SQLite
+Node can run the offline check for SQLite before applying SQLite
 migrations:
 
 ```ts

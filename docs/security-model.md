@@ -222,9 +222,9 @@ boundary rather than chasing later rows.
 
 ## SQLite protection
 
-SQLite apply is available through Rust. It uses separate application and journal
-files, disables extension loading, enables defensive settings, and restricts
-migration statements with a database authorizer.
+SQLite apply is available through Node, the CLI, and Rust. It uses separate
+application and journal files, disables extension loading, enables defensive
+settings, and restricts migration statements with a database authorizer.
 
 Atomic commits across the two files require DELETE rollback-journal mode and
 `synchronous=FULL` on the migration connection. Opening an application database
@@ -309,7 +309,7 @@ a forward migration and keep tested backups.
 ## Current JavaScript boundaries
 
 - Node/CLI apply supports complete ordered schema and data migrations on
-  PostgreSQL and MySQL, not SQLite.
+  PostgreSQL, MySQL, and SQLite.
 - Pending deletes and backfills require Node `approved: true` or CLI `--approve`;
   approval is preflighted across the complete plan before execution, and
   backfills also require the table's complete, non-null, single-column primary
@@ -322,7 +322,7 @@ a forward migration and keep tested backups.
   migration set; the CLI supplies its migration directory automatically.
 - Node history remains PostgreSQL-only.
 - Node `apply()` returns outstanding PostgreSQL online renames in
-  `pendingContracts`; Node `resolvePending()` and CLI `resolve-pending` complete
+  `pendingContracts`; Node `resolvePending()` and CLI `resolve` complete
   or abort one obligation with explicit approval. The rename must be the only
   operation targeting its table in that PostgreSQL migration.
 - Node `apply()` accepts executable modules only. Platforms accepting untrusted

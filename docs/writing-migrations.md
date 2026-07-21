@@ -10,7 +10,7 @@ features, and safe rollout.
 
 > **Data migrations execute end to end:** PostgreSQL and MySQL Node/CLI apply run
 > structured `insert`, `update`, `delete`, and `backfill` steps. SQLite runs all
-> four through its Rust backend. Schema and data steps stay in the
+> four through Node, the CLI, or Rust. Schema and data steps stay in the
 > order written in `up()`. Deletes and backfills that still need to run require
 > explicit approval, checked across the whole plan before any authored step
 > executes.
@@ -103,8 +103,8 @@ A normal workflow is:
 3. Preview the operations and review their order.
 4. Validate for the intended target database.
 5. Review destructive changes and target-specific capabilities.
-6. Apply through Node/CLI on PostgreSQL or MySQL, or through the Rust API on
-   SQLite. Supply approval for delete or backfill steps.
+6. Apply through Node/CLI or Rust on PostgreSQL, MySQL, or SQLite. Supply
+   approval for delete or backfill steps.
 7. Check migration status and application behavior.
 
 The CLI can scaffold a TypeScript file:
@@ -530,7 +530,7 @@ If you aborted and later want to try the rename again, author a new migration
 with a new exported name. An aborted plan does not satisfy `dependsOn`, so any
 dependent plan must point to the replacement migration identity.
 
-Follow the complete commands in [CLI reference](cli.md#resolve-pending), or use
+Follow the complete commands in [CLI reference](cli.md#resolve), or use
 [`apply()` and `resolvePending()`](node-api.md#postgresql-online-column-rename)
 from Node.
 

@@ -27,14 +27,14 @@ vendor-only behavior is clearly marked and rejected on unsupported targets.
 > generated source must isolate it outside the deployment process and use a
 > reviewed Rust/custom-host workflow.
 
-> **Ordered schema and data apply:** on PostgreSQL and MySQL 8, the Node API and
-> CLI execute schema changes, inserts, updates, deletes, and batched backfills in
-> the order you authored them. Pending deletes and backfills require explicit
+> **Ordered schema and data apply:** on PostgreSQL, MySQL 8, and SQLite, the Node
+> API and CLI execute schema changes, inserts, updates, deletes, and batched
+> backfills in the order you authored them. Pending deletes and backfills require explicit
 > approval. Approval is checked across the complete plan before any authored
 > step runs, so a later unapproved data change cannot follow an already-committed
 > earlier step from that plan. Matching completed steps skip on retry without
-> renewed approval. SQLite executes the same operation categories through the
-> Rust API.
+> renewed approval. SQLite executes the same operation categories through Node,
+> the CLI, or Rust.
 
 ## A portable migration
 
@@ -85,11 +85,11 @@ other targets fail with a clear validation error.
 | Workflow | PostgreSQL | MySQL 8 | SQLite |
 | --- | --- | --- | --- |
 | TypeScript authoring and validation | Yes | Yes | Yes |
-| Node API / CLI schema and data apply | Yes | Yes | Not yet |
+| Node API / CLI schema and data apply | Yes | Yes | Yes |
 | Rust schema and data apply | Yes | Yes | Yes |
-| Ordered insert/update/delete/backfill | Yes; no enabled user triggers except those managed by an online rename | Yes, on InnoDB tables without user triggers | Rust only |
-| Column rename workflow | Staged online flow through Node or CLI | Unsupported | One Rust table rebuild |
-| Migration status | Node and Rust | Node and Rust | Rust |
+| Ordered insert/update/delete/backfill | Yes; no enabled user triggers except those managed by an online rename | Yes, on InnoDB tables without user triggers | Yes |
+| Column rename workflow | Staged online flow through Node or CLI | Unsupported | One table rebuild through Node, CLI, or Rust |
+| Migration status | Node and Rust | Node and Rust | Node and Rust |
 | Detailed append-only history | Node and Rust | Not yet | Not yet |
 
 MariaDB is not a supported target. The MySQL path targets MySQL 8.
@@ -101,7 +101,7 @@ migration. On every target, the cursor must be the table's complete,
 single-column primary key. Its values must remain unchanged for the entire
 backfill: moving a key behind the saved cursor can miss a row, while moving a
 processed key ahead can repeat it. SQLite additionally requires declared
-`INTEGER` or `TEXT` affinity with consistently typed live values. SQLite Rust apply
+`INTEGER` or `TEXT` affinity with consistently typed live values. SQLite apply
 coordinates zero-migrate processes that target the same application database
 and refuses unsafe database or journal settings.
 
@@ -111,7 +111,7 @@ must be the only operation targeting its table. Operations on other tables may
 remain in the same migration. Put same-table follow-up work in a later migration
 and apply it only after resolution. The initial approved apply returns a
 `pendingVersion`; after every application instance has moved, resolve it with
-Node `resolvePending()` or CLI `resolve-pending`. Apply resolution keeps the
+Node `resolvePending()` or CLI `resolve`. Apply resolution keeps the
 destination and drops the source. Abort keeps the source and drops the
 destination. Cleanup is all-or-nothing: if it fails, both columns and the
 managed rename trigger remain intact and the pending version stays valid. Apply

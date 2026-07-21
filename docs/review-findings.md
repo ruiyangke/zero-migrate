@@ -111,15 +111,26 @@ Update the status as items land.
 
 ## Docs / consistency (low effort, high signal)
 
-- [ ] **11. README + docs say SQLite apply is "Rust only / Not yet", but it ships
+- [x] **11. README + docs said SQLite apply is "Rust only / Not yet", but it ships
   from Node/CLI with tests.** Commit `a13fa25` added `applyIrSqlite`/`statusIrSqlite`
-  and CLI routing; `README.md:86` and `docs/README.md:78` still tell users to build
-  an unneeded Rust host. Most user-misleading divergence in the headline matrix.
+  and CLI routing. Fixed repo-wide: the README + `docs/README.md` capability
+  matrices now show SQLite Node/CLI apply, status, ordered DML/backfill, and rename
+  rebuild as available; and the coherent "SQLite apply is Rust-only / not a Node or
+  CLI target / not exposed" prose across dialects, getting-started, operations,
+  troubleshooting, node-api, concepts, security-model, embedding, writing-migrations,
+  and architecture was corrected to "through Node, the CLI, and Rust (bundled
+  in-process backend, cross-process coordination)". Genuine SQLite limitations
+  (no partitions/sequences/comments, table-rebuild rename, INTEGER/TEXT cursor
+  affinity, PG-only history) were preserved. Doc-example tests green.
 
-- [ ] **12. Conceptual docs teach a removed command surface.** `concepts.md:44`
-  shows `zero-migrate preview` and the onboarding path uses `resolve-pending`, but
+- [x] **12. Conceptual docs taught a removed command surface.** `concepts.md`
+  showed `zero-migrate preview` and the onboarding path used `resolve-pending`, but
   the redesigned CLI accepts only `new|lint|plan|apply|status|history|resolve`. A
-  day-one user copying these gets "unknown command".
+  day-one user copying these got "unknown command". Fixed repo-wide: `preview` →
+  `lint --explain`; CLI `resolve-pending` → `resolve` with `--apply`/`--abort`
+  flags → `--commit`/`--rollback`. The Node API `resolvePending({ action:
+  "apply" | "abort" })` is unchanged and correct (verified: `cli.ts` maps
+  `--commit`→`"apply"`, `--rollback`→`"abort"`), so those references were left as-is.
 
 - [ ] **13. Structural drift is computed but never exposed.** `drift.rs` (~2.5k
   lines) implements `diff_snapshots`/`DriftReport`, but no Node/CLI surface consumes

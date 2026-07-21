@@ -226,7 +226,7 @@ resolution. Source dependencies can block resolution and must be audited before
 rollout.
 
 The operator then passes the returned `pendingVersion` to Node
-`resolvePending()` or CLI `resolve-pending`. Apply resolution keeps the
+`resolvePending()` or CLI `resolve`. Apply resolution keeps the
 destination and drops the source. Abort keeps the source and drops the
 destination. Both require approval. A repeat initial apply skips completed work,
 resumes interrupted backfill progress, and returns an already-open obligation
@@ -274,10 +274,10 @@ See [Dialect support](dialects.md).
 - PostgreSQL backfills require no pre-existing enabled user triggers; the
   managed online rename workflow remains supported.
 - PostgreSQL online rename requires an approved initial backfill and a later
-  approved `resolvePending()` or CLI `resolve-pending` action. The rename must be
+  approved `resolvePending()` or CLI `resolve` action. The rename must be
   its table's only operation in that migration, and later changes to the table
   remain blocked until resolution. Operations on other tables are allowed.
-- JavaScript apply supports PostgreSQL and MySQL 8, not SQLite.
+- JavaScript apply supports PostgreSQL, MySQL 8, and SQLite.
 - CLI plan validates the explicitly selected PostgreSQL, MySQL, or SQLite
   dialect.
 - CLI plan, apply, and status accept a trusted JSON ownership registry for later

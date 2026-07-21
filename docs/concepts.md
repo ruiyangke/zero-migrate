@@ -38,10 +38,11 @@ Running a migration's `up()` function produces a structured migration document.
 It describes the requested tables, columns, indexes, constraints, views, and
 other operations without opening a database connection.
 
-Use preview to inspect that document:
+Use `lint --explain` to inspect that document and its rendered SQL without a
+database connection:
 
 ```bash
-zero-migrate preview --dir ./migrations
+zero-migrate lint --dir ./migrations --explain
 ```
 
 Preview is useful for code review, but it is not rendered SQL and does not
@@ -103,7 +104,8 @@ These commands answer different questions.
 ### Preview
 
 Preview shows the structured operations produced by a migration module. It does
-not connect to a database.
+not connect to a database. Reach it with `lint --explain` (CLI) or the Node
+preview API.
 
 ### Validate
 
@@ -130,7 +132,7 @@ not a complete structural-drift comparison or a database-backed dry run.
 The public Node API and CLI execute DDL, `insert`, `update`, `delete`, and
 `backfill` operations on PostgreSQL and MySQL 8 in authored order. A mixed
 migration keeps its schema and data steps together. SQLite executes the same
-operation set through the Rust API; it is not a Node or CLI target.
+operation set and is a Node, CLI, and Rust target.
 
 Pending deletes and backfills require explicit operator approval. Backfills also
 require an exact ordered, non-null primary or unique candidate-key tuple plus an
@@ -184,7 +186,8 @@ resolution and must be audited before rollout.
 
 An unchanged retry skips completed work and resumes an interrupted backfill. A
 pending contract remains pending across repeat apply calls until Node
-`resolvePending()` or CLI `resolve-pending` resolves it. Resolution cleanup is
+`resolvePending()` or CLI `resolve <migration> --commit|--rollback` resolves it.
+Resolution cleanup is
 all-or-nothing: a failure leaves both columns and the managed rename trigger
 intact, keeps the contract pending, and keeps the table blocked.
 
