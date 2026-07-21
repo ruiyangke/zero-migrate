@@ -90,11 +90,17 @@ Update the status as items land.
   between files, widening the concurrent-interleave window and leaving earlier
   migrations committed on a mid-set failure.
 
-- [ ] **9. `ZERO_MIGRATE_POLICY` silently collapses multi-layer policy to one
-  layer.** The env branch wraps a single string and takes precedence over the whole
-  config-file layer array (`config.ts:261`), dropping narrowing layers. Since later
-  layers may only narrow, a stray single-valued env var silently *widens* effective
-  policy versus committed config, with no warning.
+- [x] **9. `ZERO_MIGRATE_POLICY` silently collapsed multi-layer policy to one
+  layer.** The env branch wrapped a single string (`[environmentPolicy]`) and took
+  precedence over the whole config-file layer array, dropping narrowing layers —
+  a stray single-valued env var silently *widened* effective policy versus committed
+  config, with no warning. Fixed: the env var now carries an ORDERED layer list
+  delimited by the OS path separator (PATH-style), so it can express a full
+  multi-layer policy; blank/whitespace layers are dropped (an empty env is treated
+  as absent, not as a no-charter policy); and when the env policy overrides a
+  config-file policy the resolver returns a warning (surfaced on stderr) naming the
+  layer counts, so the override is no longer silent. Tests cover multi-layer
+  parsing, blank handling, and the override warning.
 
 - [ ] **10. MySQL/PG TLS pinning, host allowlist, and per-verb timeout are dead
   from the CLI.** `MysqlSessionOptions` (`driver-mysql2.ts:24`) advertises these as
