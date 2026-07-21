@@ -60,11 +60,14 @@ Update the status as items land.
   extensible, so a consumer registering a `DeclaredOnly` knob and trusting the
   documented "is rejected" guarantee gets silent policy degradation.
 
-- [ ] **6. Vector metric has a silent lossy `_ => Cosine` fallback.** A typo'd or
-  out-of-set metric coerces to Cosine (`query.rs:1852`, mirrored in the live
-  `vector_opclass`) — the wrong pgvector opclass / SQLite distance function with
-  no build or apply error. The closed-enum guarantee is lost on the String-carrying
-  descriptor path. Reject the unknown metric at validate instead.
+- [x] **6. Vector metric has a silent lossy `_ => Cosine` fallback.** A typo'd or
+  out-of-set metric coerced to Cosine (`query.rs`, `build_create_indexes`) — the
+  wrong pgvector opclass / SQLite distance function with no build or apply error.
+  Fixed: `build_create_indexes` now rejects a present-but-unknown `vectorMetric`
+  with `QueryError::InvalidIdent` (a missing metric still defaults to cosine).
+  The closed-enum guarantee now holds on the String-carrying descriptor path too,
+  matching the IR path (`model::ir::VectorMetric`, deserialize-bounded). Tests:
+  known values parse, absent defaults to cosine, `"manhatten"` is rejected.
 
 - [ ] **7. SQLite numeric-literal column stores as `REAL` (lossy) despite docs
   promising exact decimal text.** `docs/dialects.md` promises exact-decimal-text
