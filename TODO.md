@@ -10,15 +10,16 @@ Working notes; not staged.
   (SQLite), default length 255. Wires the previously-inert `ColType::String`
   variant to its documented intent; distinct from unbounded `t.text()`. Shipped
   in the engine, the TS SDK, and the docs.
-- [ ] Unbounded `t.text()` -> `TEXT` on MySQL (today it renders `VARCHAR(191)`,
-  silently capping values >191 chars). Blocked on modeling: policy-INJECTED
-  system columns (`id` PK, `created_by`, `updated_by`) are facetless
-  `ColType::Text` and would be swept into unbounded text, turning the `id` PK
-  into an invalid MySQL `text` PRIMARY KEY. Requires (a) typing injected system
-  columns as bounded strings in the charter, and (b) a fail-closed rule rejecting
-  a `t.text()` column used in a MySQL PK/unique/index. A render facet
-  (`unbounded_text` + MySQL `ddl_type_override`) is proven; the blocker is
-  column-type modeling of injected/keyed columns, not rendering.
+- [x] Unbounded `t.text()` -> `TEXT` on MySQL (was `VARCHAR(191)`, silently
+  capping values >191 chars). Shipped and verified against live MySQL 8.4 (a
+  300-char value that `VARCHAR(191)`+STRICT rejected now stores in `TEXT`).
+  Drift-safe via a MySQL-only `ddl_type_override` (base data_type stays `text`).
+  Policy-injected system columns (`id`, `created_by`, `updated_by`) are now
+  bounded `VARCHAR(255)` so they stay index-able MySQL keys.
+- [ ] Fail-closed validate rule: reject a `t.text()` column used in a MySQL
+  primary key / unique / index (today it renders `TEXT` and fails at apply with
+  MySQL `ERROR 1170`). Deferred only because many existing test fixtures use
+  text-in-key as scenarios for other checks and need updating alongside the rule.
 - [ ] Case-collation parity: `caseSensitive` should pin an explicit collation on
   MySQL (default is case-insensitive there; `caseSensitive: true` is currently
   ignored), so string equality/uniqueness matches Postgres/SQLite.

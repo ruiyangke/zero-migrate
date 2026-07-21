@@ -219,19 +219,23 @@ matters because MySQL treats the two very differently.
 | Author | PostgreSQL | MySQL 8 | SQLite |
 | --- | --- | --- | --- |
 | `t.string({ length: n })` | `varchar(n)` | `VARCHAR(n)` | `TEXT` |
-| `t.text()` | `text` | `VARCHAR(191)` (see note) | `TEXT` |
+| `t.text()` | `text` | `TEXT` | `TEXT` |
 
 `t.string({ length })` renders a portable `VARCHAR(N)` that is fully indexable on
 every target; `length` defaults to 255 when omitted. Reach for it for
 identifiers, slugs, emails, status values, and any column that appears in a
-primary key or unique index.
+primary key or unique index — MySQL cannot index an unbounded `TEXT` column
+without a prefix length.
 
-> **MySQL note:** `t.text()` currently renders `VARCHAR(191)` on MySQL 8 (a
-> legacy utf8mb4 index-prefix limit), so a value longer than 191 characters is
-> rejected there even though it stores fine on PostgreSQL and SQLite. Until
-> unbounded `TEXT` rendering lands, prefer `t.string({ length })` with an
-> explicit cap for portable columns, and keep genuinely long text within 191
-> characters on MySQL targets.
+`t.text()` renders an unbounded `TEXT` on every target, so a long value stores
+identically on PostgreSQL, MySQL, and SQLite. Use it for prose, descriptions,
+and other free text you do not index.
+
+> **MySQL note:** because `t.text()` is an unbounded `TEXT` on MySQL 8, it cannot
+> be a primary key, unique, or index member there (MySQL rejects a `TEXT` key
+> without a prefix length). Use `t.string({ length })` for any column you key or
+> index. A `t.text()` column placed in a key currently surfaces this as MySQL's
+> apply-time error rather than an earlier validation error.
 
 ## Indexes
 
