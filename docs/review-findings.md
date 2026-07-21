@@ -69,12 +69,19 @@ Update the status as items land.
   matching the IR path (`model::ir::VectorMetric`, deserialize-bounded). Tests:
   known values parse, absent defaults to cosine, `"manhatten"` is rejected.
 
-- [ ] **7. SQLite numeric-literal column stores as `REAL` (lossy) despite docs
-  promising exact decimal text.** `docs/dialects.md` promises exact-decimal-text
-  storage, but the `numeric`-typed *literal* column path maps to SQLite `REAL`
-  (`declarative.rs:1261`), coercing through a binary float. The typed `t.numeric()`
-  path is correct (an override rescues it); the trap is the numeric-literal column,
-  a narrow authoring surface that also produces phantom snapshot↔introspection drift.
+- [x] **7. SQLite numeric-literal column stored as `REAL`/`NUMERIC` (lossy) despite
+  docs promising exact decimal text.** Two paths lost precision: the declarative
+  emitter mapped `numeric` → `REAL`, and the schema kernel mapped a numeric
+  `t.literal()` → `NUMERIC` — both coerce a wide decimal through a binary float,
+  and both diverged from the model's affinity (phantom snapshot↔introspection
+  drift). Fixed: both now emit `TEXT` (exact decimal text, matching the
+  `ColType::Decimal` SQLite override), and `sqlite_canonical_type` maps
+  `numeric`/`decimal` → `text` affinity so the model and live introspection agree.
+  Verified on live SQLite (`node:sqlite`): a wide decimal round-trips EXACT as
+  TEXT but LOSES precision as REAL/NUMERIC, and the numeric-literal
+  `CHECK (col = 3.14)` still passes against the TEXT column (SQLite comparison
+  rule 2 applies TEXT affinity to the literal). MySQL (`DECIMAL(65,30)`) and
+  PG (`numeric`) were already exact and are unchanged.
 
 - [ ] **8. `apply` is O(n²) with per-file connect + advisory-lock cycles.** The CLI
   loops per migration file (`cli.ts:862`), re-authoring the growing prior set each
