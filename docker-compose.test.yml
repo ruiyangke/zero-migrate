@@ -1,0 +1,37 @@
+# Local test databases for zero-migrate.
+#
+# Bring up:   docker compose -f docker-compose.test.yml up -d
+# Point tests at them:
+#   export ZERO_MIGRATE_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:5434/zero_migrate_test
+#   export ZERO_MIGRATE_MYSQL_URL=mysql://root:root@127.0.0.1:3306/zero_migrate_test
+# Tear down:  docker compose -f docker-compose.test.yml down -v
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: zero_migrate_test
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d zero_migrate_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  mysql:
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: zero_migrate_test
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -proot --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 60

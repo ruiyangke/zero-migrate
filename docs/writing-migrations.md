@@ -29,9 +29,11 @@ export default {
     table("accounts").create({
       columns: {
         id: ids.typeId({ prefix: "acct" }).primaryKey(),
-        email: t.text().notNull(),
-        display_name: t.text(),
-        state: t.text().notNull().default("invited"),
+        // `email` is uniquely indexed, so it is a bounded `t.string` (VARCHAR);
+        // MySQL cannot index an unbounded `t.text()`. `state` is a short vocabulary.
+        email: t.string({ length: 254 }).notNull(),
+        display_name: t.string({ length: 255 }),
+        state: t.string({ length: 32 }).notNull().default("invited"),
         created_at: t.timestamp().notNull().default(now()),
       },
       indexes: [
@@ -134,7 +136,7 @@ const auditEvents = table("events", { schema: "app_data" });
 auditEvents.create({
   columns: {
     id: t.uuid().primaryKey().default(uuidV4()),
-    kind: t.text().notNull(),
+    kind: t.string({ length: 32 }).notNull(),
   },
 });
 
@@ -167,7 +169,8 @@ Build every column with the immutable `t` and `ids` helpers:
 | --- | --- |
 | `ids.typeId({ prefix })` | TypeID 0.3 text |
 | `ids.ulid()` | ULID text |
-| `t.text({ caseSensitive? })` | Text |
+| `t.text({ caseSensitive? })` | Unbounded text |
+| `t.string({ length?, caseSensitive? })` | Bounded string (`VARCHAR(N)`; length defaults to 255) |
 | `t.textArray()` | Text array |
 | `t.numeric({ precision?, scale? })` | Exact decimal number |
 | `t.char({ length })` | Fixed-length text |
@@ -356,7 +359,7 @@ table("memberships").create({
   columns: {
     account_id: t.uuid().notNull(),
     organization_id: t.uuid().notNull(),
-    role: t.text().notNull().default("member"),
+    role: t.string({ length: 32 }).notNull().default("member"),
   },
   primaryKey: ["account_id", "organization_id"],
   uniques: [

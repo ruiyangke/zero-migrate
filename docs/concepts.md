@@ -18,7 +18,7 @@ export default {
     table("accounts").create({
       columns: {
         id: ids.typeId({ prefix: "acct" }).primaryKey(),
-        email: t.text().notNull(),
+        email: t.string({ length: 254 }).notNull(),
       },
     });
   },

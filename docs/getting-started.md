@@ -86,9 +86,12 @@ export default {
     table("users").create({
       columns: {
         id: ids.typeId({ prefix: "user" }).primaryKey(),
-        email: t.text().notNull(),
-        display_name: t.text(),
-        state: t.text().notNull().default("invited"),
+        // `email` is uniquely indexed below, so it is a bounded `t.string`
+        // (VARCHAR); MySQL cannot index an unbounded `t.text()`. `state` is a short
+        // controlled vocabulary, also bounded.
+        email: t.string({ length: 254 }).notNull(),
+        display_name: t.string({ length: 255 }),
+        state: t.string({ length: 32 }).notNull().default("invited"),
         created_at: t.timestamp().notNull().default(now()),
       },
     });
@@ -140,7 +143,7 @@ export default {
     table("projects").create({
       columns: {
         id: ids.typeId({ prefix: "proj" }).primaryKey(),
-        name: t.text().notNull(),
+        name: t.string({ length: 255 }).notNull(),
         archived: t.boolean().notNull().default(false),
         created_at: t.timestamp().notNull().default(now()),
       },
@@ -361,7 +364,7 @@ export default {
   up() {
     table("users")
       .column("timezone")
-      .add({ type: t.text().notNull().default("UTC") });
+      .add({ type: t.string({ length: 64 }).notNull().default("UTC") });
   },
 };
 ```

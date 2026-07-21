@@ -50,7 +50,9 @@ export default {
       columns: {
         id: ids.typeId({ prefix: "ord" }).primaryKey(),
         total: t.numeric({ precision: 12, scale: 2 }).notNull(),
-        status: t.text().notNull().default("pending"),
+        // `status` is indexed below, so it is a bounded `t.string` (VARCHAR); a
+        // MySQL index needs a bounded/prefix type, never unbounded `t.text()`.
+        status: t.string({ length: 32 }).notNull().default("pending"),
         created_at: t.timestamp().notNull().default(now()),
       },
     });

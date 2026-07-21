@@ -197,7 +197,9 @@ import { table, t, uuidV4 } from "zero-migrate";
 table("accounts").create({
   columns: {
     id: t.uuid().primaryKey().default(uuidV4()),
-    email: t.text().notNull(),
+    // `email` is uniquely indexed, so it is a bounded `t.string` (VARCHAR) — a
+    // MySQL index needs a bounded/prefix type, never unbounded `t.text()`.
+    email: t.string({ length: 254 }).notNull(),
   },
   indexes: [
     { name: "accounts_email_uq", on: ["email"], unique: true },
@@ -209,6 +211,33 @@ Table-level foreign keys are portable across all three targets, including
 composite keys and references to non-`id` columns. Local and referenced column
 tuples must be nonempty, have the same arity, and preserve their intended
 positional order. Validate the complete migration for every target.
+
+### Strings: `t.string` vs `t.text`
+
+Choose by intent: `t.string({ length })` for a **bounded** value you index,
+filter, or key on, and `t.text()` for **unbounded** prose. The distinction
+matters because MySQL treats the two very differently.
+
+| Author | PostgreSQL | MySQL 8 | SQLite |
+| --- | --- | --- | --- |
+| `t.string({ length: n })` | `varchar(n)` | `VARCHAR(n)` | `TEXT` |
+| `t.text()` | `text` | `TEXT` | `TEXT` |
+
+`t.string({ length })` renders a portable `VARCHAR(N)` that is fully indexable on
+every target; `length` defaults to 255 when omitted. Reach for it for
+identifiers, slugs, emails, status values, and any column that appears in a
+primary key or unique index — MySQL cannot index an unbounded `TEXT` column
+without a prefix length.
+
+`t.text()` renders an unbounded `TEXT` on every target, so a long value stores
+identically on PostgreSQL, MySQL, and SQLite. Use it for prose, descriptions,
+and other free text you do not index.
+
+> **MySQL note:** because `t.text()` is an unbounded `TEXT` on MySQL 8, it cannot
+> be a primary key, unique, or index member there (MySQL rejects a `TEXT` key
+> without a prefix length). Use `t.string({ length })` for any column you key or
+> index. A `t.text()` column placed in a key currently surfaces this as MySQL's
+> apply-time error rather than an earlier validation error.
 
 ## Indexes
 
