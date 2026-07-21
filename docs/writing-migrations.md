@@ -167,7 +167,8 @@ Build every column with the immutable `t` and `ids` helpers:
 | --- | --- |
 | `ids.typeId({ prefix })` | TypeID 0.3 text |
 | `ids.ulid()` | ULID text |
-| `t.text({ caseSensitive? })` | Text |
+| `t.text({ caseSensitive? })` | Unbounded text |
+| `t.string({ length?, caseSensitive? })` | Bounded string (`VARCHAR(N)`; length defaults to 255) |
 | `t.textArray()` | Text array |
 | `t.numeric({ precision?, scale? })` | Exact decimal number |
 | `t.char({ length })` | Fixed-length text |

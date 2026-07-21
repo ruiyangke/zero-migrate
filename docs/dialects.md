@@ -210,6 +210,29 @@ composite keys and references to non-`id` columns. Local and referenced column
 tuples must be nonempty, have the same arity, and preserve their intended
 positional order. Validate the complete migration for every target.
 
+### Strings: `t.string` vs `t.text`
+
+Choose by intent: `t.string({ length })` for a **bounded** value you index,
+filter, or key on, and `t.text()` for **unbounded** prose. The distinction
+matters because MySQL treats the two very differently.
+
+| Author | PostgreSQL | MySQL 8 | SQLite |
+| --- | --- | --- | --- |
+| `t.string({ length: n })` | `varchar(n)` | `VARCHAR(n)` | `TEXT` |
+| `t.text()` | `text` | `VARCHAR(191)` (see note) | `TEXT` |
+
+`t.string({ length })` renders a portable `VARCHAR(N)` that is fully indexable on
+every target; `length` defaults to 255 when omitted. Reach for it for
+identifiers, slugs, emails, status values, and any column that appears in a
+primary key or unique index.
+
+> **MySQL note:** `t.text()` currently renders `VARCHAR(191)` on MySQL 8 (a
+> legacy utf8mb4 index-prefix limit), so a value longer than 191 characters is
+> rejected there even though it stores fine on PostgreSQL and SQLite. Until
+> unbounded `TEXT` rendering lands, prefer `t.string({ length })` with an
+> explicit cap for portable columns, and keep genuinely long text within 191
+> characters on MySQL targets.
+
 ## Indexes
 
 | Feature | PostgreSQL | SQLite | MySQL 8 |
