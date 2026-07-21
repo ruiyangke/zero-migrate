@@ -17,10 +17,13 @@ Update the status as items land.
   MySQL's server-default collation made string comparison case-INSENSITIVE while
   PG/SQLite are case-SENSITIVE (`WHERE email = 'Foo'` matched `'foo'` on MySQL
   only). Fixed: every MySQL character column now pins an explicit collation —
-  `utf8mb4_bin` (case-sensitive default, matching PG/SQLite) or
+  `utf8mb4_0900_as_cs` (case-sensitive default, matching PG/SQLite) or
   `utf8mb4_0900_ai_ci` (`caseSensitive: false`). Typed-ids keep `ascii_bin`;
   references match by type so FKs stay collation-compatible. Verified on live
-  MySQL 8.4. Commit `68e0b20`.
+  MySQL 8.4. Commit `68e0b20`; collation corrected from `utf8mb4_bin` to
+  `utf8mb4_0900_as_cs` (NO PAD — trailing spaces stay significant, so a UNIQUE
+  key treats `'bar'`/`'bar '` as distinct exactly like PG/SQLite; `utf8mb4_bin`
+  is PAD SPACE and diverged) in a follow-up, re-verified on live MySQL 8.4.10.
 
 ## High severity (correctness / portability)
 
