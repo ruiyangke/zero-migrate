@@ -13,20 +13,18 @@ Update the status as items land.
   keyed columns; injected system columns bounded. Verified against live MySQL 8.4.
   Commits `864e3b7`, `ee50e05`, `23cc698`; examples/docs audited in `218b466`.
 
+- [x] **Default and explicit case-sensitivity diverged on MySQL** (was High #1).
+  MySQL's server-default collation made string comparison case-INSENSITIVE while
+  PG/SQLite are case-SENSITIVE (`WHERE email = 'Foo'` matched `'foo'` on MySQL
+  only). Fixed: every MySQL character column now pins an explicit collation —
+  `utf8mb4_bin` (case-sensitive default, matching PG/SQLite) or
+  `utf8mb4_0900_ai_ci` (`caseSensitive: false`). Typed-ids keep `ascii_bin`;
+  references match by type so FKs stay collation-compatible. Verified on live
+  MySQL 8.4. Commit `68e0b20`.
+
 ## High severity (correctness / portability)
 
-- [ ] **1. Default and explicit case-sensitivity diverge on MySQL.**
-  On PG/SQLite string comparison is case-SENSITIVE by default; on MySQL the
-  server default collation (typically `utf8mb4_0900_ai_ci`) makes it
-  case-INSENSITIVE. `column_snapshot_for_field` (`declarative.rs:2671`) only
-  honors `caseSensitive: false` off-MySQL; `caseSensitive: true` and the default
-  emit **no** collation on MySQL, and no `_bin`/`_cs` collation is ever pinned.
-  Result: `WHERE email = 'Foo'` matches `'foo'` on MySQL only, unique constraints
-  diverge, and rendering depends on the server's inherited default. SQLite already
-  gets `COLLATE NOCASE` (`declarative.rs:1199`); MySQL needs the parallel explicit
-  collation on both the case-sensitive and case-insensitive paths.
-
-- [ ] **2. Deploy-scoped crash-recovery has two dead fault points and no test,
+- [ ] **1. Deploy-scoped crash-recovery has two dead fault points and no test,
   while doc comments claim a test exists.** `DEPLOY_BEFORE_INPROCESS_ABORT` and
   `DEPLOY_SUCCESS_COMMITTED_STAMP_FAILS` (`fault.rs:122,135`) are commented
   "tripped by the deploy-recovery crash-fuzz test only", but a full-repo grep
