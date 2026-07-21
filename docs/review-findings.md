@@ -58,12 +58,18 @@ Update the status as items land.
   app's table refused / JOIN smuggling another app's table refused. Full suite green
   (no legitimate view pattern regressed).
 
-- [ ] **5. `DeclaredOnly` non-default gate defined and documented but never
-  enforced.** `forbids_nondefault_on_enforced_path` (`policy knob.rs:182`) is
-  invoked only by its own unit tests; no loader/composer/sealer calls it. Latent
-  today (no builtin knob is `DeclaredOnly`), but the registry is consumer-
-  extensible, so a consumer registering a `DeclaredOnly` knob and trusting the
-  documented "is rejected" guarantee gets silent policy degradation.
+- [x] **5. `DeclaredOnly` non-default gate defined and documented but never
+  enforced.** `forbids_nondefault_on_enforced_path` (`policy knob.rs`) — documented
+  as "the sole predicate the composer/sealer should consult for the II.6 gate" — was
+  invoked only by its own unit tests; no loader/composer/sealer called it. A consumer
+  registering a `DeclaredOnly` knob (the registry is consumer-extensible) and setting
+  it non-default would have loaded and sealed silently. Fixed: the document loader
+  (`document.rs`) now rejects, fail-closed at load, any `[[grant]]`/`[[require]]` that
+  raises a `DeclaredOnly` knob above its default, using the composer's own
+  `!leq_value(value, default)` "above default" test (so `StrSet` order-insensitivity
+  is honored and a value-equals-default no-op stays admissible). New `LoadError`
+  variant `DeclaredOnlyNonDefault`. Tests: non-default grant rejected, default-valued
+  grant allowed. `Enforced`/`HostEnforced` knobs unaffected; full suite green.
 
 - [x] **6. Vector metric has a silent lossy `_ => Cosine` fallback.** A typo'd or
   out-of-set metric coerced to Cosine (`query.rs`, `build_create_indexes`) — the
