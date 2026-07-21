@@ -4,6 +4,25 @@ Actionable items from the competitive survey (2026), ordered by leverage. Each
 item names the gap, why it matters against the current landscape, and rough scope.
 Working notes; not staged.
 
+## String types (in progress)
+
+- [x] Bounded `t.string({ length })` -> `VARCHAR(N)` (Postgres/MySQL) / `TEXT`
+  (SQLite), default length 255. Wires the previously-inert `ColType::String`
+  variant to its documented intent; distinct from unbounded `t.text()`. Shipped
+  in the engine, the TS SDK, and the docs.
+- [ ] Unbounded `t.text()` -> `TEXT` on MySQL (today it renders `VARCHAR(191)`,
+  silently capping values >191 chars). Blocked on modeling: policy-INJECTED
+  system columns (`id` PK, `created_by`, `updated_by`) are facetless
+  `ColType::Text` and would be swept into unbounded text, turning the `id` PK
+  into an invalid MySQL `text` PRIMARY KEY. Requires (a) typing injected system
+  columns as bounded strings in the charter, and (b) a fail-closed rule rejecting
+  a `t.text()` column used in a MySQL PK/unique/index. A render facet
+  (`unbounded_text` + MySQL `ddl_type_override`) is proven; the blocker is
+  column-type modeling of injected/keyed columns, not rendering.
+- [ ] Case-collation parity: `caseSensitive` should pin an explicit collation on
+  MySQL (default is case-insensitive there; `caseSensitive: true` is currently
+  ignored), so string equality/uniqueness matches Postgres/SQLite.
+
 ## Highest leverage (unblock adoption beyond the niche)
 
 - [ ] Rendered-SQL preview / dry-run. Today `plan`/`preview` return structured
