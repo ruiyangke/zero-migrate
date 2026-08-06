@@ -7,7 +7,10 @@
 # Tear down:  docker compose -f docker-compose.test.yml down -v
 services:
   postgres:
-    image: postgres:16
+    # Must match the CI service image. The engine generates ids through core
+    # `uuidv7()`, which PostgreSQL 18 introduced, so the live suite fails against
+    # anything older with "function uuidv7() does not exist".
+    image: postgres:18
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
