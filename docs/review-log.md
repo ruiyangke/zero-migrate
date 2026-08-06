@@ -277,6 +277,37 @@ Reporting success for a command the user did not ask for is the worst version of
 this bug. It now refuses a `--`-prefixed token and names the inline form, which
 still passes a literal dash-leading value when one is meant.
 
+## Test infrastructure the apply fixes needed and did not have
+
+Two apply-layer fixes landed without a regression test, which I would rather say
+plainly than paper over. Both are verified by tracing the call path and by a green
+full suite, so neither regressed anything - but neither has a test that would catch
+the bug coming back.
+
+The blocker is the same in both cases, and it is missing infrastructure rather than
+missing effort:
+
+**No fault point in the crash window.** `crate::fault` names six boundaries
+(`DML_AFTER_STMT_BEFORE_JOURNAL`, `BACKFILL_MID_BATCHES`, two deploy points, and so
+on) but none between `record_started` and the `up`, or between the `up` and
+`record_completed`. Those two windows are exactly where the inflight-marker bugs
+live. Adding `NONTXN_AFTER_STARTED_BEFORE_UP` and `NONTXN_AFTER_UP_BEFORE_COMPLETED`
+would make both testable.
+
+**No recording backend.** Asserting that the executor passes the right
+`had_inflight` needs a `MigrationBackend` stub that records its arguments. That trait
+has 33 methods, so a stub is several hundred lines of boilerplate - worth building
+once as shared test support, not worth inlining for a single assertion.
+
+Also worth noting: the single existing non-transactional recovery test
+(`pg_scenarios.rs`) plants a marker whose checksum MATCHES the supplied migration, so
+the mismatch case was untestable by construction. That is why the tamper hole
+survived - the test that looked like it covered recovery only ever exercised the
+agreeing case.
+
+There are no live-MySQL integration tests at all; the MySQL recovery paths are
+covered only by render-level tests against a recording session.
+
 ## A note on running the host tests
 
 `pnpm --filter zero-migrate-cli test:host` has six failing tests in a fresh
