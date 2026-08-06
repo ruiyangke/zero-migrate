@@ -67,6 +67,44 @@ Making it fail closed is a one-line change but would break MySQL apply outright 
 IR-generated SQL routes through the seam, which is exactly the kind of guess I did
 not want to make on your behalf.
 
+### Q3 - A quoted mixed-case schema is admitted as if it were the owned one
+
+Under a scope owning `app1`, all of these are admitted:
+
+```
+SELECT * FROM "APP1".secrets    -> ALLOW
+SELECT * FROM "App1".t          -> ALLOW
+CREATE TABLE "APP1".t (x int)   -> ALLOW
+```
+
+In PostgreSQL `"APP1"` and `app1` are different schemas, so on the face of it this
+reads as a confinement bypass. It is not that simple, which is why I stopped.
+
+`SchemaScope` documents the case-insensitive match as deliberate: a case-variant
+qualifier is admitted and then canonicalized to `project_schema` at render
+(`IrAuthor::effective_schema`), "so gate and render never diverge". For an UNQUOTED
+`APP1` that is not just safe but required, because PostgreSQL folds it to `app1`
+before anyone sees it.
+
+The gap is that the rationale does not separate the two cases, and the code cannot
+either, because it folds a second time. By the time the guard sees a parse tree,
+PostgreSQL has ALREADY folded unquoted names and preserved quoted ones - so the two
+are perfectly distinguishable at that point:
+
+- unquoted `APP1` arrives as `app1`  -> matches the owned schema, correctly admitted
+- quoted `"APP1"` arrives as `APP1`  -> a genuinely different schema
+
+`grants_cross_schema` runs the already-folded parse-tree name through
+`normalize_pg_identifier` again, and that second fold is what erases the
+distinction. A byte-exact comparison there would admit the unquoted form and refuse
+the quoted one, which is exactly the desired split.
+
+I did not make that change because the safety argument in the docs rests on the
+render canonicalization, and I would want to confirm it covers every path that
+reaches the guard - raw SQL is not re-rendered, so a raw body naming `"APP1".secrets`
+would execute verbatim against a schema the policy never granted. That is a real
+question about the raw-SQL paths rather than something to flip on my own.
+
 ## Decisions made
 
 ### D1 - Fix the broken workspace build by leaving the width facets unset in the descriptor bridge
