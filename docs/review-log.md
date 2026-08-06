@@ -530,9 +530,42 @@ Marked `fix(policy)!` because a charter/draft pair that was admitted before is n
 refused - that is the point, but it is a behaviour change for anyone relying on it.
 
 The regression test is in `tests/compose_oracle.rs` and is verified RED against the
-pre-fix code. It is a hand-built shape rather than an oracle case, so the oracle
-itself still cannot reach a masked hole. Widening it to multi-rule-per-key documents
-is still worth doing and is the remaining half of task 15.
+pre-fix code.
+
+**The oracle now reaches this shape too.** My first attempt at widening it did not:
+adding a layered-charter sweep changed nothing, because the pattern pool held only
+three globs (`app_*`, `app_* minus app_tmp_*`, `staging`) and none of them produces a
+region whose witness falls outside a mask. The missing ingredient was a UNIVERSAL
+scope - `witness_of(All)` is schema `a`, which every specific mask misses. Adding
+`Pat::All` to the pool is what made the escalation reachable by brute force.
+
+Worth remembering: the oracle was not merely too small, it was too small in one
+specific dimension, and a sweep that looked like it covered layering still could not
+express the bug. A negative result from a widened test is information - it told me the
+widening was in the wrong direction.
+
+### F12 - Admission was order-dependent and refused valid drafts (fixed)
+
+Adding the universal scope immediately exposed a second, independent bug in the arm
+the escalation fix had not touched:
+
+```
+base:  sql.raw = true over "all"
+over:  sql.raw = true over ["app_*"]
+draft: sql.raw = true over "all"      -> UncoveredRegionNotRepresentable
+```
+
+Nothing is escalated - the charter grants `sql.raw` everywhere and the draft asks for
+exactly that. The uncovered-region arm subtracts each charter rule in layer order and
+aborted on the first unrepresentable step. `All` minus `app_*` has no glob form; `All`
+minus `All` empties the region at once. So admission depended on the order rules
+happened to sit in the stack.
+
+Fixed by deferring an unrepresentable subtraction and retrying until a pass makes no
+progress, failing closed only if the region is still non-empty. This one was
+fail-closed, so it refused valid policies rather than admitting invalid ones - the
+safe direction, but still wrong, and the kind of thing an operator would experience as
+the tool inexplicably rejecting a correct charter.
 
 ## Findings that did NOT survive verification
 
