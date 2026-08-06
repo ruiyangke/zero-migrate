@@ -465,6 +465,48 @@ precedent for a 63-byte bound in that exact file. Not yet applied - it rejects i
 that is accepted today, so it wants its own commit and a check of the existing
 fixtures.
 
+### F11 - An untrusted draft can re-grant authority the charter denies (CONFIRMED, unfixed)
+
+The most serious thing this review has turned up. `admit` is the sole untrusted-draft
+ingress - the one trust boundary in the policy crate - and it can be walked past.
+
+Charter: the root grants `sql.raw` over `"all"`, and a second layer denies it at
+`secret`. The charter is correct on its own:
+
+```
+charter grants(secret.t) = Some(Bool(false))
+```
+
+Now admit an untrusted draft that simply re-grants `sql.raw` over `"all"`:
+
+```
+ADMITTED -> grants(secret.t) = Some(Bool(true))
+```
+
+The draft got back exactly the authority the operator's second layer took away.
+
+**Cause.** `boundary.rs` walks the charter's grant rules, meets each scope with the
+draft's granted scope, and checks ONE witness object per region - assuming the
+charter's effective value is constant across that region. It is not, once a lower
+layer has carved a hole in it. And the hole is invisible to that walk, because
+`compose.rs`'s `layered_nondefault_grant_rules` drops rules whose value is at or below
+default. Layer 2's `false @ secret` IS such a rule, so it never becomes a region
+boundary, and the single witness lands somewhere the charter still says true.
+
+**Why the oracle missed it.** `tests/compose_oracle.rs` is a brute-force proof of
+exactly this invariant - its own module doc claims "the no-escalation invariant:
+effective is a subset of charter for EVERY key/object". But it generates only one
+rule per key per document, so a charter with a masked hole never appears in its
+universe. The proof is real; its universe is too small.
+
+**Status: not fixed.** The fix has two halves and both belong in the security core, so
+I want it done deliberately rather than at the end of a loop tick: partition the
+object space on every rule boundary INCLUDING default-valued masks (or fail closed
+when no exact partition is representable), and widen the oracle to multi-rule
+documents so it would have caught this. Tracked as task 15.
+
+This is the one item on this list I would look at first.
+
 ## Findings that did NOT survive verification
 
 Recording these so nobody re-chases them.
