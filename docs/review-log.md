@@ -214,6 +214,73 @@ same six fail either way. Not a regression, but a rough first-run experience - t
 suite could skip them with a clear message when the addon is absent, the way the
 Rust live tests skip on an unset DSN.
 
+### F7 - A rename could confer authority every other spelling denies (fixed)
+
+`RenameStmt` is one parse node for `ALTER <anything> RENAME TO`. The gate reached a
+verdict only for TABLE and COLUMN and fell through to `Ok` for everything else, and
+role/database/schema renames carry their target in `subname`/`newname`, scalar slots
+the cross-schema walk never visits. Probed against a charter owning only `app1`:
+
+```
+ALTER ROLE postgres RENAME TO pwned         -> ALLOW
+ALTER DATABASE postgres RENAME TO pwned     -> ALLOW
+ALTER SCHEMA control RENAME TO app_stolen   -> ALLOW
+ALTER SCHEMA app1 RENAME TO control         -> ALLOW
+DROP SCHEMA control CASCADE                 -> deny
+ALTER ROLE postgres SUPERUSER               -> deny
+```
+
+The asymmetry is what makes it a bug rather than a decision. Each now routes back to
+the rule that owns it.
+
+### F8 - A grant with a hole in it reported as granted everywhere (fixed)
+
+The worst one so far, because the guard spends the answer as trust.
+
+`grant_region` asks whether a key is granted over the whole universe. The per-layer
+visible region is granted-minus-masked-above, and `All` minus a real mask has no
+glob representation, so the code fell back to the un-subtracted `All` with a comment
+calling the widening "safe for the top test". It is the opposite: widening to `All`
+IS the top answer. Verified through the operator TOML path, not the Rust API:
+
+```
+base: sql.raw = true  over "all"
+over: sql.raw = false over ["secret"]
+
+grants(secret.t)   = Bool(false)     the hole is real
+grants(app_main.t) = Bool(true)
+grant_is_top       = true            fail-open
+```
+
+Both consumers are in the guard: `sql.raw` at `Top` is the fully-trusted raw posture
+admitting `SET search_path` and `CREATE FUNCTION`, and `schema.cross_schema` at
+`Top` makes the schema scope `Unconfined`. An operator who granted broadly and then
+carved out one schema got LESS confinement than one who carved out nothing.
+
+Fixed by tracking exact-versus-widened and answering `Top` only from an exact
+region. The detail that makes this precise rather than blunt: `All.difference
+(Nothing)` is representable, so a widened result always means a real hole. The
+brute-force compose oracle passes unchanged.
+
+## Findings that did NOT survive verification
+
+Recording these so nobody re-chases them.
+
+- **IR: "existence_guard is omitted from checksums."** Refuted. The omission from
+  `ChecksumInput` is deliberate and documented; the IR-path drift anchor is
+  `Checksum::of_ir` over the op-list, and the op-level `existenceGuard` is part of
+  that canonical encoding. The finding missed the second half. It did point at a real
+  test gap though - every checksum fixture left the field `None`, so nothing pinned
+  the load-bearing half of the argument. Test added.
+- **Render: "a hostile column name breaks MySQL quoting."** Half right. Plain column
+  names escape correctly; only the constraint path was broken (see F4). A probe of
+  the plain path showed correct output, which is why the fix landed where it did.
+- **Policy: "the registry accepts permissive defaults."** Real but misrated as high.
+  `PolicyRegistry::with` genuinely does not enforce the invariant `KnobDef` documents
+  ("the default is ALWAYS the tightest"), but the registry is assembled by the trusted
+  Rust host, not across a trust boundary. Worth fixing as an unkept promise; not an
+  escalation.
+
 ## Reported but NOT yet verified
 
 Findings below came from review agents and are recorded as leads. I have not
