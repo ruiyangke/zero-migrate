@@ -134,6 +134,43 @@ implement the orchestrator over the existing leaf. I have made the doc comments 
 the situation plainly in the meantime, so nobody builds against a promise the crate
 does not keep.
 
+### Q5 - `deploy_envelopes` opens rename obligations it gives the caller no way to discharge
+
+Traced the whole chain: `deploy_envelopes` -> `deploy_envelopes_locked` ->
+`apply_applied_plan_with_touched_and_depends` -> `apply_plan_with_touched_and_depends`
+-> `apply_plan_with_touched_and_depends_scoped(..., None)`. The `None` is deliberate
+and the comment says so - that wrapper is "the routine (non-deploy-handler) wrapper".
+The `_scoped` variant that takes a real `DeployRecoveryScope` has no in-crate caller
+at all.
+
+Meanwhile `journal.rs` documents a same-deploy recovery protocol in detail: each
+EXPAND writes an `in_progress` marker atomically with its obligation, a later
+same-deploy failure drives the shared abort over exactly that deploy's obligations,
+and "on a process CRASH the NEXT same-app deploy reconciles it FIRST". None of that
+runs for `deploy_envelopes`, because no marker is ever written.
+
+The design intent is legible: an external control layer is meant to drive the scoped
+variant, and `deploy_envelopes` is the crate's own convenience entry. Two things make
+that uncomfortable anyway:
+
+1. It is public API named `deploy`. A host reasonably assumes it deploys.
+2. `AggregateOutcome` carries only `applied`, `skipped`, `recovered` - not
+   `pending_contract`, not `opened_obligations`. So when envelope A opens a rename
+   obligation and envelope B then fails, the caller is not told which obligation was
+   opened. The table stays blocked by the apply-time interlock, and discharging it
+   means digging `pending_version` out of the meta schema by hand.
+
+Fail-closed, not corrupting - but a wedged table with no programmatic way out.
+
+Your call, since both directions are public-API changes: thread a real
+`DeployRecoveryScope` through `deploy_envelopes` and drive the abort on failure, or
+keep the external-handler design and at minimum surface `opened_obligations` on
+`AggregateOutcome` so a caller can act. Adding that field is itself breaking for
+struct-literal construction, which is why I did not just do it.
+
+The third option is to correct `journal.rs`, which currently reads as though the
+recovery leg exists in this crate.
+
 ## Decisions made
 
 ### D1 - Fix the broken workspace build by leaving the width facets unset in the descriptor bridge
