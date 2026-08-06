@@ -574,6 +574,29 @@ fail-closed, so it refused valid policies rather than admitting invalid ones - t
 safe direction, but still wrong, and the kind of thing an operator would experience as
 the tool inexplicably rejecting a correct charter.
 
+### F13 - A bare schema name escaped confinement in REINDEX and COMMENT (fixed)
+
+The reported version of this was partly wrong, which the probe settled. Under a
+charter owning only `app1`:
+
+```
+REINDEX SCHEMA control            -> ALLOW      (reported, confirmed)
+REINDEX DATABASE postgres         -> ALLOW      (reported, confirmed)
+COMMENT ON SCHEMA control IS 'x'  -> ALLOW      (reported, confirmed)
+DROP SCHEMA control CASCADE       -> deny       (reported as a hole; it is not)
+CREATE SCHEMA control             -> deny
+```
+
+So `DROP SCHEMA` was already refused; the real gaps were REINDEX and COMMENT. Both
+carry their target as a bare string rather than a relation or a qualified list, which
+is the one slot shape the cross-schema walk does not visit, and both statement kinds
+sat in the unconditionally-safe list.
+
+REINDEX is the one that matters. Commenting on a foreign schema is a metadata write;
+rebuilding every index in a schema you do not own takes an ACCESS EXCLUSIVE lock on
+each of its tables, which is a cross-tenant outage. `REINDEX DATABASE`/`SYSTEM` reach
+past schemas entirely and now join the other database-wide verbs.
+
 ## Findings that did NOT survive verification
 
 Recording these so nobody re-chases them.
