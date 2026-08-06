@@ -73,6 +73,12 @@ jobs:
       # The addon crate WITHOUT the Node ABI (default features link-fail off a napi build).
       - name: cargo test (zero-migrate-node, no napi ABI)
         run: cargo test -p zero-migrate-node --no-default-features
+      # Doc links rot silently: a reference that cannot be resolved still reads as
+      # authoritative, and several had come to name items that no longer exist.
+      - name: cargo doc (no broken intra-doc links)
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
 
   # ---------------------------------------------------------------------------
   # node: build the JS packages, typecheck, and run the DB-free test suites.
