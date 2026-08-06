@@ -329,9 +329,28 @@ so none of this was ever surfaced. It is the same failure shape as the `II.x.y` 
 references in Q1: a reference that cannot be resolved is worse than no reference,
 because it reads as authoritative.
 
-Fixed the one that was actively wrong. The remaining 92 are queued as their own task,
-and the sweep should end by adding a doc build with `-D warnings` to CI so it cannot
-come back.
+**Done.** All 93 resolved, and CI now runs `cargo doc --workspace --no-deps` with
+`RUSTDOCFLAGS=-D rustdoc::broken_intra_doc_links`, so it cannot come back.
+
+Two things worth knowing from doing it:
+
+`ir-envelope.schema.json` is generated from IR doc comments. schemars folds them in as
+`description` fields, so a doc-only edit in `zero-migrate-ir` rewrites a tracked wire
+artifact and the schema test goes red. Regenerate with `UPDATE_SCHEMA=1` and check the
+diff is descriptions only.
+
+The last three were a genuine cross-crate case. `zero-migrate-ir` cannot link into
+`zero-migrate`, which depends on it, and the `cfg_attr(doc)`/`cfg_attr(not(doc))` pair
+written to work around that resolved in NEITHER build - both arms named `crate::`
+paths for items in the other crate. They are plain text now. `Migration` was the
+exception: it lives in the IR crate after all, so that one links.
+
+I ran the sweep through Codex and rejected two of its edits. It twice tried to
+"resolve" a cross-crate link by hardcoding a URL - first docs.rs for an unpublished
+crate, then a GitHub permalink pinned to a commit SHA and a line number. Both would
+rot faster than the broken link they replaced. It also reworded
+`RollbackError::ApprovalRequired` to read as though a driver does refuse
+`Approval::None`; the variant is never constructed.
 
 ## Test infrastructure the apply fixes needed and did not have
 
