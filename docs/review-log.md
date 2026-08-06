@@ -620,7 +620,7 @@ charter owning only `app1`:
 REINDEX SCHEMA control            -> ALLOW      (reported, confirmed)
 REINDEX DATABASE postgres         -> ALLOW      (reported, confirmed)
 COMMENT ON SCHEMA control IS 'x'  -> ALLOW      (reported, confirmed)
-DROP SCHEMA control CASCADE       -> deny       (reported as a hole; it is not)
+DROP SCHEMA control CASCADE       -> deny       UNDER CONFINED ONLY - see F15
 CREATE SCHEMA control             -> deny
 ```
 
@@ -675,6 +675,57 @@ statement naming its target as a plain string is invisible to it BY CONSTRUCTION
 if that kind also sits in the unconditionally-safe allowlist, it reaches any schema at
 all. Finding them one at a time will keep working and will keep missing some, so I
 have an audit running over every admitted node kind against its protobuf definition.
+
+### F15 - A schema you cannot CREATE, you could still DROP (fixed) - and I got this wrong first
+
+The worst finding of the review, and a correction to my own work.
+
+In F13 I recorded `DROP SCHEMA control CASCADE -> deny` and wrote off the reported
+hole as not real. That probe ran under a **Confined** charter only. Under the
+Platform-shaped charter this engine's own operator fixture builds - `create_schema`
+granted at `scope = "all"`, `cross_schema` scoped to the owned set - it is admitted:
+
+```
+CREATE SCHEMA control        -> CrossSchema
+DROP SCHEMA control CASCADE  -> ALLOW  (destructive=true)
+DROP SCHEMA control, app1 CASCADE -> ALLOW
+```
+
+**Cause.** `grants_drop_object` answers `OBJECT_SCHEMA` with `grants_global_bool
+(KEY_SCHEMA_CREATE_SCHEMA)` - a GLOBAL query that never looks at which schema. The
+create path uses `grants_namespace_bool(..., &schema_obj)`, i.e. at the target. Create
+is object-scoped; drop was not. And the name is a bare single-part String in
+`DropStmt.objects`, which `qualified_list_schema` skips for being under two parts, so
+the cross-schema walk never caught it either.
+
+**Impact** is destruction rather than reach: CASCADE removes every table, view,
+sequence, function, and row in a schema the policy does not own. It is flagged
+destructive, so approval would see it - but approval is about destructiveness, not
+ownership, and an operator approving their own migration has no reason to expect it
+touches another tenant.
+
+**The lesson for me:** a single probe under one posture is not verification. Every
+guard finding I checked earlier was probed under Confined, because that is the fixture
+that was nearest to hand. The postures differ precisely in which grants are global,
+which is exactly the axis these bugs live on. I have gone back and re-run the
+previously "cleared" cases under the Platform shape too.
+
+### F16 - Two globs that render alike sealed identically (fixed)
+
+`write_seg` encoded `SegGlob::render`, and its doc comment justified that by render
+being injective over the `(prefix, suffix, has_star)` triple. It is not, unless the
+triple is canonical:
+
+```
+infix("a*", "b")  renders a**b, matches a*zb
+infix("a", "*b")  renders a**b, matches az*b
+```
+
+`SegGlob::parse` refuses a second `*`, so the strict loader cannot produce these -
+only the public `SegGlob::infix` can, which is why this is low severity and a plain
+fix. The seal now encodes the flag and both pieces separately, so it rests on bytes
+rather than on an invariant enforced in another module. Seals are in-memory, so
+nothing was invalidated.
 
 ## Findings that did NOT survive verification
 
