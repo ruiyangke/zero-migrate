@@ -279,10 +279,12 @@ still passes a literal dash-leading value when one is meant.
 
 ## Test infrastructure the apply fixes needed and did not have
 
-Two apply-layer fixes landed without a regression test, which I would rather say
-plainly than paper over. Both are verified by tracing the call path and by a green
-full suite, so neither regressed anything - but neither has a test that would catch
-the bug coming back.
+The inflight-marker tamper fix DOES now have a regression test
+(`a_mismatched_inflight_marker_aborts_instead_of_replaying`, verified RED against the
+pre-fix code): it turned out testable without new infrastructure, because
+`pg_scenarios` already plants markers by hand.
+
+The MySQL repeatables fix still has none, and the gaps below are why.
 
 The blocker is the same in both cases, and it is missing infrastructure rather than
 missing effort:
