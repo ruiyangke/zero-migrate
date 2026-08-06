@@ -15,7 +15,8 @@ how to build and test, and the commit message conventions.
 ## Development
 
 Prerequisites: a stable Rust toolchain, Node.js 22, and pnpm. The live database
-tests expect PostgreSQL 16 and MySQL 8.
+tests expect PostgreSQL 18 and MySQL 8. `docker-compose.test.yml` brings up both
+at the versions CI uses.
 
 Rust:
 
