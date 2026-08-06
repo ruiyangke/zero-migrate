@@ -499,13 +499,21 @@ effective is a subset of charter for EVERY key/object". But it generates only on
 rule per key per document, so a charter with a masked hole never appears in its
 universe. The proof is real; its universe is too small.
 
-**Status: not fixed.** The fix has two halves and both belong in the security core, so
-I want it done deliberately rather than at the end of a loop tick: partition the
-object space on every rule boundary INCLUDING default-valued masks (or fail closed
-when no exact partition is representable), and widen the oracle to multi-rule
-documents so it would have caught this. Tracked as task 15.
+**Fixed.** The covered-region arm now partitions on EVERY charter grant rule, so a
+mask gets its own region and its own witness. The uncovered-region arm deliberately
+keeps the grant-bearing subset: subtracting a mask there would treat its region as
+charter-covered, and would make `All` minus a mask unrepresentable, turning a precise
+`GrantExceedsCharter` into a fail-closed `UncoveredRegionNotRepresentable` that says
+nothing about what the draft did wrong. I tried the single-set version first and hit
+exactly that, which is what pointed at the two-set split.
 
-This is the one item on this list I would look at first.
+Marked `fix(policy)!` because a charter/draft pair that was admitted before is now
+refused - that is the point, but it is a behaviour change for anyone relying on it.
+
+The regression test is in `tests/compose_oracle.rs` and is verified RED against the
+pre-fix code. It is a hand-built shape rather than an oracle case, so the oracle
+itself still cannot reach a masked hole. Widening it to multi-rule-per-key documents
+is still worth doing and is the remaining half of task 15.
 
 ## Findings that did NOT survive verification
 
