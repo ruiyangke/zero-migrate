@@ -105,6 +105,35 @@ reaches the guard - raw SQL is not re-rendered, so a raw body naming `"APP1".sec
 would execute verbatim against a schema the policy never granted. That is a real
 question about the raw-SQL paths rather than something to flip on my own.
 
+### Q4 - The rollback API is exported but has no implementation
+
+`lib.rs` exports `RollbackTarget`, `RollbackRequest`, `RollbackOptions`,
+`RollbackOutcome`, `RollbackError`, and `RollbackEngineError`. `RollbackRequest` even
+has a constructor. Nothing in the crate consumes one, and `MigrationEngine::rollback`
+does not exist - the doc build says so, and `grep -n "fn rollback" engine.rs` returns
+nothing.
+
+The only reachable rollback is `MigrationBackend::rollback_one_transactional`, the
+per-migration leaf that appends one `rolled_back` event. It performs none of the
+selection-time gating the exported error variants name: `Irreversible`,
+`NonTransactionalDown`, `KeptDependsOnRolledBack`, `ForceSkipDependencyConflict`,
+`Guard`.
+
+The concrete risk is a host that reads the public surface, builds a
+`RollbackRequest`, finds nothing to hand it to, and drives the leaf per migration
+instead. It then unwinds in whatever order it supplied, with no refusal for an
+irreversible migration, no guard over the `down` SQL, and no reverse-topological
+ordering - so a dependency can be torn down beneath a migration that stays applied.
+
+`docs/architecture.md` is already honest ("There is no public high-level rollback
+command; prefer a forward fix"). The code contradicts it by exporting the surface.
+
+Your call, because both directions are public-API changes I should not make
+unilaterally: remove the unused types (a breaking change, `refactor(migrate)!`), or
+implement the orchestrator over the existing leaf. I have made the doc comments state
+the situation plainly in the meantime, so nobody builds against a promise the crate
+does not keep.
+
 ## Decisions made
 
 ### D1 - Fix the broken workspace build by leaving the width facets unset in the descriptor bridge
