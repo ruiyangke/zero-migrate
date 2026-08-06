@@ -31,6 +31,42 @@ Three ways out, and I did not want to churn 150 comments on a guess:
 My preference is (1) if the document still exists, otherwise (2). Tell me which and
 I will do it. Until then I am leaving the tags alone.
 
+### Q2 - MySQL gets the no-op guard at line 1 and has no authorizer at line 2
+
+`guard_for` dispatches the per-engine first-line guard:
+
+```rust
+SqlDialect::Postgres => Box::new(PgGuard::from_config(cfg.clone())),
+SqlDialect::Sqlite   => Box::new(SqliteDescriptorGuard::new()),
+SqlDialect::Mysql    => Box::new(SqliteDescriptorGuard::new()),
+```
+
+`SqliteDescriptorGuard::check` returns `Ok(GuardOutcome::default())` unconditionally
+- no string check, no denial.
+
+For SQLite that is justified and documented: the descriptor emitter vets at the
+author boundary (line 1) and `apply/backend/sqlite/authorizer.rs` vets per statement
+at apply (line 2). MySQL has no authorizer - compare the two backend directories and
+the file simply does not exist.
+
+Two things make me read the MySQL arm as a catch-all rather than a decision. Neither
+the `guard_for` doc comment nor the call-site comment in `apply/executor.rs:913-926`
+mentions MySQL at all; both enumerate Postgres and SQLite and stop. And the crate
+elsewhere goes out of its way to refuse MySQL raw SQL fail-closed:
+`SqlGuard::check` returns `GuardError::MysqlRawSqlRejected`. So the direct path
+refuses what the seam waves through.
+
+I did not change this, because the fix depends on something only you can answer: can
+a MySQL migration carry raw, author-supplied `up` SQL, or is every MySQL migration
+IR-generated? If it is always IR-generated the current behaviour is merely
+undocumented. If raw SQL can reach it, MySQL is running with neither line of
+defense, and the arm should either fail closed like `SqlGuard::check` or gain a real
+guard.
+
+Making it fail closed is a one-line change but would break MySQL apply outright if
+IR-generated SQL routes through the seam, which is exactly the kind of guess I did
+not want to make on your behalf.
+
 ## Decisions made
 
 ### D1 - Fix the broken workspace build by leaving the width facets unset in the descriptor bridge
