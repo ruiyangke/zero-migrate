@@ -477,12 +477,19 @@ that no error ever surfaces.
 MySQL is unaffected: it hard-errors with `ER_TOO_LONG_IDENT`, which is the
 fail-closed behaviour PostgreSQL lacks.
 
-The fix is to REFUSE an over-long authored identifier at the IR validate boundary
-rather than hash it. Silently renaming a name the author chose would be worse than
-refusing it, and `validate_column_reference_constraint_name` already sets the
-precedent for a 63-byte bound in that exact file. Not yet applied - it rejects input
-that is accepted today, so it wants its own commit and a check of the existing
-fixtures.
+**Fixed** for the index name, which is the one that actually reaches DDL, as a new
+`validate_authored_index_name_lengths` pass in `validate_ir_scoped`. Refusing rather
+than capping: `cap_ident_name` is collision-safe but every call site is an
+engine-derived name, and silently renaming a name the author chose trades a visible
+failure for an invisible one. Marked breaking - a migration authoring such a name is
+now refused at validate instead of half-applying. No existing fixture used one, so
+nothing else moved.
+
+Still open: table, column, and constraint names are bounded only where
+`validate_column_reference_constraint_name` already applies. They are less dangerous
+(a truncated table name usually collides loudly rather than silently) but the same
+class, and a single shared identifier-length rule across every author-supplied name
+would be tidier than the two spot checks there are now.
 
 ### F11 - An untrusted draft can re-grant authority the charter denies (CONFIRMED, unfixed)
 
