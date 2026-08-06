@@ -597,6 +597,48 @@ rebuilding every index in a schema you do not own takes an ACCESS EXCLUSIVE lock
 each of its tables, which is a cross-tenant outage. `REINDEX DATABASE`/`SYSTEM` reach
 past schemas entirely and now join the other database-wide verbs.
 
+### F14 - The body scan missed the privilege verbs the top level denies (partly fixed)
+
+The token scan backstops PL/pgSQL text that never parses as top-level SQL. It had
+needles for `alter system` / `create role` / `create user` / `drop role` but none for
+the privilege verbs, so:
+
+```
+DO $$ BEGIN EXECUTE 'GRANT ALL ON app1.t ' || 'TO PUBLIC'; END $$   -> admitted
+GRANT ALL ON app1.t TO PUBLIC                                      -> denied
+```
+
+`grant`, `revoke`, `security definer`, and `default privileges` are now in the list,
+on identifier boundaries so `grant_total` does not trip them.
+
+**Knowingly left open.** A scan sees only CONTIGUOUS text, so `'ALTER TABLE t OWNER '
+|| 'TO postgres'` never contains `owner to` and is still admitted. The only needle
+that would catch it is the bare word `owner`, which collides with ordinary column
+names - `owner_app` runs through this engine's own schema - so it would reject
+legitimate migrations wholesale. I judged the false-positive cost worse than the hole
+and said so in the comment.
+
+The real point: this whole layer is defeatable by splitting one more time
+(`'OWN' || 'ER TO'`). It is worth keeping consistent, but it is not a boundary, and
+runtime-constructed SQL is ultimately the migrator role's problem. If that matters,
+the answer is a least-privilege migrator role, not a longer needle list.
+
+### A pattern, not three incidents
+
+Three of the guard bugs found here are the same shape: authority reachable through a
+scalar slot the confinement walker does not visit.
+
+- `RenameStmt` -> `subname` / `newname`
+- `ReindexStmt` -> `name`
+- `CommentStmt` -> a bare `String` node in `object`
+
+`walk_schema_names` enumerates STRUCTURED name positions (`schemaname`, `newschema`,
+`object`, `objname`, `objects`, `names`, `funcname`, qualified lists, RangeVar). Any
+statement naming its target as a plain string is invisible to it BY CONSTRUCTION, and
+if that kind also sits in the unconditionally-safe allowlist, it reaches any schema at
+all. Finding them one at a time will keep working and will keep missing some, so I
+have an audit running over every admitted node kind against its protobuf definition.
+
 ## Findings that did NOT survive verification
 
 Recording these so nobody re-chases them.
