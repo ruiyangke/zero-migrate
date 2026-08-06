@@ -425,6 +425,46 @@ region. The detail that makes this precise rather than blunt: `All.difference
 (Nothing)` is representable, so a widened result always means a real hole. The
 brute-force compose oracle passes unchanged.
 
+### F10 - Two long index names silently collapse into one index (confirmed against live PG 18)
+
+Author-supplied identifiers are never length-capped. `cap_ident_name` exists and is
+collision-safe (it appends 10 hex chars of a SHA-256 over the full name), but every
+call site is an ENGINE-derived name. An authored `IrIndex.name` goes straight to
+`quote_ident` uncapped, and `model/validate.rs` applies a 63-byte bound to exactly one
+name kind (`validate_column_reference_constraint_name`).
+
+Rendered offline, two index names differing only after byte 63 come out verbatim:
+
+```
+CREATE INDEX IF NOT EXISTS "idx_<60 a's>_alpha" ON "public"."t" ("c");
+CREATE INDEX IF NOT EXISTS "idx_<60 a's>_beta"  ON "public"."t" ("c");
+```
+
+Run against the live PostgreSQL 18 in `docker-compose.test.yml`, the server says what
+happens:
+
+```
+NOTICE: identifier "idx_..._alpha" will be truncated to "idx_...aaa"
+NOTICE: identifier "idx_..._beta"  will be truncated to "idx_...aaa"
+NOTICE: relation "idx_...aaa" already exists, skipping
+CREATE INDEX
+```
+
+Both truncate to the same 63 bytes, so the second `CREATE INDEX IF NOT EXISTS` is a
+silent no-op and reports success. The snapshot records two indexes, the catalog holds
+one, and every later diff re-issues the same no-op create - permanent phantom drift
+that no error ever surfaces.
+
+MySQL is unaffected: it hard-errors with `ER_TOO_LONG_IDENT`, which is the
+fail-closed behaviour PostgreSQL lacks.
+
+The fix is to REFUSE an over-long authored identifier at the IR validate boundary
+rather than hash it. Silently renaming a name the author chose would be worse than
+refusing it, and `validate_column_reference_constraint_name` already sets the
+precedent for a 63-byte bound in that exact file. Not yet applied - it rejects input
+that is accepted today, so it wants its own commit and a check of the existing
+fixtures.
+
 ## Findings that did NOT survive verification
 
 Recording these so nobody re-chases them.
