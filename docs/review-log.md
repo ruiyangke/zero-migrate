@@ -277,6 +277,33 @@ Reporting success for a command the user did not ask for is the worst version of
 this bug. It now refuses a `--`-prefixed token and names the inline form, which
 still passes a literal dash-leading value when one is meant.
 
+### F9 - `cargo doc` emits 199 warnings and CI never runs it
+
+Chasing a comment that named a function I could not find turned up a whole class of
+rot. `cargo doc --workspace --no-deps`:
+
+- 93 unresolved intra-doc links - pointers that go nowhere
+- 59 doc-visibility warnings
+- 41 redundant explicit link targets
+
+Several of the unresolved ones name functions that do not exist at all. rustdoc puts
+it plainly for the one I chased: "the struct `MigrationEngine` has no field or
+associated item named `abort_same_deploy_expands`". That comment also referenced a
+shared `build_abort_steps`, equally absent. Both described a same-deploy rename
+rollback flow this crate does not implement - the rollback is the caller's job, and
+the durable half lives on the backend seam (`mark_deploy_recovery_committed_batch`,
+`outstanding_deploy_recoveries`, both real and both implemented for Postgres, but with
+no in-crate driver).
+
+`.github/workflows/ci.yml` gates fmt, clippy, build, and test. It never builds docs,
+so none of this was ever surfaced. It is the same failure shape as the `II.x.y` spec
+references in Q1: a reference that cannot be resolved is worse than no reference,
+because it reads as authoritative.
+
+Fixed the one that was actively wrong. The remaining 92 are queued as their own task,
+and the sweep should end by adding a doc build with `-D warnings` to CI so it cannot
+come back.
+
 ## Test infrastructure the apply fixes needed and did not have
 
 The inflight-marker tamper fix DOES now have a regression test
