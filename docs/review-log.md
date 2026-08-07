@@ -3852,3 +3852,62 @@ DUAL of what I filed: the probe executes in the two cells where its verdict chan
 and the two cells where the guard exists to produce a no-op are pre-empted by the
 projection. Same conclusion, different mechanism, and the mechanism decides the fix -
 "let SatisfiedNoop through the projection" rather than "teach the fold to ignore drops".
+
+### F62 - the two opinions agreed on the sequence and disagreed on the one thing that matters
+
+#79 and #92 are entangled: making the projection guard-aware removes the thing currently
+protecting MySQL. I asked both opinions for a SEQUENCE and for the state the tree is in
+BETWEEN the steps, which is the question a sequencing decision actually turns on.
+
+BOTH SAID: contain MySQL first, implement MySQL probes second, fix the projection third.
+Neither picked either of the two candidates I offered.
+
+THEY DISAGREED ON WHERE THE CONTAINMENT GOES, and the disagreement is the finding:
+
+  Opus  - at the apply seam, `mysql/session.rs` before `record_started`, per migration.
+  Codex - in the executor's STATIC FIRST PASS, which validates every pending migration at
+          `apply/executor.rs:928-955` and only begins executing at `:969`.
+
+CODEX IS RIGHT AND THE REASON IS THE BETWEEN-STATE. Opus's placement refuses during
+execution, so migrations 1..k commit and k+1 stops - a mid-batch halt, which on MySQL means
+a `started` marker and a recovery conversation. Codex's placement refuses before ANY
+migration in the batch executes. Same rule, same dialect, opposite blast radius, and only
+the question "what does the tree look like between step one and step two" separates them.
+
+CODEX ALSO KILLED MY OWN OPTION (3). I had offered "document that the guard is coherent
+only at migration #0". That boundary does not exist: `priorMigrations` is OPTIONAL and
+defaults to `[]`, the documented programmatic examples omit it, and `ApplyRequest.priorEnvelopes`
+defaults absent. An embedder omitting priors is on the probe path for EVERY migration, so
+there is no #0 boundary to document.
+
+THREE OF MY PREMISES WERE CORRECTED, two of which I have now verified myself:
+
+  1. "EMPTY PRIORS MEANS NO FOLD" IS FALSE. `crates/zero-migrate-node/src/verbs.rs:274-289`
+     catches an error from direct lowering and FALLS BACK to one-envelope ordered lowering:
+         Err(_) => { ... lower_ordered_envelopes_to_plans_for_apply(&[envelope_json...]) }
+     So the fold is reachable with empty priors after any direct-lowering failure. VERIFIED
+     BY ME by reading.
+  2. The #0-versus-1..N split is POSTGRESQL AND MYSQL CLI ONLY. SQLite goes through
+     `deploy_envelopes` with the full sequence and never touches that branch. Relayed.
+  3. `lower.rs:812` marks an ENTIRE OP completed when ANY step in its ranges is completed.
+     That is too coarse for a partially completed multi-unit guarded op - a guarded
+     `createTable` lowers to separately guarded table, index and FK units, so a completed
+     table unit suppresses the whole op and leaves a pending index unit unprotected by any
+     op-scoped refusal. VERIFIED BY ME that the function is structured per-op over step
+     ranges; the consequence is codex's.
+
+That third one is why codex's step 3 is "per lowered UNIT and per-unit completed evidence,
+not per Op" - and it means the op-scoped refusal Opus proposed has a hole in exactly the
+case the interlock exists for.
+
+WHAT I TAKE FROM THE PAIR. Both were competent, both ran things, and the useful output was
+not the verdict they shared - it was the placement they did not. ASKING FOR THE SEQUENCE
+WOULD HAVE PRODUCED AGREEMENT AND A WORSE FIX; asking for the BETWEEN-STATES is what
+separated them. A decision about ordering is not really about the order, it is about what is
+true in the gaps, and that is the question to put in the brief.
+
+Neither is implemented. #94 - the PostgreSQL snapshot dropping varchar length, so adopting
+any `t.string()` column fails closed - was found by the Opus agent in passing and confirmed
+live by me with a `text` control that adopts cleanly. That defect says the guard rejects the
+principal case it exists for on the one dialect that evaluates it, which plausibly outranks
+deciding where else to evaluate it.
