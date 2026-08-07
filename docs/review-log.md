@@ -1044,3 +1044,71 @@ None of these were being looked for.
 - A test deliberately scaffolds into a directory named `--json` and never cleans
   up, which is why that path keeps reappearing untracked. The CLI is behaving
   correctly; `--dir=--json` is its documented inline escape hatch.
+
+### F19 - A truncated identifier is not a drift problem, it is a drop that lies
+
+Traced properly after a downstream consumer asked whether their 60-byte constraint
+names were in scope. The answer is worse than the drift I went looking for, and it
+arrives from a different direction.
+
+There is no production structural-drift comparison in this engine at all.
+`diff_snapshots` is reachable only from tests and from an unused `DryRunReport`
+field, and what the CLI calls drift is journal and checksum drift, not catalog
+drift. So the question "does a truncated name cause perpetual drift" has no
+mechanism behind it.
+
+What a truncation actually breaks is the invariant `fold_ops ==
+snapshot_schema(live)`, and every consumer of that invariant is keyed on the
+object NAME. The migration that authors an over-long name applies and journals
+clean. The damage is deferred to the next op that names it.
+
+The sharp case: a guarded drop becomes a permanent silent skip that is journaled
+as COMPLETED. `dropConstraint` and `dropIndex` with `ifExists` probe the AUTHORED
+name against the INTROSPECTED snapshot. The catalog holds the truncated name, so
+the probe does not match, the verdict is a satisfied no-op, and the executor skips
+the statement while recording success. The constraint remains in the database and
+the journal says it is gone. That is a wrong answer written down as a right one,
+which is a worse failure than any amount of drift noise.
+
+Two more, from the same root. The catalog-seeded fold hard-fails with a missing
+constraint or index, so the migration can never apply. And the unique-index
+approval gate ORs a live catalog fact into the author's `unique` hint precisely so
+an author cannot defeat a destructive-change gate by declaring `unique: false`; a
+truncated live name is never in that set, so the gate silently falls back to
+trusting the hint it was written to distrust.
+
+The codebase already knew this shape and designed around it once, for its own
+journal triggers: a comment there explains that a full-name existence guard would
+never match a truncated catalog name. The lesson was learned locally and not
+generalised.
+
+#### Two corrections to my own earlier work
+
+`f501f1e`'s commit message says "MySQL is unaffected: it refuses an over-long
+identifier itself with `ER_TOO_LONG_IDENT`". Wrong at the only boundary that
+matters. MySQL 8 rejects at 65 bytes and accepts 64 verbatim, and 64 bytes is
+exactly the shortest name PostgreSQL truncates. SQLite has no identifier limit at
+all and stores a 1000-byte name byte-exact. So on the boundary case the other two
+dialects silently accept what PostgreSQL silently mangles.
+
+And `f501f1e` does not close the class it claims to. It matches only a standalone
+`Op::CreateIndex`. An index or constraint name authored INSIDE `createTable`
+reaches DDL unrefused, as do the names on `dropIndex`, `dropConstraint` and
+`validateConstraint`.
+
+#### What a length bound does and does not buy
+
+It is sufficient for the truncation class, and not merely as a heuristic: the
+engine already fail-closes on two objects with the same name, and those checks are
+sound only while the engine's name equals the catalog's name. Bounding every
+authored identifier restores that equality and lets the existing collision
+machinery do its job.
+
+It is not sufficient for a separate, pre-existing gap that the shared-budget
+observation points at. The duplicate-name checks are scoped to one table, while
+PostgreSQL's index namespace is per schema and shared between plain indexes and
+the indexes backing UNIQUE and PRIMARY KEY constraints. Two tables in one schema
+authoring the same short index name still collide, and the engine emits `CREATE
+INDEX ... IF NOT EXISTS`, so the second create is the same silent no-op. That
+needs a schema-wide uniqueness check over the union of index names and
+constraint-backed index names, and it is not the same fix.
