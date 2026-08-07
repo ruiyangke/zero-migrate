@@ -1810,3 +1810,39 @@ distinctness, so a generator returning one constant passes.
 The pattern across all four: the test asserts a property of a STRING while its name
 or comment claims a property of a MECHANISM. Format is the easy half and it reads
 like the whole thing.
+
+### F30
+
+The MySQL session-mode pin had no test, and the test named for it could not have
+noticed. VERIFIED by removing the mechanism: commenting out the single call that
+issues the mode left the whole host suite at 91 passed, 0 failed, including
+`MySQL host sessions pin explicit legacy zero preservation`. That test asserted the
+exported string constant contained two flags. The constant is not the pin; issuing
+it is.
+
+The replacement reads `SELECT @@SESSION.sql_mode` back through a session the driver
+opened. With the call removed it fails and quotes the server's actual mode string.
+I re-ran both directions myself rather than take the report: with the mechanism gone
+the constant check still passes and the read-back fails, which is the contrast that
+matters.
+
+Reading the mode back was chosen over asserting the driver issued a statement. An
+assertion about the call would be the same defect one level up - green after any
+refactor that changed how the mode is set, while still sounding like a guarantee
+about sessions.
+
+The larger finding came out of the same run. The six live-MySQL apply tests could
+not detect the missing pin either, because the Rust backend re-issues the mode
+before every author step. So the host-side pin is the redundant half of a
+belt-and-braces pair, end-to-end coverage survives losing it, and the half that
+looked tested was the half with no test at all. Redundancy hid the gap: the system
+kept working, so nothing went red.
+
+This is the third shape on the can-it-fail axis, and the sharpest. The first is
+unfalsifiable for any value. The second is falsifiable but matched the wrong thing.
+This one is falsifiable and matches the right thing - the constant really does
+contain those flags - but the thing it matches is never connected to the mechanism
+the name describes. Only deleting the mechanism finds it.
+
+The question that catches all three, and the one to ask of any test already open:
+could this body pass if the mechanism its name describes were deleted entirely.
