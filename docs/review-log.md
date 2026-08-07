@@ -2400,3 +2400,68 @@ collisions that currently fail only at apply could begin failing lint earlier. I
 have verified NEITHER version; the implementation agent has been told to establish
 which is true and report it, because if the second is right it is a user-visible
 behaviour change that needs stating rather than discovering.
+
+### F37 closed - the preview now renders what apply runs, and two mutations survived
+
+The fix runs `resolve_create_table_policy` inside `render_ir_envelope_rendered`,
+covering both public entries with no bridge change. Order is parse, resolve,
+validate, lower.
+
+The end-to-end proof is the part worth keeping: `plan --json` previewed 8 columns
+and 3 indexes, the migration was then applied, and `information_schema` read back
+the identical 8 columns and 3 indexes plus the primary key. The preview shows what
+apply runs, demonstrated against a live database rather than argued from the code.
+
+**Two of three mutations survived the first round of tests**, and one of them was my
+own instruction.
+
+M2 moved the resolve to AFTER `validate_ir` - the ordering my original brief
+specified before a second opinion corrected it. It survived ALL 23 tests, including
+the new ones written for this change. So had the correction not arrived, the wrong
+order would have shipped green, and the test suite written specifically for this
+feature would not have caught it. The agent closed it with
+`preview_resolves_before_it_validates`, a partial index predicate on the injected
+`deleted_at`, which fails under M2 with `column "deleted_at" does not resolve on the
+enclosing target table "notes"`.
+
+M3 hardcoded `"public"` instead of `opts.default_schema` and also survived, because
+every existing test previews under `public`. Closed with
+`preview_resolves_against_the_requested_default_schema` using a schema-scoped inject
+charter.
+
+That is the three-mutation rule paying for itself twice in one change. A single
+mutation would have reported the work complete.
+
+**The lint disagreement is resolved and codex was right.** I verified the mechanism
+myself: `packages/zero-migrate-cli/src/cli.ts:788-798` calls `previewSql` with no
+`args.explain` guard - that flag only decides whether the rendered `sql` appears in
+the output - and the verdict is `ok: verdict.ok && previewError === undefined`. So a
+preview failure fails lint. Under an injecting charter, lint now rejects a migration
+it previously passed, without `--explain`:
+
+    lint collide: fail (1 ops)
+      postgres: previewSql: envelope[0] failed to render: table-shape resolve for IR
+      envelope: createTable "gadgets" declares column "created_at", which collides
+      with an injected system column
+
+That is a user-visible behaviour change and it is documented in `docs/cli.md` rather
+than left to be discovered. Without `--policy` the default no-inject charter makes
+the resolver early-return and output is byte-unchanged, so the first opinion's claim
+was true of the default and false of the case that matters.
+
+Idempotence was confirmed rather than assumed, by reading
+`resolved_create_table_matches_inject` and by a new test asserting byte-identical
+preview across all three dialects for raw and pre-resolved spellings of the same
+envelope. The whole-file goldens already pre-resolve their fixtures, so the change is
+a double-resolve there and a no-op; all three pass untouched.
+
+Nothing pins the old output: the CLI tests use a `CREATE TABLE` regex and the parity
+test uses substring checks. This IS a machine-readable change for `plan --json`
+consumers, mitigated only by the project being 0.1.0.
+
+Two things surfaced and not fixed here. `render_ir_envelope_sql_statements` has no
+production caller - its doc calls it "the DB-free lint seam" but lint reaches
+`render_ir_envelope_sql` through `previewSql` instead, so only tests call it, and the
+comment oversells it. And `crates/zero-migrate-node/index.d.ts` drifts on every
+`napi build` over one line, `[StatusReply]` versus its qualified form, meaning the
+committed file is stale against the current napi codegen. Both are pre-existing.

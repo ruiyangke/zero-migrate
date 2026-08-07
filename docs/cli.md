@@ -225,10 +225,19 @@ Add `--explain` to print the offline SQL rendering for every selected dialect:
 zero-migrate lint --dir ./migrations --explain
 ```
 
-SQL explanation applies the selected environment's ordered policy charter.
-Operations that require a live catalog and cannot be fully lowered offline are
-shown with a `[runtime-resolved]` label. Explanation does not connect to a
-database.
+SQL explanation applies the selected environment's ordered policy charter,
+including its table-shape injection: a rendered `CREATE TABLE` carries the
+charter-injected columns, pinned primary key, and injected indexes that apply
+will create, not just the author's declaration. Operations that require a live
+catalog and cannot be fully lowered offline are shown with a
+`[runtime-resolved]` label. Explanation does not connect to a database.
+
+Lint renders every migration whether or not `--explain` is passed, and folds a
+render failure into the migration's verdict. A migration whose `createTable`
+violates the charter -- for example by declaring a column the charter injects --
+therefore fails lint with the resolver's message, where it previously passed
+lint and failed only at apply. Without `--policy`, lint uses an in-memory
+no-inject charter, which injects nothing and leaves this behaviour unchanged.
 
 The optional ownership registry is an independent trusted map:
 
@@ -258,9 +267,11 @@ Human output starts with:
 would apply 2 migration(s)
 ```
 
-It then prints each pending migration and its rendered SQL. `--json` emits the
-same pending set and SQL as structured data. The command does not call the apply
-or resolution APIs and does not execute the rendered migration SQL.
+It then prints each pending migration and its rendered SQL, with the selected
+policy's table-shape injection already applied, so the previewed `CREATE TABLE`
+is the one apply runs. `--json` emits the same pending set and SQL as structured
+data. The command does not call the apply or resolution APIs and does not
+execute the rendered migration SQL.
 
 Live planning is available for PostgreSQL, MySQL, and SQLite. Planning uses a
 read-only status path and does not create SQLite journal files on fresh targets.
