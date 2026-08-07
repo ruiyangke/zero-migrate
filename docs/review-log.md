@@ -2680,3 +2680,69 @@ that `plan` renders SQL as part of its normal output and `lint --explain` includ
 rendered SQL in its report. Earlier entries naming the flags are wrong on that detail;
 the findings they describe are unaffected, since the code paths were identified by
 file and line rather than by flag name.
+
+### F42 - the end-to-end arm is blind to exactly the break the narrow arm catches
+
+`#39` is closed, and the finding worth keeping is not the fix. It is that the two
+arms guarding one escape hatch fail on DISJOINT mutations, so neither is a stronger
+version of the other.
+
+THE ROOT CAUSE I FILED WAS WRONG, AND THIS LOG ALREADY SAID SO. I filed `#39` as a
+parser bug: `zero-migrate new --json` treating the flag as a positional path. Line
+1044 of this file already recorded the opposite - the CLI is behaving correctly and
+`--dir=--json` is its documented inline escape hatch. The actual cause is one line of
+test setup: `cli.test.ts:159` called `runCli(...)` with no `cwd`, so the scaffold
+inherited the test process's directory and landed in the package root. The literal
+`--json/` directory that reappeared after every host run was a test writing where it
+was told to.
+
+WHAT THE OLD ASSERTION PROVED. `assert.doesNotMatch(inline.stderr, /needs a value/)`
+passes when the CLI crashes for an unrelated reason, when it prints nothing, and when
+it does not run at all. It is category (a) - unfalsifiable for any value the mechanism
+could produce.
+
+TWO MUTATIONS, BOTH RUN BY ME, EACH GATED BEHIND AN ENV VAR SO THE TREE'S DEFAULT
+BEHAVIOUR WAS NEVER BROKEN FOR THE CONSUMER THAT LOADS IT BY PATH. Windows 12:38:39 -
+12:39:26 and 12:39:42 - 12:40:15 UTC, both restored with an empty `git diff`.
+
+Mutation A - `case "dir"` at `cli.ts:215` silently drops a `--`-leading value:
+
+    not ok 7 - CLI value-taking flags reject a following flag as their value
+    ok 8   - CLI scaffold under an inline dash-leading --dir applies to live PostgreSQL
+
+Mutation B - `scaffold()` at `cli.ts:710` emits `export const migration` instead of
+`export default`:
+
+    ok 7     - CLI value-taking flags reject a following flag as their value
+    not ok 8 - CLI scaffold under an inline dash-leading --dir applies to live PostgreSQL
+      zero-migrate: host recorder: the migration module exports no `up()` function
+      (named export `up` or `default.up`)
+
+THE LIVE ARM SURVIVES MUTATION A BECAUSE THE BREAKAGE IS SYMMETRIC. `new` and `apply`
+read `--dir` through the same parser, so a parser that stops routing the literal value
+moves the scaffold AND the apply to the same wrong directory. The migration is still
+found, still applied, and the journal row still lands. The end-to-end path cannot see
+a fault that displaces every participant equally, and going through a real database
+does not help - it is the shared reader, not the database, that is wrong.
+
+A TEST THAT DRIVES MORE OF THE SYSTEM IS NOT AUTOMATICALLY STRICTER. It is strict
+about different things. The narrow filesystem assertion is the only one that pins
+WHERE the value went; the live arm is the only one that pins that what landed there
+can actually run. Neither subsumes the other, which is why both are retained and why
+the narrow one stays ungated - making it live-gated would surrender the parser
+guarantee on every machine without a database.
+
+WHAT THE CATALOG READ CAN PROVE HERE IS BOUNDED BY THE STUB. `scaffold()` emits an
+`up()` whose body is entirely commented out, so a correct apply creates no user
+schema at all; `lint` reports `ok (0 ops)`. The catalog-observable positive is the
+journal row in `<schema>_migrations.schema_migrations`, and the arm also asserts the
+project schema is ABSENT, which is what zero ops means. Authoring real ops into the
+file first would test authored ops rather than what the CLI scaffolds, and would
+duplicate `e2e-pg.test.ts`.
+
+Host suite moves 95 -> 96 with both database URLs exported, and the stray
+`packages/zero-migrate-cli/--json/` no longer appears after a run.
+
+Also observed, and independent evidence for the open schema-leak item: a schema
+`probe_len` containing a table `t` is present in the test PostgreSQL and belongs to no
+run in this session.
