@@ -2915,3 +2915,78 @@ an import line reflowed to add `IndexElement`. No assertion was relaxed.
 Counts moved and both are explained: workspace 2211 -> 2212 across the same 74
 targets (the new SQLite arm in an existing target), host 96 -> 99 with both database
 URLs exported (two PostgreSQL arms and one MySQL arm in a new file).
+
+### F46 - the premise I gave the agent was wrong, and the defect was live
+
+`#78` is fixed. I filed it as a LATENT problem - "no fold rule currently diverges by
+dialect, so an honest end-to-end RED may be impossible today" - and told the agent to
+say so plainly if it could not construct one. It could, because that premise was
+false.
+
+A FOLD RULE ALREADY DIVERGES BY DIALECT. VERIFIED by me: `selected_dialectal_leg` at
+`render/fold.rs:442` matches on the dialect and returns a DIFFERENT op sequence for
+Postgres, SQLite and MySQL; `fold_to_field_defs` reaches it through
+`flatten_dialectal_ops(ops, dialect)` at `fold.rs:3245`. The public authoring DSL
+emits exactly that op - `dialect({ pg, mysql })` in `packages/zero-migrate/src/ops.ts`.
+So `Op::Dialectal` has always been dialect-sensitive, and it flows straight into
+artifact generation. The defect needed no future capability to bite.
+
+I ALSO NAMED HALF THE DEFECT. There were TWO hard-coded sites, not one:
+`gen_types.rs:356` drives `schema.runtime.json`, and a second at `:475` drives
+`env.db.ts`. My ticket cited only the first.
+
+THE HARD-CODE WAS DELIBERATE AND ITS JUSTIFICATION WAS TOO NARROW, which is the third
+option I offered and the one that turned out true. The old comment read "the FieldDef
+map is dialect-neutral for type recovery" - accurate about `ir_column_to_field`, and
+silent about leg selection happening in the same fold.
+
+MY OWN RED, run from ONE compiled addon with an env gate forcing BOTH fold sites back
+to Postgres, window 14:41:55 - 14:44:21 UTC, residue grep zero after removal:
+
+    not ok 1 - genArtifacts folds the MySQL target's own dialectal leg
+               (matches the live MySQL catalog)
+      the mysql schema.runtime.json field set equals the live column set
+        [ 'label',
+      +   'pg_only'        <- what the artifact claimed
+      -   'mysql_only'  ]  <- what the MySQL database actually has
+    ok 2 - genArtifacts folds the Postgres target's own dialectal leg
+
+The Postgres arm passing IN THE RED RUN is the control. The expectation is read from
+`information_schema.columns` on the live server rather than from a fixture, so the
+oracle is the database.
+
+THE MUTATION THAT ESCAPED IS THE ENUMERATION LESSON AGAIN. Forcing the SECOND site
+(`authoring_tables_from_ops`) to Postgres was NOT caught by the first version of the
+test, because that test read only `schema.runtime.json`. `genArtifacts` CO-EMITS TWO
+artifacts, and a test that reads one of them cannot see a defect in the other. The
+test now asserts both against live truth. A TEST ENUMERATES ITS OUTPUTS, AND AN OUTPUT
+MISSING FROM THE ENUMERATION IS UNGUARDED HOWEVER GOOD THE ASSERTION OVER THE OTHERS.
+
+TWO THINGS I WORRIED ABOUT AND WAS WRONG ABOUT, recorded because the worry cost real
+attention. `render/fold.rs` appearing in the diff looked like `#38` arriving through
+the back door; it is ONE LINE, in a test, adding the new argument. And
+`tests/gen_artifacts_byte_identical.rs` is a determinism oracle whose modification I
+flagged as the highest-risk hunk; it gained 28 lines and lost 9, every deletion a
+signature update or a reworded doc line, with `assert_eq!(generated.runtime_json,
+manual.runtime_json)` untouched. It also gained a paragraph saying what it does NOT
+cover: both arms pin Postgres, so cross-dialect divergence is the live test's job.
+
+THE BREAKING CHANGE IS MINE, NOT THE AGENT'S, and it was offered for veto.
+`GenArtifactsSource.dialect` is REQUIRED with no default. An optional field defaulting
+to Postgres would reinstate the exact defect being fixed - silently generating a MySQL
+project's artifacts under Postgres rules. VERIFIED: `genArtifacts` has zero in-repo
+production callers, so the only consumer affected is the downstream project that loads
+this tree by absolute path, and a TypeScript error at their build beats artifacts
+naming columns their database does not have.
+
+TWO PRE-EXISTING HOLES FOUND AND DELIBERATELY LEFT. `runtime_metadata_from_ops`
+(`gen_types.rs:224`) iterates raw ops and never flattens dialectal legs on ANY dialect,
+so an index authored inside a `dialect()` leg is missing from `schema.runtime.json`
+even for Postgres. And `resolve_create_table_policy` (`model/table_shape.rs:247`)
+walks top-level ops only, so a `createTable` nested in a leg is never policy-resolved -
+the same shape as the `dropConstraint` hole at line 1167 of this log. Both are
+orthogonal to the hard-code and both change Postgres output, so neither belongs in
+this commit.
+
+Host suite 99 -> 101 with both database URLs exported; the two new arms are the MySQL
+and Postgres halves of the live test. Workspace unchanged at 2212 across 74 targets.
