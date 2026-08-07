@@ -1581,3 +1581,54 @@ So the measurement establishes that this engine does not leak connections, and
 establishes nothing at all about the mechanism it was set up to test. The
 instrument was validated separately by holding 20 connections open and observing
 20, so the null result is a real null rather than a blind one.
+
+### F26
+
+Reading the five functions the product surface never names produced one structural
+finding, three clean acquittals, and a correction to the detector that found them.
+
+The correction first, because it undercuts the evidence. My candidate list came
+from a bare-identifier grep, adopted specifically to fix an earlier miss where a
+function passed as a value - `.or_insert_with(f)` - has no call parentheses
+anywhere. That refinement traded one blindness for another. `restrict` is both a
+policy-composition function and the foreign-key action string `"restrict"`, so the
+sixteen hits that made it look reached were a doc comment and TypeScript fixtures
+setting `onDelete: "restrict"`. VERIFIED: `restrict(` as a call appears nowhere in
+any crate's `src` except its own definition at
+`crates/zero-migrate-policy/src/compose.rs:1248`.
+
+So a `name(` grep misses functions used as values, and a bare-identifier grep
+matches domain vocabulary. Each refinement moves the blindness rather than removing
+it, and the symbol most likely to collide with a domain string is exactly the kind
+of short verb a policy API uses.
+
+The structural finding. `docs/policy.md:74-105` is headed "Full admission flow" and
+presents `overlay(root.as_trusted(), ...)` then `finalize_charter(assembled)` then
+`admit(...)` as the way to layer charters. None of `overlay`, `restrict`,
+`finalize_charter` or `as_trusted` has a caller in any `src`. Production layers
+charters through `effective_policy_from_charter_layers`
+(`crates/zero-migrate/src/model/table_shape.rs:673-694`), which composes by
+repeated `admit` with every non-root layer parsed as `LoadContext::NonRootLayer`.
+That path is live and fail-closed. The documented one is a complete parallel
+algebra the product does not use, so a reader following the documentation would
+build on code no shipped call site exercises.
+
+The acquittals are worth recording because three of five looked alarming and were
+not. `deny_all` is exported surface whose production counterpart is stricter: a run
+with no charter returns "at least one policy charter is required" rather than
+falling back to a default-deny floor. `disarm_all` is `#[doc(hidden)]` crash-fuzz
+support, correctly public so integration tests can reach it, and its production
+counterpart `trip` is engaged at eight sites. `guard_mode` is a redundant accessor
+over a field that enforcement reads through `skips_denylist_belt()`, which is
+genuinely called. `is_authorizer_denied` is a diagnostics gap rather than a security
+one: the SQLite authorizer is installed in production, and what is missing is only
+the ability to tell an authorizer denial from an ordinary statement error, so a
+confinement block reaches the user as a generic failure.
+
+Reported by that review and not verified here: that `GuardMode::Off` is assigned
+only inside a `#[cfg(test)]` constructor with no callers, making the belt-off
+posture unreachable in shipped code, and that the test proving the
+`CreatableEscapesMandatoryInject` lint admits in its own comments that it could not
+construct the real precondition and restricts a charter against itself instead.
+Both are the manufactured-precondition shape and both need checking before they are
+treated as findings.
