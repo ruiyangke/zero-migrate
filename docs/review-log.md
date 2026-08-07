@@ -4173,3 +4173,50 @@ missed `sqlite/mod.rs:730` because "later-phase capability" was outside the alte
 did not notice; the agent working the ticket found them by reading around each hit. A grep
 that returns five results feels like a complete answer in a way a grep that returns zero
 does not, and it is exactly as incomplete.
+
+## F67 - The control I added while verifying something else moved the finding (#79)
+
+F65 recorded that I had marked one claim INFERRED: that a guarded op on MySQL ERRORS rather
+than silently succeeding. I had read it off the emitted DDL and the engine's prose without
+running it. zeroship flagged the marker back at me, so I measured it against the live
+MySQL 8 this repo's compose file serves. Exit codes captured with `$?` on a redirect:
+
+    CREATE TABLE notes (id INT PRIMARY KEY, body VARCHAR(64));      seed,   exit 0
+
+    CREATE TABLE notes (id INT PRIMARY KEY, body VARCHAR(255));
+      ERROR 1050 (42S01) at line 1: Table 'notes' already exists            exit 1
+    ALTER TABLE notes ADD COLUMN body VARCHAR(255);
+      ERROR 1060 (42S21) at line 1: Duplicate column name 'body'            exit 1
+
+The inference held. Then the control, which was two lines away once the harness existed -
+the IDENTICAL shape, same columns, same widths, same key:
+
+    CREATE TABLE notes (id INT PRIMARY KEY, body VARCHAR(64));
+      ERROR 1050 (42S01) at line 1: Table 'notes' already exists            exit 1
+
+ER_1050 IS AN EXISTENCE ERROR, NOT A SHAPE ERROR, and that changes what #79 is about. Every
+sentence I had written framed the gap around DIVERGENT objects - "a re-run errors instead of
+no-opping", "the guard is dropped so a divergent object errors" - and every one of them
+quietly implies a MATCHING object would be fine. It is not fine. On MySQL a guarded
+`createTable ifNotExists` against a table matching the declaration EXACTLY fails as hard as
+against one that diverges.
+
+So the cost is not "divergence goes unprotected on MySQL". It is ADOPTION IS IMPOSSIBLE:
+the entire point of `ifNotExists` - point the engine at a database that already has the
+object, verify, move on - cannot be done on MySQL for ANY object. That also means the
+population #79's fix serves is larger than the ticket implied, and the escape hatch recorded
+in #80 (`dialect({ pg: guarded, mysql: unguarded })`) does NOT help them: dropping the guard
+on the MySQL leg still leaves bare DDL that errors on an existing table.
+
+WHAT THIS SAYS ABOUT THE PRACTICE. The control was not in my plan. I set out to verify one
+inferred sentence and added the identical-shape case because the seed was already there. A
+verification pass is the cheapest moment to run the control, because the fixture is built
+and the alternative is being confidently wrong for another week - and the control is what
+found something, not the verification.
+
+STILL NOT MEASURED, and I will not generalise past it: only `createTable` and `addColumn`
+were tested. `createIndex`, `dropTable ifExists`, `renameTable` and the partition ops were
+not. And I ran the DDL directly against MySQL rather than through the engine's apply path -
+the step I bridged by reading is that the engine emits exactly this bare DDL, which
+`tests/golden/sql_preview_mysql.txt:21-23` shows, but a golden is a rendering and not an
+execution.
