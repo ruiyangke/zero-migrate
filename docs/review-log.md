@@ -3266,3 +3266,62 @@ measurement, not an enumeration - I saw a byte that explained a symptom, and wro
 a cause without looking at what the byte was doing. THE SYMPTOM WAS FULLY EXPLAINED AND
 THE EXPLANATION WAS STILL NOT THE WHOLE PICTURE. A thing can be both the cause of your
 problem and someone else's deliberate solution.
+
+### F52 - write the escape, not the byte
+
+`#83` Part A is done, and the fix is smaller than either option I had written down.
+
+I had framed the problem as "the NUL separator is load-bearing, so replacing it needs
+either a printable delimiter plus a throw, or a control character I first confirm the
+tool reads". Both were answers to the wrong question. The separator was never the
+problem. THE SOURCE ENCODING WAS.
+
+    gen-dialect-table.mjs:105    const id = `${row.kind}\0${row.variant}`;
+    dialect-table-drift.test.ts:64  return `${r.kind}\0${r.variant}`;
+
+Those two lines now contain the two-character ESCAPE - backslash, zero - where they
+previously held a literal `0x00` byte on disk. VERIFIED before the change with a raw
+byte dump: `${row.kind}` followed by `00`, unambiguously a literal.
+
+The escape is ordinary ASCII source that greps like any other line. The byte is what
+made ugrep classify the file as binary and report no matches in it. Same string at
+runtime, verified rather than assumed:
+
+    node -e 'const esc = `a\0b`; const lit = "a" + String.fromCharCode(0) + "b";
+             console.log(esc.length, esc.charCodeAt(1), esc === lit)'
+    -> 3 0 true
+
+So the guarantee survives untouched: NUL is still the separator, no identifier can
+contain one, `kind + NUL + variant` is still collision-free BY CONSTRUCTION. No throw,
+no delimiter audit over the 92 rows and the next one, no test of what the tool does
+with U+001F. A source-encoding change with NO semantic change.
+
+WHAT PROVES THERE WAS NO SEMANTIC CHANGE, and it is not the suite being green.
+Regenerating produced BYTE-IDENTICAL artifacts - `git diff` on
+`crates/zero-migrate/src/model/dialect_table.rs` and
+`packages/zero-migrate/src/generated/dialect-table.ts` is empty - and the drift suite's
+regenerate-and-diff arm passed, which is the arm that would notice if the de-dup key
+had changed meaning. `git ls-files` now reports ZERO tracked files carrying a NUL,
+down from two.
+
+THE CREDIT IS NOT MINE. A downstream project carries the identical construct - same
+composite key, same de-dup - written as the escape from the start, and their NUL gate
+passes on both of their files. They noticed because I sent them a correction saying my
+NUL was deliberate and warning them not to copy my "just delete it". They read that,
+looked at their own equivalent, and found it solved the same problem a different way.
+They had previously recorded those files as "clean" and moved on without noticing why.
+
+THE SHAPE WORTH KEEPING. I had a real constraint (the separator must stay), a real
+cost (the file is unsearchable), and I went looking for a THIRD THING that satisfied
+both - a different delimiter. The actual answer changed neither: it changed how the
+same value is SPELLED IN SOURCE. WHEN TWO REQUIREMENTS LOOK LIKE THEY NEED A
+COMPROMISE, CHECK WHETHER THEY ARE EVEN IN THE SAME LAYER. Runtime semantics and source
+encoding were never in tension; I had collapsed them into one axis and then negotiated
+along it.
+
+`#83` Part B - the gate that fails on a NUL in any tracked text file - is still open and
+is now the whole of that task. Zero is the right time to install it: the check is
+trivially green today, so the planted-NUL red run is the only thing that would prove it
+works, and a gate installed while the tree is dirty proves nothing about either.
+
+Package suite 221 tests / 220 pass / 0 fail / 1 skip, unchanged.
