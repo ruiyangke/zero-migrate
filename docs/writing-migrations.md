@@ -351,7 +351,7 @@ based on other columns, use a generated column or a data migration.
 | `indexes` | Named indexes created with the table |
 | `partitionBy` | Range, list, or hash partitioning |
 | `options` | Platform runtime metadata |
-| `ifNotExists` | Skip creation if the table already exists |
+| `ifNotExists` | Skip creation if the table already exists, on PostgreSQL and SQLite. Not honoured on MySQL: see [Safe guards and destructive changes](#safe-guards-and-destructive-changes) |
 | `schema` | Override the handle's schema for this call |
 
 ```ts
@@ -1135,8 +1135,34 @@ Use `ifNotExists` and `ifExists` where repeating a create or drop is genuinely
 safe. A guard only tolerates presence or absence; it does not prove that an
 existing object has the definition you expected.
 
-Common guarded operations include tables, columns, constraints, indexes,
-partitions, views, enums, domains, sequences, and triggers.
+A guard is not a native `IF [NOT] EXISTS` clause in the emitted SQL. The engine
+reads the live catalog under the apply lock and then either runs the statement,
+treats it as a satisfied no-op, or fails on drift. That probe is what makes the
+guard portable, and it is also why a guard is only worth what the target dialect
+does with it:
+
+| Target | What a guard does at apply |
+| --- | --- |
+| PostgreSQL | Probed. Run, satisfied no-op, or fail on drift. |
+| SQLite | Probed. Run, satisfied no-op, or fail on drift. |
+| MySQL | Not probed, except for `dropView` (see below). Any statement the guarded operation emits runs unconditionally, so a repeat run fails with the server's own duplicate-object or missing-object error. |
+
+Twenty-two operation kinds accept `ifNotExists`/`ifExists`. On MySQL exactly one
+of them is still honoured: `view(name).drop({ ifExists: true })`, which lowers
+to a real `DROP VIEW IF EXISTS` that MySQL itself evaluates. For the other
+twenty-one, do not rely on a guard to make a MySQL migration re-runnable. A
+`--sql` preview labels every guarded statement with the behaviour of the dialect
+you previewed for, so read the label rather than assuming.
+
+Two related options are not part of that set. `renameColumn` accepts no guard on
+any dialect. `table(name).trigger(name).drop({ ifExists: true })` is a separate
+option that lowers to a native `DROP TRIGGER IF EXISTS` on all three targets and
+is unaffected by the above.
+
+Guardable operations cover tables, columns, constraints, indexes, partitions,
+views, enums, domains, and sequences, subject per target to whether that dialect
+supports the operation at all. See [the support matrix](support-matrix.md) for
+the per-dialect cells.
 
 Drops, unrestricted updates, deletes, and other destructive changes need careful
 review. Delete and backfill steps are always approval-gated. A successful type

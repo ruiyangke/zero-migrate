@@ -3557,3 +3557,75 @@ resolution-shaped: three of the dead citations found in #84 name PHASE-TAGGED DO
 `schema/descriptors.rs:70`). Those sweeps searched comment PROSE for phase vocabulary and
 the tag was living in a PATH, so the scope hole was not the corpus and not the pattern -
 IT WAS WHICH PART OF THE LINE I COUNTED AS TEXT.
+
+### F57 - counting reads and writes separately, and the one place that counting lies
+
+#79 asked whether MySQL should evaluate existence-guard probes. Two independent opinions
+converged on "no - document it", and both refuted the premise I dispatched with: I said a
+guarded op on MySQL reaches a bare `CREATE INDEX` and errors at the server. It does not,
+on the shipping path. The Node host projects pending ops onto the LIVE snapshot at
+`crates/zero-migrate-node/src/lower.rs:397-428` and the fold DELIBERATELY IGNORES the
+guard (`render/fold.rs:39-47`), so the op is refused earlier with a typed error and no
+inflight marker. PostgreSQL, which DOES evaluate probes, produces the IDENTICAL refusal -
+the positive control was not green.
+
+WHAT SHIPPED IS TEXT, NOT BEHAVIOUR: `crates/zero-migrate/tests/golden/sql_preview_mysql.txt`
+told an operator a guarded `addColumn` was "catalog-probed at apply (run / satisfied-noop /
+fail-drift)" on a dialect that probes nothing. Four author-facing sites said versions of
+the same thing. No apply path changed.
+
+THE FINDING WORTH KEEPING IS HOW THE FALSE CLAIM SURVIVED. Ask "does the MySQL backend
+handle existence guards?" and the obvious check answers YES:
+
+    $ grep -rc "existence_guard" crates/zero-migrate/src/apply/backend/mysql/
+    7
+
+Seven hits, right directory, exact identifier. Every one is `existence_guard: None` - a
+struct-literal CONSTRUCTION. Split them:
+
+    reads:  0
+    writes: 7
+
+The backend writes the field seven times and reads it never. THE MOST MISLEADING VERSION
+OF A FALSE CAPABILITY CLAIM IS THE ONE WITH SOME CODE NEAR IT: an absent capability fails
+an obvious grep, an inert one passes it.
+
+THE METHOD, and it is mechanical for anything with a NAME:
+
+    reads  = grep -rn "NAME" <dir> | grep -v "NAME: "
+    writes = grep -rn "NAME" <dir> | grep    "NAME: "
+
+For a struct field, `NAME:` in the hit is construction and its absence is consultation.
+Count both, never quote the total. Claims with no name to count ("fast path") get no help
+from this.
+
+WHERE IT LIES, and this is the part I would otherwise have discovered on something that
+mattered. A rejection arm READS the thing in order to refuse it. Zeroship's case:
+
+    PlanStep::OnlineRename(RenameStep::SqliteRebuild(_)) => {
+        return Err(... "only pure DDL is supported" ...)
+
+That is the only substantive SQLite reference in a crate whose landing page lists SQLite
+as supported. The split scores it as a READ and PASSES the claim. So there is a third
+bucket - READS THAT CONSUME RATHER THAN HONOUR - and grep does not give it to you. You
+have to read the arm.
+
+A READ/WRITE RATIO IS A POINTER, NOT A VERDICT. They ran the split on their own tree,
+found a write-only security field, had the severity written before finishing the check,
+and then found the field IS consulted - in a different crate. The real defect was narrower
+than the alarm: a crate declaring a security-mechanism field it takes no part in. Both
+steps were necessary.
+
+AND THE REFRAME I AM TAKING, because it is better than the self-criticism it replaced.
+I recorded the 7/0/7 split carefully in two messages and treated it as a caveat on a
+sentence rather than as a class - the third time in one exchange I was one level too
+concrete. Their correction: BEING ONE LEVEL TOO CONCRETE IS A FAILURE OF FILING, NOT OF
+OBSERVATION. The observation was complete both times. What was missing was the question
+"is this an instance of something", which is cheaper and different from "have I found
+everything".
+
+One structural note on why this class persists: about thirty of their test fixtures
+construct the write-only field to satisfy a struct literal, so deleting it touches all of
+them. THE COST OF DELETION IS WHAT KEEPS A WRITE-ONLY FIELD ALIVE, and it grows with every
+fixture. My seven are not that case - the field IS read, by the PostgreSQL and SQLite
+backends - so the split flagged both and only the follow-through separated them.
