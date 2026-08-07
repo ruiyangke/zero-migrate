@@ -1155,3 +1155,55 @@ The schema-wide namespace collision stays separate and is higher priority than i
 first looked: it affects valid short names, backing indexes and other relation
 kinds, and it is a relation-namespace problem rather than anything to do with
 truncation.
+
+### D7 - Bound identifiers at lower, and keep a narrow probe backstop that resolves the truncated name
+
+Two reviews of where to defend the truncation hazard. One picked the lower seam
+alone, one picked both. They agreed on more than they differed on, and the
+difference turned on one checkable fact, so I checked it.
+
+Agreed by both, and confirmed: the load-time bound alone is not enough, and not
+mainly because of the entry point. `validate_authored_identifier_lengths` matches
+only top-level ops, so a `dropConstraint` nested in an `Op::Dialectal` leg passes
+it untouched and lowers to a guarded drop on the fully routed production path.
+That hole exists no matter which caller you come through. The Dialectal arm is
+part of this fix, not a separate one, and it belongs in the shared function so the
+load gate and the lower call get it from one edit, keying leg selection on the
+same dialect the lowering will use.
+
+Also agreed: no new `IrLowerError` variant. The enum is public and exhaustive, so
+a new variant is a source-compatibility break, and `lower_steps` already refuses
+authored input through an existing validation carrier.
+
+The objection I built into the question was wrong. I asked whether adding the
+bound at lower would break callers who deliberately skip validation. There are
+none: the only non-load caller runs `validate_ir` first, and lower already runs
+several validators of its own. So the lower seam is the primary defence and costs
+nothing in contract terms.
+
+Where they split was whether a probe backstop earns its place. The argument
+against was that `existence_guard` is read from the freshly lowered plan and never
+rehydrated from the journal, so nothing can reach the probe without passing
+through lower. That is true of anything lower produced, and it is not true in
+general: `Migration.existence_guard` is a public field on a struct that is not
+`#[non_exhaustive]`, in a crate a consumer can depend on directly, so a migration
+carrying a probe can be built without lowering ever running.
+
+And a second face the lower seam does not cover on that path: an over-long
+`IfNotExists` probe returns `RunBare`, which does not skip a drop but CREATES a
+truncated identity.
+
+So both, with the probe as a genuine backstop rather than a duplicate.
+
+The refinement that decides how the backstop behaves, and the reason it is not
+simply "error on any over-long name": derive PostgreSQL's own truncated spelling
+and look THAT up. If the truncated name is present, the miss was a lie and it
+should error as ambiguous. If even the truncated name is absent, the drop
+postcondition genuinely holds and a legacy migration may safely no-op. A blanket
+refusal would break migrations that are currently correct.
+
+Both faces stay PostgreSQL-only and direction-aware. Ordinary absence under
+`ifExists` is exactly what a satisfied no-op is for, so the probe cannot error on
+a mismatch in general; the length case is distinguishable only because a
+PostgreSQL catalog name is at most 63 bytes by construction, which makes the
+lookup structurally incapable of matching and the miss carry no information.
