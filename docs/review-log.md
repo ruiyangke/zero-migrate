@@ -4271,3 +4271,82 @@ it. That inference is the same kind that was wrong twice today.
 
 The rig was deleted; `git status` is clean, `crates/zero-migrate/tests/*.rs` is 61, and
 `SHOW DATABASES LIKE 'zzprobe%'` returns nothing.
+
+## F69 - The two agents agreed on the verdict and disagreed on the placement, and the disagreement was the answer (#92)
+
+Both were asked the same narrow question with the same required worse-case section. Both
+returned (ii): ship the guard-aware projection now with a refusal for dialects that cannot
+evaluate a guard. If I had asked only one, I would have implemented it in the wrong place.
+
+WHERE THEY AGREED, and I verified each myself:
+  - The projection is guard-blind by design (render/fold.rs:39-42 declares existence guards
+    fold-irrelevant) and `CreateTable` returns `DuplicateTable` on NAME PRESENCE alone.
+  - Do NOT gate on `Migration.existence_guard.is_some()`. That refuses `dropView`, the one
+    op MySQL honours natively (render/sql_preview.rs:838-840, emitted at lower.rs:7805).
+  - The empty-priors branch is not a guarantee: verbs.rs:274 is `Err(_) =>` and falls back
+    to ordered lowering with a single envelope.
+  - Refusal at lowering is before the authored DDL and before that migration's inflight
+    marker, but NOT before `ensure_journal` and the project lock (verbs.rs:237).
+
+WHERE THEY DISAGREED, which is the useful part. Opus proposed placing the refusal inside the
+loop that already scopes to ops without completed journal evidence, calling that precedent
+exactly right. Codex said explicitly do not, and gave the reason. VERIFIED BY ME at
+crates/zero-migrate-node/src/lower.rs:820-838:
+
+    completed |= steps.iter().any(|step| step_has_journal_phase(step, journal_entries, Phase::Completed));
+
+An op is marked completed when ANY step in its ranges is completed, and no checksum is
+compared anywhere in the function. So the predicate is op-level and checksum-blind, and a
+partially completed multi-unit guarded op - a guarded `createTable` lowers to separately
+probed table, index and FK units (render/lower.rs:4204) - would be exempted whole on the
+strength of its table unit, leaving the index unit unprotected. Codex is right. I had
+recorded the same coarseness independently in an earlier session, which is why I trust it
+without a third opinion.
+
+Codex's placement instead: a whole-plan preflight in `MigrationEngine::apply_plan_locked`
+after journal bootstrap (engine.rs:1787), retained also after `pending` is computed
+(executor.rs:908) for direct executor callers, classifying per LOWERED UNIT with explicit
+lower-time metadata (ProbeRequired versus Native) rather than per raw `Op`. The whole-plan
+form matters because DML and DDL interleave: checking only as a later DDL batch enters the
+executor lets an earlier DML step commit first.
+
+THE TWO WORSE-CASES ARE ABOUT DIFFERENT HALVES OF THE FIX, AND TOGETHER THEY BRACKET IT.
+  - Opus, on the SATISFY branch: lower.rs:1077-1078 is
+    `Op::CreateTable { name, .. } => { registry.insert(name.clone(), owner_app.to_string()); }`
+    an unconditional ownership claim with no prior-owner check, running over the same op
+    list at lower.rs:445-450. A `SatisfiedNoop` over a table ANOTHER app created would drop
+    the op AND silently claim ownership, then journal completed - after which nothing
+    re-examines it. VERIFIED BY ME at the line.
+  - Codex, on the REFUSE branch: it names an EXISTING PASSING TEST that a blanket refusal
+    breaks - packages/zero-migrate-cli/tests/host/existence-guard-index-scope.test.ts:249,
+    "MySQL: a guarded createIndex lands on its own table under a name another table also
+    uses". MySQL scopes index names per table, the target is absent, the fold succeeds and
+    the bare DDL works today. VERIFIED BY ME that the test exists and says that.
+
+So the fix must neither satisfy blindly (it would transfer ownership) nor refuse blindly (it
+would break a green test and reject genuinely fresh creates). A hypothetical worse-case is
+worth less than a named one: codex's costs a red test on the next run, and I would have
+found it the hard way.
+
+WHAT I MEASURED WHILE THEY RAN, both through the real path with the object seeded OUT OF
+BAND at exactly the declared shape:
+  - MySQL, priors path: refused at lowering, `failed to project pending schema after
+    envelope "create_notes": fold: table `notes` already exists`, inflight EMPTY.
+  - MySQL, no priors: reached the server, `Table 'notes' already exists`, ONE STRANDED
+    inflight row (F68).
+  - SQLite, priors path: APPLY SUCCEEDS. The guard is honoured and the migration completes.
+
+That last one is the dialect asymmetry stated plainly: the same authored migration set that
+SQLite applies cleanly is refused on MySQL by a projection that runs before either backend
+is consulted.
+
+A RIG FLAW WORTH RECORDING BECAUSE IT ALMOST BECAME A FINDING. My first SQLite run seeded
+`notes` through the engine rather than out of band, so the table was in the HISTORY, not
+only in the live catalog. Apply then failed with `failed during historical schema
+projection`, which reads exactly like a refutation of the claim I was testing. It was a
+different scenario. The seed method decided the answer, and the two spellings of "the table
+exists" are not the same question.
+
+NOTHING IS IMPLEMENTED. #92 carries the reconciled design; #98 (the recovery API no CLI or
+SDK user can reach) and #99 (the SQLite plan/apply split) were spun out and #98 outranks
+this sequencing work.
