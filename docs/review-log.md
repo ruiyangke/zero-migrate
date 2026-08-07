@@ -2355,3 +2355,48 @@ checks on author-declared facets, and the surviving-resolution argument is an
 inference from the fold logic that nobody has run. Its comment block also states that
 preview does NOT resolve, which becomes false and has to be rewritten rather than left
 as a stale explanation of a behaviour that no longer exists.
+
+### F37 correction - the second opinion did not stall, and it changed the answer
+
+The entry above says the codex job "STOPPED WITHOUT A VERDICT" and that the decision
+was therefore one opinion plus independent checking. Both halves are wrong, and the
+way they are wrong is the same error this review keeps finding.
+
+The job had a `## Recommendation` section the whole time, roughly eight thousand
+lines into an output file that is mostly tool transcript. I searched the tail, then
+searched the section headings for verdict-shaped words, found nothing, and concluded
+absence. The heading was titled plainly and my pattern excluded it. That is the
+truncation error in a third costume - not `head -20`, not a `--lib` filter, but "I
+looked at the end and at the headings I expected". The enumeration source was my
+search pattern.
+
+It matters because the missed opinion CONTRADICTED an instruction I had already
+given the implementation agent. I told it to run the resolve AFTER `validate_ir`.
+The second opinion showed it must run BEFORE, and cited the reason:
+`crates/zero-migrate/src/model/validate.rs:9516-9529` is an existing test that
+resolves first and then asserts `validate_ir` succeeds, with the message "a partial
+index on `deleted_at` must resolve system fields". `deleted_at` is charter-injected,
+so an index predicate over it only validates once injection has happened. Verified by
+me by reading, along with the apply path's own order at
+`crates/zero-migrate-node/src/lower.rs`, which resolves at :206 and validates inside
+`load_and_lower_guarded` afterwards. The correction was sent to the running agent.
+
+So the two opinions did converge on the decision - resolve, engine-side, in
+`render_ir_envelope_rendered` - and the second one corrected the implementation
+detail the first got wrong. The dual-opinion process worked exactly as intended, and
+I nearly discarded the half that paid for it.
+
+Two further things the second opinion supplied that the first did not:
+
+It found stronger intent evidence. `docs/proposals/id-system-design.md:1463-1465`
+states an injected ID must appear exactly in the resolved plan AND PREVIEW, and
+`docs/cli.md:38-43` calls plan output "the SQL that would be applied".
+
+And it contradicts the first on blast radius. The first said `lint` is unaffected
+because its policy loader defaults to a no-inject charter. The second says `lint`
+calls `previewSql` even WITHOUT `--explain` and folds preview failure into its
+verdict at `packages/zero-migrate-cli/src/cli.ts:777-805`, so policy-shape
+collisions that currently fail only at apply could begin failing lint earlier. I
+have verified NEITHER version; the implementation agent has been told to establish
+which is true and report it, because if the second is right it is a user-visible
+behaviour change that needs stating rather than discovering.
