@@ -826,6 +826,49 @@ It is a belt over that invariant, not a copy of it, and the honest statement of
 what it buys is "the create does not omit an injected column slot and does not
 contradict a pinned primary key".
 
+#### The first implementation of D4 was bypassable, and the audit caught it
+
+Worth recording because the failure was not in the design, it was in trusting a
+green suite. The fix passed 2153 tests and its own seven new ones. An adversarial
+pass that built a probe crate and drove `SqlGuard::check` directly found two ways
+past it, both executed rather than reasoned.
+
+`libpg_query` has already applied PostgreSQL's identifier fold by the time it
+fills `colname`, so an unquoted `Created_At` arrives as `created_at` while a
+quoted `"Created_At"` is preserved verbatim. The implementation folded that value
+a second time, erasing the one distinction the parser had kept, and the collision
+ran in the admit direction. Against the charter the tests themselves use, this
+was admitted:
+
+```
+CREATE TABLE app.t ("Id" text PRIMARY KEY NOT NULL,
+                    "Created_At" timestamptz NOT NULL,
+                    "Deleted_At" timestamptz)
+```
+
+PostgreSQL creates `Id`, `Created_At`, `Deleted_At`. Not one injected column
+exists. A trailing space inside quotes did the same, because the fold trimmed and
+`compose::fold` does not.
+
+Separately, `InjectSpec.columns` is `#[serde(default)]`, so an `[[inject]]`
+carrying only `indexes` is a legal charter with an empty column list. Conformance
+was `all()` over an empty list and `is_none_or` over `None`, which is true for
+every create, so that charter shape switched the gate off entirely. Pre-fix it
+denied. A fail-open reachable from a valid charter is worse than the defect being
+fixed.
+
+The lesson is narrow and worth keeping: a conformance check that re-normalizes a
+value its parser already normalized will admit what the parser was distinguishing.
+Compare the declared side verbatim and fold only the policy side.
+
+Injected indexes are a separate matter and are deliberately not covered. A
+`CREATE INDEX` is its own statement, so a `CREATE TABLE` can never carry proof of
+an index obligation, and the guard is per-statement by contract. An admitted raw
+create can therefore drop an injected index, which the old blanket denial
+prevented. That is an accepted loosening rather than an oversight, and it is the
+reason the unenforced injected-index immutability rule matters more than it looked
+when first recorded.
+
 Stripping injects from the guard's policy was rejected: the same `injects_for`
 feeds the shape- and primary-key-immutability rules, so a strip would also let a
 later migration drop `deleted_at` or the pinned key.
