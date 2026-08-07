@@ -3132,3 +3132,58 @@ the remedy changes checksums the applied prefix will then refuse.
 DECISION: #38 as filed is rejected, not deferred. Widening the fold is the wrong
 change on three counts and one of my own stated reasons for it was inverted. The
 defect is real and moves to the unguarded lowering path.
+
+### F49 - the sweep could not see the file, because grep cannot read it
+
+`#70` is fixed, and the reason two cleanup passes missed these tags is not
+carelessness. It is that the file holding them IS INVISIBLE TO GREP ON THIS MACHINE.
+
+`grep` here is ugrep 7.5.0 aliased over the name. Demonstrated:
+
+    $ grep -Fn "S0.1" packages/zero-migrate/scripts/gen-dialect-table.mjs
+    (no output, exit 1)
+    $ sed -n '1p' packages/zero-migrate/scripts/gen-dialect-table.mjs
+    // Generate the single-source dialect-support table (DSL redesign Phase 0, S0.1).
+
+A FIXED-STRING search returning no match on text `sed` prints verbatim. The cause:
+that file contains a NUL byte at offset 4393, ugrep classifies a NUL-containing file
+as binary, and reports nothing rather than erroring. Exactly two tracked files in the
+repository have this property - the dialect-table generator and its drift test - and
+they are precisely the two that `#70` was about. Filed as `#83`, with the enumerating
+command.
+
+SO MY "SEVEN SITES" COUNT WAS AN UNDERCOUNT, and not by a vocabulary this time. The
+real total is fourteen: seven visible, plus six in the generator and one in the drift
+test that no search of mine could reach. Reading them needs `tr -d '\0' < FILE | grep`.
+
+THE FALSE CLAIM LIVED IN THE GENERATOR, WHICH IS WHY EDITING THE SIDECAR DID NOTHING.
+I corrected `dialect-support.toml` first and regenerated; `git status` showed the two
+generated artifacts UNCHANGED. The header they carry is not copied from the sidecar -
+it is a template literal at `gen-dialect-table.mjs:128-129` (Rust) and `:216` (TS).
+That is what `#70`'s own title said, and I had not been able to confirm it because the
+file could not be searched.
+
+TWO MORE DEFECTS ON THE SAME LINES, both now fixed. The generator's header named its
+own output as `sdks/migrate/src/generated/dialect-table.ts` - a PRE-RENAME PATH; it
+writes to `packages/zero-migrate/`. And it asserted the Rust table is "NOT wired yet",
+which `crates/zero-migrate/src/model/op_support.rs` refutes by calling
+`dialect_table::lookup`. A downstream project had warned me their vendored copy of
+this generator had fallen behind mine and emitted a stale path; the same staleness was
+in my own copy, in the file I could not grep.
+
+WHAT I ALSO CHECKED, BECAUSE A GENERATED-FILE CHANGE IS EASY TO GET WRONG: the
+regenerated `dialect_table.rs` still carries `#[rustfmt::skip]` at `:65` (the same
+downstream project warned that a generator omitting it would silently break
+`cargo fmt --check`); both regenerated artifacts are header-only diffs, 6 insertions
+and 3 deletions between them, with no row content moved; and neither generated file
+contains a NUL, so the byte is not being emitted.
+
+THE LESSON IS NOT ABOUT TAGS. Twice today I concluded "absent" from a grep that had
+not looked - once because my note was the enumeration source and was wrong, once
+because the tool silently declined to read the file. A SEARCH THAT CANNOT READ A FILE
+AND A SEARCH THAT FINDS NOTHING IN IT ARE INDISTINGUISHABLE FROM THE OUTPUT. The
+defence is a positive control: search for something you KNOW is in the file, and if
+that comes back empty, the instrument is broken rather than the corpus clean.
+
+fmt 0, clippy 0, workspace 2212 passed / 0 failed across 74 targets, the
+`dialect_table_faithfulness` drift test green, package suite 221 / 220 / 0 / 1.
