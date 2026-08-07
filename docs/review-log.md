@@ -1903,3 +1903,51 @@ Feeding the assertion body a known constant is preferable to breaking the
 mechanism when other work is in flight: it proves the same thing with no build
 artifact left behind and no window in which a downstream consumer could load a
 deliberately broken tree.
+
+### F32 - the two claims left unverified from the guard-surface read, now checked
+
+Both came from an agent report and were carried as unverified. I have now read
+the code for each.
+
+**Trusted posture is unreachable in this product.** Verified. `GuardMode::Off`
+is written in exactly three places: `crates/zero-migrate/src/conn.rs:298`,
+`crates/zero-migrate-guard/tests/guard_smoke.rs:40`, and
+`crates/zero-migrate/src/guard_vendor_lower_tests.rs:1328`. The latter two are
+tests. The first sits inside `ExecutorConfig::trusted`, which carries
+`#[cfg(test)]` and `#[allow(dead_code)]` at `conn.rs:286-287` and admits in its
+own comment that "the sole in-crate consumer (the Track-A live-Postgres
+Trusted-apply tests) is gated behind a running DB and currently absent". The
+production constructor pins `GuardMode::Enforced` at `conn.rs:197`. So within
+this product `GuardConfig::skips_denylist_belt()` at
+`crates/zero-migrate-guard/src/guard/mod.rs:229` can only ever return false, and
+every branch predicated on it is dead.
+
+One correction to the original claim, which said the mode is assignable only
+through that constructor: `GuardConfig::from_policy_with_mode` at
+`guard/mod.rs:173` is `pub` and takes the mode as a parameter, so any consumer
+of `zero-migrate-guard` can select `Off`. The field itself is private and has no
+setter. The accurate statement is that Trusted is unreachable through the
+engine's own configuration path, not that it is unconstructable.
+
+This is deliberate and documented rather than accidental - the comment says the
+constructor "must not be deleted" because it pins the in-crate Trusted primitive
+that a separate integration crate cannot build. Recording it so the dead
+branches are known to be dead, not so they are removed.
+
+**The finalize lint test restricts a charter against itself.** Verified, and the
+problem is the comments rather than the assertion.
+`crates/zero-migrate-policy/tests/compose_oracle.rs:1191-1234` carries three
+consecutive paragraphs of abandoned reasoning: that wrapping the same source as
+a trusted base "is illegal (mandatory on non-root)"; that building an assembled
+charter from the root's `TrustedDoc` "is not possible (mandatory)", so the test
+will instead "rely on admit's transitive bound for the root case"; and that
+exercising the lint through two trusted docs "is impossible on non-root". It
+then discards the parsed charter with `let _ = root;` and, two lines later, uses
+`root` anyway - calling `restrict(root.as_trusted(), root.as_trusted(), &reg)`
+and unwrapping it, which contradicts the claim of illegality directly above.
+
+The assertion itself is sound: it pins `FinalizeError::CreatableEscapesMandatory
+Inject` and the lint does fire. So this is not a test that cannot fail. It is a
+test whose commentary describes a different test that was never written, asserts
+a fallback ("admit's transitive bound") that nothing here checks, and leaves a
+dead binding as evidence of the abandoned attempt.
