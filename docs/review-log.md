@@ -4531,3 +4531,55 @@ is the kind of thing that reads as an oversight later.
 NOT MEASURED: the printed DELETE was never executed against a live MySQL to confirm the
 privilege claim. That rests on `clear_inflight` (journal_sql.rs:671-683) issuing the same
 statement on every successful apply, which is a read, not a run.
+
+## F73 - The inherited list was incomplete in the file I had already fixed (#100)
+
+F72 recorded three docs left carrying the Rust-host-only framing and filed them as #100. I
+briefed the sweep with those three line numbers and told it not to trust them, because a list
+I inherited is exactly the kind of thing that turns out incomplete. It was.
+
+ALL THREE WERE REAL, and each was slightly off in position - dialects.md's paragraph is
+370-377 not 370-378, security-model.md's list runs 297-303 not 296-302, and embedding.md:145
+is INSIDE a code block, with the prose framing two lines above and three below. Reported
+line numbers point NEAR the thing; they are a starting address, not a citation.
+
+THE FOURTH WAS IN THE FILE I HAD ALREADY CORRECTED. docs/troubleshooting.md:587, about a
+hundred lines below the section 3c316a3 rewrote, said "Do not edit or delete journal rows to
+make status look healthy" - a near-verbatim repeat of the exact sentence that commit
+identified as the root problem. The file contradicted itself, and my own fix is what made it
+a contradiction rather than a consistent error.
+
+That is the lesson worth keeping: FIXING A SITE MAKES ITS UNFIXED SIBLINGS WORSE, because a
+reader can no longer tell which statement is current. A partial correction is not half a
+correction; it is a new defect of a different kind. The sweep that follows a fix is not
+tidying, it is part of the fix.
+
+A SECOND ERROR I HAD NOT NOTICED, found while correcting the first. security-model.md listed
+"and verified live shape" among the arguments to `recover_inflight_ddl`, which reads as an
+argument the API checks. Nothing is checked - the call set is journal and lock operations
+only (F70). In a security document that is the sentence that matters most, and it said the
+opposite of the truth. Now stated as the operator's own step.
+
+THE ROLLBACK VARIANT: CHANGED, on a reason I verified rather than the one I had. I filed it
+as "two same-named variants with different words reads as an oversight", which is cosmetic.
+The real argument is failure-mode: leaving it bare invites the next reader to fix the
+asymmetry the obvious way, by copying the apply wording, which would tell operators to look
+for a marker that cannot exist there. VERIFIED BY ME at executor.rs:2396 and :2419-2431 -
+`selected` comes from `select_rollback_versions(&request.target, applied)`, and the compare
+uses `record.checksum` from those applied records, so `recorded` is always a completed event
+on that path. The durable part of the change is the doc comment saying "Do not copy the apply
+wording across: the marker pointer would be false here."
+
+MY OWN CALL ON THE ONE ITEM LEFT TO ME. The production checklist read "MySQL DDL has an
+AUDITED inflight repair procedure". The audit row is obtainable only from the route a CLI or
+Node operator cannot reach, so the checklist demanded evidence the product does not offer
+them. Changed to "reviewed". One word, and it was the word the whole ticket is about.
+
+Gates run by me with both DB URLs exported: fmt 0, clippy 0, workspace 74 targets / 2227
+passed / 0 failed / 0 ignored, 61 test files. Both new doc anchors verified against the
+actual heading text (operations.md:623, troubleshooting.md:454).
+
+NOT DONE: no test pins the new rollback message. The apply-side equivalent IS pinned by
+`crashed_ddl_is_not_blindly_replayed`, so the two variants now have unequal protection - the
+one an operator is more likely to see is the guarded one, which is the right way round, but
+it is an asymmetry rather than a decision.
