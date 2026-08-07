@@ -3230,3 +3230,39 @@ instead of an abstract prompt.
 fmt 0, clippy 0, workspace 2212 passed / 0 failed across 74 targets, package
 221 / 220 / 0 / 1, host 101 / 101 / 0 / 0 with both database URLs exported. No count
 moved, which is what a pure message change should do.
+
+### F51 - the invisible byte was load-bearing, and I filed it as an accident
+
+Correcting `#83` before anyone acts on it. I found two tracked files that the local
+grep cannot read (F49), traced it to a NUL byte in each, and filed the fix as "remove
+the NUL - almost certainly an editing accident". I did not read the bytes around it
+first. VERIFIED now, and it is not an accident:
+
+    gen-dialect-table.mjs        const id = `${row.kind}\0${row.variant}`;
+    dialect-table-drift.test.ts  return `${r.kind}\0${r.variant}`;
+
+It is a COMPOSITE-KEY SEPARATOR, and a correct one. The generator de-duplicates on
+`id` via `seen.has(id)`, and no identifier can contain a NUL, so `kind + NUL + variant`
+is collision-free BY CONSTRUCTION rather than by convention. Deleting the byte - the
+fix I wrote down - would have silently traded a structural guarantee for an assumption,
+to make a search tool happier.
+
+THE COST IS STILL REAL, WHICH IS WHY THIS IS NOT SIMPLY "LEAVE IT". Those two files
+were invisible to every sweep of this repository, and that is precisely why the tags in
+`#70` survived two cleanup passes: the generator emitting them could not be searched.
+So both halves are true at once - the byte earns its place, and it costs more than it
+is worth.
+
+THE REPLACEMENT HAS TO PRESERVE THE GUARANTEE, NOT JUST THE BEHAVIOUR. Every `kind` and
+`variant` in the sidecar today matches `[A-Za-z0-9_]+`, VERIFIED with an over-counting
+extraction whose complement is empty, so a printable `|` cannot collide now. But THE
+RISK IS THE NEXT ROW, NOT THE EXISTING 92 - a bare swap converts a fact into a habit.
+Either pair the printable delimiter with a throw when a field contains it, or use a
+non-NUL control character and first confirm the tool actually reads it. Recorded on
+`#83` with both options and the reason not to take the third.
+
+WHAT I ACTUALLY GOT WRONG IS SMALLER AND MORE ANNOYING THAN THE USUAL. Not a
+measurement, not an enumeration - I saw a byte that explained a symptom, and wrote down
+a cause without looking at what the byte was doing. THE SYMPTOM WAS FULLY EXPLAINED AND
+THE EXPLANATION WAS STILL NOT THE WHOLE PICTURE. A thing can be both the cause of your
+problem and someone else's deliberate solution.
