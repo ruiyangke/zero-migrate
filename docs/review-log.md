@@ -2636,3 +2636,47 @@ observable on a passing run.
 NOT MEASURED, and the gaps are named rather than hidden: what a NATURALLY failing test
 leaks, as opposed to one synthetic panic; MySQL; and the `zero-migrate-guard` and
 `zero-migrate-node` crates' own occurrences, which were outside the questions asked.
+
+### F41 - the unreferenced preview entry is retained, and it is one of three not one
+
+The claim was that `render_ir_envelope_sql_statements` has no production caller. It
+is CONFIRMED, with the over-counting grep run untruncated across the whole tree:
+
+    $ grep -rn --binary-files=without-match "render_ir_envelope_sql_statements" . \
+        --exclude-dir=target --exclude-dir=node_modules --exclude-dir=.git
+
+Five hits total - a prose mention in this log, the re-export at
+`crates/zero-migrate/src/lib.rs:337`, the definition, and two `#[cfg(test)]` tests in
+its own file. Zero in `crates/zero-migrate-node/`, zero in
+`packages/zero-migrate-cli/src/`, zero in the integration suite. A bare identifier
+over-counts, so a zero result is the sound direction for proving something unreached.
+
+THE DISPOSITION IS RETAIN, NOT REMOVE, and the reason is the part the original aside
+missed. The function is `pub` and re-exported at the crate root, and
+`docs/embedding.md` documents this crate as a path dependency for out-of-tree hosts.
+Whether an out-of-tree consumer calls it is UNFALSIFIABLE from inside this tree, and
+that asymmetry is itself the argument: a claim that cannot be checked from here should
+not be the basis for deleting a published surface.
+
+It is also not uniquely unreached. Verified by me: `render_plan_sql` and
+`render_set_sql` are re-exported on the same line and have ZERO references in the
+addon and CLI sources; `render_ir_envelope_sql` is the only member of that exported
+family a production caller reaches. Removing one of four would not be a coherent
+cleanup. Removal would also orphan `wrap_mysql_statements`, whose only two references
+are this function and one test.
+
+The doc comment was FALSE and is the real defect either way. It called itself "the
+DB-free lint seam"; lint reaches `render_ir_envelope_sql` through the addon's
+`previewSql` verb instead. It now says what the function does not do, including a
+hazard worth having in writing: an op that degrades to a `[runtime-resolved]` label in
+the human preview has NO entry in the statement stream at all, so a short stream is
+not evidence of a short plan.
+
+A CORRECTION TO THIS LOG. I have written `plan --sql` and `validate --explain`
+repeatedly in earlier entries and in commit messages. Neither name exists. Verified by
+me: a grep for `--sql` in `packages/zero-migrate-cli/src/cli.ts` returns nothing, and
+`cli.ts:334` reads "flag --explain is only valid with lint". The accurate statement is
+that `plan` renders SQL as part of its normal output and `lint --explain` includes the
+rendered SQL in its report. Earlier entries naming the flags are wrong on that detail;
+the findings they describe are unaffected, since the code paths were identified by
+file and line rather than by flag name.
