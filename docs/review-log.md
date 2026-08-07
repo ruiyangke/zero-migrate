@@ -1207,3 +1207,57 @@ Both faces stay PostgreSQL-only and direction-aware. Ordinary absence under
 a mismatch in general; the length case is distinguishable only because a
 PostgreSQL catalog name is at most 63 bytes by construction, which makes the
 lookup structurally incapable of matching and the miss carry no information.
+
+### F20 - Rebuilding the addon corrected three of my own records and found a gate that passes SQL the server always refuses
+
+I had this filed as "the checked-in addon binary is stale and fails 18 host tests".
+Three things in that sentence were wrong, and the rebuild found something the
+figure was hiding.
+
+**It was never checked in.** `git log --all -- 'crates/zero-migrate-node/*.node'`
+returns nothing; no commit has ever touched a `.node`. It is gitignored twice,
+with a comment saying the generated `index.js` and `index.d.ts` are tracked on
+purpose and only the compiled binary is not. So it is untracked local build
+output, not a tracked liability. Removing it breaks no gate and no consumer; it
+breaks a local host-suite run until you rebuild, which CONTRIBUTING already tells
+you to do.
+
+**The failure count was never drifting.** It is a pure function of which database
+URLs are exported: none gives 6, both give 18, and PostgreSQL alone gives 10,
+because exactly 8 of the 18 are MySQL-only. Both figures I recorded were correct
+for the conditions they were measured under, and I read the difference as the
+artifact rotting when it was my own harness varying.
+
+**What the staleness actually costs** is the part worth keeping. Seven host test
+files fall back to that path silently, so a months-old binary produced a
+plausible-looking mostly-red suite instead of an obvious "addon missing" error. A
+suite that is red for a reason nobody can attribute is worse than one that
+refuses to run.
+
+#### The rebuild surfaced what the stale binary was masking
+
+It fixed 14 failures and produced 7 new ones. New failures after replacing a stale
+artifact are the interesting direction, and they split cleanly.
+
+Ten are a stale test charter. `packages/zero-migrate-cli/tests/host/policy.ts`
+ships a bare `policy_version = 1`, and since the charter redesign a policy that
+declares no cross-schema grant owns zero schemas, so the guard denies the suite
+its own project schema. Proved rather than assumed: the same apply, run twice
+against a live database with the fresh addon, fails with that bare charter and
+succeeds with the include-scoped one the addon crate's own fixture already uses.
+That fixture was updated for the redesign and the CLI host suite's was not.
+
+One is a real defect. A fixture authors `t.text().notNull().default("new")`, the
+MySQL renderer emits `text ... NOT NULL DEFAULT 'new'`, and MySQL 8 refuses a
+literal default on TEXT unconditionally. `lint` reports **ok** on that migration,
+so a plan-time gate is passing SQL the server will always reject. Nothing in the
+engine rejects the shape. The stale binary rendered something MySQL accepted, so
+this passed for months and only appeared once the artifact was current.
+
+#### A gate nobody runs rotted in both directions
+
+`pnpm --filter zero-migrate-node test` fails against both binaries and fails
+DIFFERENTLY: the stale one passes two scripts and fails a third, the fresh one
+passes that third and fails one of the first two. The rebuild fixed one gate and
+broke another. CI runs neither, which is how it managed to rot in both directions
+at once.
