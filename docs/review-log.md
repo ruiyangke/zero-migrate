@@ -727,6 +727,86 @@ fix. The seal now encodes the flag and both pieces separately, so it rests on by
 rather than on an invariant enforced in another module. Seals are in-memory, so
 nothing was invalidated.
 
+### F17 - Table-shape injection has never worked end to end (ISSUES.md issue 1)
+
+A downstream user reported that a clean authored `createTable` is denied as
+`RawCreateInInjectScope`. It reproduces on `main`, and it is ours, not a stale
+consumer expectation.
+
+`gate_raw_create` sees only the target name and the raw text, so it cannot see a
+column list. It denies every `CREATE TABLE` into a schema any `[[inject]]` rule
+covers, and it returns before the `schema.create_table` grant check, so no grant
+can admit the statement. The engine hands the guard the same `EffectivePolicy` it
+hands the shape resolver (`engine.rs:479` and `:486`, `node/lower.rs:209` and
+`:225`), and `plan_declarative` at `engine.rs:747` overwrites the caller's guard
+policy outright. So under any charter that injects over the project schema, no
+table can be created by any path, and there is no seam where a caller could pass
+a second, inject-free charter instead.
+
+The rule shipped in `de1d652` and was never wired: that commit touched the guard,
+the policy crate, and two guard tests, and no engine call site. Across the whole
+repo there is not one place, test or production, where a `GuardConfig` carrying an
+inject successfully guards a create - every one pairs an inject charter with a
+`no_inject` guard config. The comment at `namespace_authority.rs:331-337` claims
+the intended flow guards over a policy that grants create in-scope; that was never
+reachable, and the test beside it sidesteps by injecting on a different schema
+than it creates in.
+
+My earlier F2 resolution made both `pg_declarative` charters no-inject. That
+removed the last test that could have caught this, which is why a user found it
+before we did.
+
+### F18 - A foreign key cannot see a target authored in an earlier migration (ISSUES.md issue 2)
+
+Reproduced on `main` on all three dialects. `reference_is_format_bearing`
+(`validate.rs:1606`) counts a plain `ColType::Uuid` as format-bearing even though
+its `value_format` is `None`, so a uuid foreign key demands an authored contract
+for its target. The authored map is filled only by `advance_logical_columns`, so a
+consumer that skips lowering an already-applied file has no target contract and
+the lower fails. The same shape in `text` lowers fine; only the uuid arm makes it
+fail. It fails identically for a column-level `references`, so this is not
+specific to table-level foreign keys.
+
+Two structural gaps sit behind it, and they are why the naive narrowing is not
+safe on its own: a single-column table-level foreign key gets no catalog proof at
+all (`lower.rs:3285-3287` skips it, and `collect_typed_reference_sites` only
+collects columns carrying a `references` facet, so neither pass sees it), and
+SQLite's catalog check cannot tell uuid from text or TypeID because introspection
+discards the distinguishing evidence. The authored-contract gate is currently the
+only thing standing between that shape and a silently wrong foreign key.
+
+### D4 - Make the inject gate prove conformance rather than deny outright
+
+Both opinions landed on the same fix independently. When an inject covers the
+target, parse the create's column list and admit it when every injected column
+name is present and any pinned primary key matches exactly and in order; deny only
+when the shape is short. `CREATE TABLE AS` and `SELECT INTO` carry no column list,
+so conformance is unprovable and they stay denied.
+
+The deciding constraint is that the guard must stay a pure function of its text.
+The same SQL is re-guarded at six sites that hold nothing but a stored string
+(`executor.rs:941`, `:1246`, `:2443`, `baseline.rs:146`, `precondition.rs:484`,
+`engine.rs:649`), so a fix that threads an authored-origin marker through the
+lowering path would not reach the guard that runs against the live database, and
+would turn the marker into a persisted capability stored in the very artifact the
+guard exists to distrust.
+
+What this gives up: names are checked, types are not. A raw author can write
+`deleted_at text` where the charter says `timestamptz` and pass. Types cannot be
+compared at text level without re-deriving the whole dialect type-rendering table
+inside the security layer, where it would drift from the renderer. This is not a
+new weakness - name-matching is already the granularity of every inject rule the
+guard enforces (`check_alter_table_injected` and `check_rename` compare names
+only, and the pinned-PK check is coarser still, denying any `DROP CONSTRAINT` on a
+table with a pinned key without looking at which one). Real type conformance
+already exists a layer up in `system_columns_match`, which every path that lowers
+an `Op::CreateTable` runs. The text-level check is a belt over that invariant, and
+it was set to deny-always.
+
+Stripping injects from the guard's policy was rejected: the same `injects_for`
+feeds the shape- and primary-key-immutability rules, so a strip would also let a
+later migration drop `deleted_at` or the pinned key.
+
 ## Findings that did NOT survive verification
 
 Recording these so nobody re-chases them.
@@ -758,7 +838,11 @@ role/database/schema renames may pass; `DO LANGUAGE plpythonu $$...$$` may not g
 the untrusted-language check that `CREATE FUNCTION` gets; quoted mixed-case schema
 names may fold onto a granted lower-case schema; `SchemaScope::Single("")` (owning
 no schema) may permit every schema in the body scanner; `guard_for` maps MySQL to
-the no-op SQLite descriptor guard.
+the no-op SQLite descriptor guard. Two more surfaced while deciding D4:
+`ShapeElement::Index` appears nowhere in the guard, so the doc comment claiming
+`DROP INDEX` on an injected index is enforced looks like an unkept promise; and
+`BodyScopeDecisions::is_injected_shape` returns `false` unconditionally, so nothing
+inside a function body is inject-checked at all.
 
 **Apply.** PostgreSQL non-transactional crash recovery may replay an edited `up`
 without comparing the inflight marker's checksum, which every other marker path
