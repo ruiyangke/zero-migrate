@@ -2168,3 +2168,60 @@ The disagreement is real and it is about a genuine tradeoff - a frozen envelope
 comparison catches drift cheaply and broadly but can never catch a defect that
 was already there, while a result-side assertion catches semantics but costs more
 per operation and today covers 12 of 56. Recorded unresolved rather than settled.
+
+### F34 continued - the rest of the schedule tags, and two claims that were wrong
+
+Sixteen more sites carried `Track A`, `phase-1a`, `Phase-4`, `Cut 3`, `cut 4e`, or
+`redesign step 5a`. All are gone, replaced by what the code does. Two of them were
+not tags at all but claims that depended on the schedule, and both were false:
+
+`crates/zero-migrate/tests/ir_author_render_parity.rs:1116` said a user primary key
+is "support-refused at validate-time in Slice 5 because the platform owns the
+primary key". Neither half holds. `IrConstraintKind` at
+`crates/zero-migrate-ir/src/ir.rs:1575` has exactly four variants - `Fk`, `Unique`,
+`Check`, `Exclusion` - and no primary-key variant, verified by scanning the enum
+body for one and finding zero. A stand-alone `addConstraint(pk)` is therefore not
+expressible at all rather than refused; primary-key changes go through
+`Op::AlterPrimaryKey`. And platform ownership is now a policy knob resolved by
+`resolve_create_table_policy`, not a validate-time refusal. The comment now states
+the representability fact.
+
+`crates/zero-migrate/tests/guard_security.rs:1397` claimed a test "pins that the
+Phase-4 widening opened no hole". The widening is the kind gate admitting
+`CreateDomainStmt` and `AlterDomainStmt`, stated three lines above it, so the
+comment now names that instead of a date.
+
+`crates/zero-migrate-node/src/lower.rs:202` said the lowering "no longer takes a
+separate `PolicyProfile` (retired in Cut 3)". `PolicyProfile` has no definition
+anywhere - the only four occurrences in the crates are comments discussing its
+absence - so the sentence now states the property rather than the transition.
+
+Left alone, on the rule that a phase naming a runtime step stays: the two-phase
+journal protocol at `apply/journal.rs:328,1060,1114`, `fault.rs:130`, and
+`tests/pg_scenarios.rs:2027`, all of which are the `started`-marker protocol whose
+module doc opens by calling the executor two-phase and idempotent; and the `M1`
+references in `tests/sqlite_confinement.rs`, which name a confinement rule with a
+matching backstop arm at `apply/backend/sqlite/authorizer.rs:535` rather than a
+milestone.
+
+Two classes remain and both need their own decision rather than the same rule:
+
+The `S0.x` cluster sits partly in GENERATED files. `dialect-support.toml:2` opens
+"Phase 0, slice S0.1", and that header is emitted from a template string literal
+inside `packages/zero-migrate/scripts/gen-dialect-table.mjs`, which carries the tag
+itself. Fixing it means editing string literals in a generator and regenerating
+artifacts that a drift gate pins, which is a code change rather than a comment
+change.
+
+Thirty-three sites use unnumbered deferral vocabulary - "a later cut", "a later
+phase", "this slice". These point at unbuilt work rather than tagging past work,
+several sit beside a genuine not-yet-built fact, and one is inside an `#[error]`
+string that reaches users. Expanding the rule to cover them is a separate call.
+
+One methodology change landed with this. The workspace gate now runs with
+`--no-fail-fast`, because cargo stops at the first failing target otherwise, so a
+red target would leave the remaining ones unenumerated and the reported count would
+be a partial silently presented as a total. Verified on this tree: with the flag,
+2206 passed / 0 failed across 74 targets, identical to the count without it. The
+value is not today's number, it is the first day the number would otherwise be
+wrong.
