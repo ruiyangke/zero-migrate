@@ -4033,3 +4033,97 @@ write. The block-presence assertion is separate from the entry check for the F49
 renamed key and an empty block must not report the same green.
 
 Package suite 223 tests / 222 pass / 0 fail / 1 skip - the one moved count is the new test.
+
+## F65 - Both agents contradicted my premise, and the clause that made them do it was "argue against yourself" (#79)
+
+I briefed an Opus agent and a read-only codex on a single narrow question: given that MySQL
+evaluates no existence guards, does the fail-closed interlock ship first, or the MySQL probe?
+The brief carried a mechanism I had researched and believed:
+
+    a guarded `createTable ifNotExists` on MySQL runs BARE - it relies on MySQL's own
+    IF NOT EXISTS and never verifies the existing object has the DECLARED SHAPE
+
+THAT MECHANISM IS WRONG, AND BOTH FOUND IT INDEPENDENTLY. MySQL does not fall back on a
+native clause. It DROPS the guard and runs bare DDL, so a re-run ERRORS. Fail-loud, not
+fail-open. VERIFIED BY ME at three places after they contradicted me:
+
+    render/sql_preview.rs:838   const fn mysql_guard_is_native(op: &Op) -> bool {
+                                    matches!(op, Op::DropView { .. })
+                                }
+    model/support.rs:406        the generated support matrix ALREADY declares MySQL
+                                unsupported, in these words: "the MySQL backend evaluates
+                                no existence-guard catalog probe at apply, so a guarded
+                                statement runs unconditionally and a re-run errors; the
+                                sole exception is dropView"
+    tests/golden/sql_preview_mysql.txt:21-23
+                                a guarded addColumn previews as bare ALTER TABLE under a
+                                comment saying exactly that
+
+The answer was committed in three places, one of them a GENERATED artifact. No instrument
+was missing and no search came back empty. I had a confident wrong model and never asked it
+a question it could fail.
+
+WHAT CAUGHT IT WAS NOT A BETTER QUESTION. Both agents answered the ordering question inside
+my frame. The premise broke in the section where each had to name a concrete case where ITS
+OWN recommendation makes things worse - because that forces a walk of what the status quo
+actually DOES, which the question never described. One of them then REVERSED its own
+recommendation mid-thread after I forwarded it a fact the other had surfaced.
+
+BOTH CONVERGED ON THE SAME THREE CONCLUSIONS.
+
+  1. THE INTERLOCK IS MISFILED AS A BLANKET REFUSAL. `dropView` genuinely lowers to native
+     `DROP VIEW IF EXISTS` on MySQL, so `existence_guard.is_some()` would refuse the one op
+     MySQL honours correctly. And on a fresh database where the object is absent, the bare
+     DDL is exactly right - so the refusal breaks working deployments. Both named that as
+     their own worse-case, separately.
+  2. THE LAYER IS VALIDATION, NOT THE EXECUTOR. model/support.rs:401 states outright
+     "Validation never gates on this feature", and the sibling `Feature::RenameColumnGuard`
+     IS gated in one line at model/validate.rs:5013. The machinery exists and is unwired.
+  3. WIRING THE PROBE ALONE WOULD CREATE THE HOLE I THOUGHT EXISTED. schema/query.rs:2857
+     folds `varchar(N)` to `text` for EVERY N, :2872 folds `decimal(p,s)` to `decimal`,
+     :2863 folds `datetime(6)` to `datetime`; apply/backend/mysql/drift_sql.rs:210
+     canonicalises ON INGEST with `ddl_type_override: None`, so the raw COLUMN_TYPE is
+     DISCARDED and unrecoverable downstream. A declared `varchar(255)` against a live
+     `varchar(64)` would compare text to text, return SatisfiedNoop, and JOURNAL COMPLETED.
+     That trades today's loud error for a green deploy over a column a quarter of the
+     declared width, with the failure relocating to a production insert weeks later.
+
+So the work is ONE unit: carry the raw type in the MySQL snapshot AND require raw equality
+for SatisfiedNoop, using the coarse fold only for present/absent and RunBare. Neither half
+ships alone, which is the opposite of the sequencing I went in with.
+
+WHAT EACH ADDED THAT THE OTHER DID NOT. Codex: the executor's first pass covers pending
+VERSIONED migrations only and repeatables are handled later - I checked, and it is half
+right, because repeatables DO get their own all-up-front gate at executor.rs:1184
+(`guard_repeatable_batch`, "a denial applies NOTHING"), so it is a second first-pass rather
+than a hole; what survives is that a repeatable denial lands after every versioned migration
+has committed, which the versioned comment's "EVERY pending migration" does not convey.
+Codex also noted that PostgreSQL's own probe proves column set, type and nullability but NOT
+defaults, primary-key semantics or collation - so "shape-verified" is narrower than it reads
+even on the dialect that works. Opus: `ifNotExists` is strictly opt-in
+(`ifNotExistsGuard(v) => v ? "ifNotExists" : undefined` at ops.ts:2857, and zero default-on
+sites anywhere), which is what makes a refusal's blast radius self-selected.
+
+AND ONE ALARM I RAISED AND REFUTED MYSELF. Chasing the consequence I convinced myself that
+`Op::existence_guard()` returning None for `Op::Dialectal` silently strips a guard authored
+inside a per-dialect leg, on every dialect including PostgreSQL. One line settles it -
+render/lower.rs:4033 makes `lower_one_op` REFUSE a dialectal op ("dialectal op must be
+expanded before lower_one_op"), which proves legs are expanded upstream and each leg op is
+lowered carrying its own guard. The wrapper has no guard; the legs do. Recorded in #80 so
+the next reader does not re-raise it.
+
+That non-defect matters to #79's cost more than anything else here: because leg guards ARE
+stamped, and `dialect()` is authorable (ops.ts:2420),
+
+    dialect({ pg: () => table("t").create({ ..., ifNotExists: true }),
+              mysql: () => table("t").create({ ... }) })
+
+is a WORKING in-history escape hatch - full PostgreSQL guard safety, no MySQL refusal, one
+history, no fork. Opus's strongest objection to the refusal was that a multi-dialect shop
+would be forced to fork its history, and that objection does not survive this. I found it by
+checking a thing I expected to be a defect.
+
+NOTHING IS IMPLEMENTED. #79 is rewritten to carry the corrected mechanism and the one-unit
+sequencing, and the old framing is struck from it, because a ticket that reads as a silent
+data-loss hole when the behaviour is a loud declared limitation will misdirect whoever picks
+it up next - which is the specific way it misdirected me.
