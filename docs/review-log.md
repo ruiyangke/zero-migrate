@@ -2118,3 +2118,53 @@ with the command shown. I did not recount the 56/34/12 coverage figures or the
 independently reproduced the history - `op_round_trip.rs` at 261 lines, deleted
 in `c07e98f` - but I could not extract a clean final recommendation from its
 output, so this is a single opinion I checked rather than two reconciled.
+
+### F35 addendum - the two opinions disagree about where authority should sit
+
+A correction to my own premise first. I wrote that every `buildEnvelope`
+reference outside its definition is the dist re-export or a test caller. That is
+false, and it was false because I truncated the grep with `head -20`. Verified
+now with the full output: `packages/zero-migrate-cli/src/index.ts:519` calls it
+inside `authorEnvelope`, which five production sites call (`:182`, `:184`,
+`:305`, `:333`, `:426`), and `packages/zero-migrate-cli/src/cli.ts:658` calls it
+directly. The recorder is on the production path, not only under test. That
+strengthens the live-database suites as evidence, because they drive the same
+code a user drives.
+
+The two opinions agree on the history and split on the remedy, and the split is
+worth keeping rather than resolving by fiat.
+
+Both reject building a second producer - it duplicates the whole DSL and has
+already demonstrated its maintenance failure mode - and both reject simply
+accepting the limit. Both independently propose the same missing piece: a
+schema-derived coverage manifest requiring every one of the 56 `Op` tags to name
+a case, so the gap is visible rather than inferred.
+
+They disagree on what should be authoritative.
+
+One says restore the byte-comparison over all 26 fixtures as the primary oracle,
+on the grounds that the goldens have certified independent provenance and are
+therefore a real second opinion, and that this is the cheapest guarantee
+available because it is already paid for.
+
+The other says do not treat the corpus as an oracle at all. Call it a drift
+sentinel, and put authority on the result side instead: exact reviewed SQL
+goldens for broad database-free coverage, plus live catalog and row assertions
+for anything resolved at runtime. Its argument is that a golden envelope only
+ever proves the recorder still says what it said in July, never that what it said
+was right, and it points out that envelopes reaching Rust are already
+structurally validated by serde at `crates/zero-migrate/src/model/load.rs:49-63`,
+so schema validation largely duplicates the authoritative boundary. It notes
+`crates/zero-migrate/tests/sql_preview.rs:36` already pairs independently written
+IR with exact SQL expectations, and that feeding an equivalent TypeScript
+migration through `buildEnvelope` into those same expectations would join two
+halves that are currently disconnected.
+
+That last suggestion is the one worth taking first, because it satisfies both
+positions: it is a result-side assertion, and it reuses an existing independent
+artifact rather than blessing recorder output.
+
+The disagreement is real and it is about a genuine tradeoff - a frozen envelope
+comparison catches drift cheaply and broadly but can never catch a defect that
+was already there, while a result-side assertion catches semantics but costs more
+per operation and today covers 12 of 56. Recorded unresolved rather than settled.
