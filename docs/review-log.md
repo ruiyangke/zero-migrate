@@ -3629,3 +3629,55 @@ construct the write-only field to satisfy a struct literal, so deleting it touch
 them. THE COST OF DELETION IS WHAT KEEPS A WRITE-ONLY FIELD ALIVE, and it grows with every
 fixture. My seven are not that case - the field IS read, by the PostgreSQL and SQLite
 backends - so the split flagged both and only the follow-through separated them.
+
+### F58 - the op manufactured the state I thought needed a crash, and my repro could not reach it
+
+#86 as I filed it: a guarded masked `addColumn` builds ONE probe describing the MAIN column
+and the generic stamp copies it onto BOTH units, including the `<column>_masked` sibling's.
+I predicted a silent skip and guessed the reachability - a partial apply, an adoption where
+the main column arrived out of band, a re-run after a failure between the two units. I
+wrote "treat this as the premise most likely to be wrong".
+
+IT WAS WRONG IN THE DIRECTION THAT MATTERS. No crash is needed. The two units are separate
+`Migration`s - separate transactions, separate journal rows - so UNIT 0 HAS ALREADY
+COMMITTED when unit 1 snapshots the catalog. Unit 1 probes the main column, finds it
+present and matching, returns `SatisfiedNoop`, skips its own `ADD COLUMN` and journals
+green. On a clean database, first apply, every time. THE `<column>_masked` SIBLING WAS
+NEVER CREATED AT ALL, and the mask sentinel `COMMENT` rides the same skipped statement.
+
+AND THE REPRODUCTION I SPECIFIED COULD NOT HAVE FOUND IT. I asked for: apply, drop the
+sibling out of band, re-apply. That never reaches the probe - pending is recomputed as
+`set - completed - superseded` (`apply/executor.rs:910`) before `apply_one` runs, so an
+already-journaled version is filtered out ahead of the guard. A second authored plan with
+fresh versions is required. So the ticket would have produced a green run and a closed
+issue.
+
+Verified by me, RED and GREEN from ONE compiled binary via an env gate, window 17:51:11 -
+17:51:46 UTC:
+
+    ZERO_MIGRATE_V86_OLD_STAMP=1
+      a_guarded_masked_add_column_adds_the_sibling_on_a_clean_first_apply ... FAILED
+      a_crash_between_the_masked_add_column_units_still_adds_the_sibling_on_resume ... FAILED
+      a_guarded_masked_add_column_is_a_clean_noop_when_both_columns_are_present ... ok
+    env unset
+      all three ... ok
+
+THE ENGINE ALREADY KNEW. `render/declarative.rs:7581-7595` documents this exact failure
+mode as the reason `createTable` attributes a per-unit probe: "once unit 0 creates the
+table, units 1..N see the table PRESENT ... SKIPPED but journaled completed". The masked
+`addColumn` arm had the same two-object shape and did not follow the pattern written down
+one file away. Fixed as 63ddb1e by using that pattern rather than inventing one.
+
+THE COMMENT WAS THE REAL DEFECT, and it is why this survived. `lower.rs:5196` justified the
+blanket stamp: "each re-probes the live catalog under the held lock and gets the same
+verdict." That sentence is TRUE for multiple statements about one object and it is the
+FAILURE MODE for two objects - and it reads as a safety argument either way. Now restated:
+what makes the stamp sound is that every unit it touches describes the SAME OBJECT, not
+that the units re-probe under one lock. A WRONG REASON ATTACHED TO CORRECT CODE IS A
+LOADED GUN: the code was fine for every arm that existed when the comment was written, so
+nothing failed, and the next two-object arm inherited the blessing.
+
+TWO GAPS RECORDED RATHER THAN CLOSED, both filed: `dropColumn` on a masked column emits one
+unit and leaves the sibling behind (#89, NOT verified by me), and the sibling's probe checks
+the column's shape but not its sentinel `COMMENT`, so a sibling present but unmarked reads
+as satisfied (#90, mechanism verified, reachability not).
