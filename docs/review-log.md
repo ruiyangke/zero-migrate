@@ -1534,3 +1534,50 @@ exactly except for the `String`/`Text` pair, so a `Ref` local against a `text` `
 never matches even though both lower to `text`. Harmless for gen-types, which does
 not validate, but it means no `ref`-branded column can carry a table-level key at
 all. Whether `Ref` should join that equivalence class is undecided.
+
+### F21 corrected
+
+F21 concluded there is no connection leak, reasoned from `postgres` 0.19.14 closing
+the socket in `Client::Drop`. That conclusion is now measured server-side and it
+holds, but two things in it were wrong and the correction matters more than the
+confirmation.
+
+Measured against a live PostgreSQL 18 with `max_connections = 100` and an idle
+baseline of zero, sampling `pg_stat_activity` filtered by `datname` and excluding
+the sampler's own backend.
+
+Serial, concurrency removed as a confound, 30 live tests over 13.3 seconds at 200ms
+resolution:
+
+    0 0 0 0 1 1 1 1 1 0 1 1 1 1 0 0 1 0 1 0 0 1 1 1 1 0 1 1 1 1 0 1 1 0 1 0 1 1 1 0
+    0 0 0 1 0 1 1 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 0 1 0 2 1 0 1 1 0
+    1 1 1 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+
+Peak 2, and the 2 is the one test that deliberately opens a second session while
+holding the project lock. Connections are torn down within a test. Backends
+retained after process exit: zero, in every suite measured, including a 1938-test
+run across 63 binaries.
+
+Connections per test is 0.00 everywhere. The reporting consumer measured 0.6 and
+1.9 per test in their own suites, so the comparison is not marginal.
+
+The first correction: the headroom figure of 31 of 100 was computed from test
+counts and is wrong as a description of anything observed. Measured parallel peak
+is 13 to 15, because libtest runs one thread per logical CPU and this machine has
+16. The ceiling was never approached and the arithmetic behind the old number
+described a scenario that does not occur.
+
+The second correction is the one that matters. This tree looked like a decisive
+control for the reporting consumer's hypothesis that a compio runtime retains
+sockets until process exit, because our live-PostgreSQL suites do run under
+`#[compio::test]`. It is not decisive. `PgDevSession::connect` uses the BLOCKING
+`postgres::Client::connect`, so the sockets belong to that client's own internal
+runtime and were never compio tasks. A defect in compio's teardown could not appear
+here whatever its state. A flat curve is therefore consistent with both "the
+mechanism does not exist" and "the mechanism exists and cannot reach these
+sockets", and it does not distinguish them.
+
+So the measurement establishes that this engine does not leak connections, and
+establishes nothing at all about the mechanism it was set up to test. The
+instrument was validated separately by holding 20 connections open and observing
+20, so the null result is a real null rather than a blind one.
