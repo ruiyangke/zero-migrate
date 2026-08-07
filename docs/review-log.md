@@ -1951,3 +1951,46 @@ Inject` and the lint does fire. So this is not a test that cannot fail. It is a
 test whose commentary describes a different test that was never written, asserts
 a fallback ("admit's transitive bound") that nothing here checks, and leaves a
 dead binding as evidence of the abandoned attempt.
+
+### F33 - three authoring tokens sat outside the enumeration the drift gate reads
+
+The premise this started from was wrong on three counts, and correcting it is
+what found the real defect.
+
+`packages/zero-migrate/src/generated/ir.ts` is NOT generated. Its own header
+says so and gives the reason: the structural defs form a self-recursive `oneOf`
+AST and `json-schema-to-typescript` v15 overflows its stack on the `$ref` cycle.
+`dialect-table.ts` is generated from `crates/zero-migrate/dialect-support.toml`,
+not from the IR envelope schema. And CI does invoke both generators - not
+through the `gen` npm scripts, but through two drift tests that shell out with
+`execFileSync` and byte-compare the result, which run in the node job. So the
+gate that was supposed to be missing already existed, in a stronger form than a
+`git diff --exit-code` step would have been.
+
+Determinism was checked before any of that was concluded: each generator run
+twice from a clean tree, `git diff --exit-code` zero every time, and the one
+latent hazard found by reading - a `localeCompare` row sort in
+`gen-dialect-table.mjs` - was tested rather than assumed, producing identical
+output under C, en_US.UTF-8, tr_TR.UTF-8, de_DE.UTF-8, and sv_SE.UTF-8. It is
+stable for today's ASCII camelCase token set and is a trap only if a token with
+a digit, hyphen, or underscore is ever added.
+
+The real gap is axis one, the enumeration-source shape: the schema declares 83
+`$defs`, 33 of them closed string-enums, and `ENUM_DEFS` in
+`scripts/gen-ir-types.mjs` lists 30. The three missing ones - `VectorMetric`,
+`IrMaskKind`, `IrClassification` - back `t.vector({ metric })` and
+`.mask({ kind, classification })`, and their TypeScript mirrors are hand-typed
+unions in `ir.ts`. The regenerate-and-diff gate covers only what the generator
+emits, so nothing covered them. The detector over `ENUM_DEFS` was perfect; what
+was not in `ENUM_DEFS` was invisible to it.
+
+I verified the consequence myself from the opposite side of the agent's probe.
+Renaming `VectorMetric`'s `innerProduct` to `dotProduct` in `ir.ts` - a public
+authoring token - left the package suite at 219 tests, 218 passed, 0 failed. The
+DSL would have offered a token the engine rejects, with CI green. With the two
+new tests present the same edit fails as `VectorMetric drifted from the schema
+VectorMetric tokens`.
+
+The second new test is the one that matters longer term: it fails when any NEW
+closed string-enum appears in the schema with no TypeScript mirror, so the next
+token added to the engine cannot repeat this by being left out of a list.
