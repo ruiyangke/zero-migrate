@@ -1994,3 +1994,53 @@ VectorMetric tokens`.
 The second new test is the one that matters longer term: it fails when any NEW
 closed string-enum appears in the schema with no TypeScript mirror, so the next
 token added to the engine cannot repeat this by being left out of a list.
+
+### F34 - the milestone references in comments, triaged rather than swept
+
+Sixteen of twenty-three sites carried a reference to this project's development
+schedule: `Phase 1a`, `Phase 1b-i`, `Phase 1b-ii`, `PHASE 4`, `Phase 2 Step 2a`,
+`Phase 2 Step 2b`, `Track-A`, and spec numbering of the form `II.2.5`. Those tell
+a reader nothing about the code and go stale the moment the schedule changes, so
+they are gone, replaced by what the thing actually is.
+
+Seven were left, because a phase that names a step the CODE PERFORMS AT RUNTIME
+is not a schedule reference:
+
+- `crates/zero-migrate-policy/src/scope/mod.rs:399,411` number the coverage and
+  disjointness steps of the containment algorithm directly below them.
+- `crates/zero-migrate/tests/backfill_sqlite.rs:270,283` name the two legs of the
+  test scenario, a bounded run that crashes after three batches and the resume
+  that must restart from cursor 300.
+- `crates/zero-migrate/src/apply/executor.rs:973,1110` say REPEATABLE PHASE,
+  which is Flyway and Liquibase vocabulary; the doc comment cites `R__` and
+  `runOnChange` by name.
+- `crates/zero-migrate/src/apply/backend/postgres/session.rs:887` is phase two of
+  a protocol its own function doc at `:734` calls "Non-transactional apply:
+  two-phase with a `started` marker".
+
+The distinction worth keeping: strip a reference to WHEN the code was written,
+keep a reference to WHAT IT DOES IN ORDER.
+
+One rewrite replaced a claim rather than deleting a tag.
+`crates/zero-migrate-guard/src/guard/mod.rs:137` asserted that "Every pre-PHASE-4
+call site keeps this dialect, byte-identical", which is unverifiable once the
+schedule is forgotten. It now says a config keeps its dialect unless
+`GuardConfig::for_dialect` selects another. That is checkable and checked:
+`self.dialect` is assigned in exactly one place after construction, `mod.rs:211`,
+inside `for_dialect`.
+
+The `II.x.y` spec numbering is dangling - nothing under `docs/` defines it - and
+roughly 150 references remain across the policy and guard crates, still open.
+
+The list of twenty-three was not exhaustive. Also outstanding: the same
+schedule-tag class at `guard/mod.rs:114,991`, `guard_vendor_lower_tests.rs:1317`,
+`apply/executor.rs:2511`; `phase-1a` at `scope/mod.rs:45,196`,
+`scope/pattern.rs:71`, `tests/compose_oracle.rs:5`; `Phase-4` at
+`tests/guard_security.rs:1359,1397` and `render/dml.rs:2736`; and `Cut 3` /
+`cut 4e` at `model/load.rs:59`, `model/validate.rs:4642,8987`,
+`zero-migrate-node/src/lower.rs:202`, `apply/backend/mysql/mod.rs:1033`.
+
+Two are not comments at all and so are a code change rather than a comment
+change: `render/declarative.rs:6549` and `render/lower.rs:7138` both raise the
+error text "renameColumn is not live-rendered for MySQL in render-only Phase 1",
+which puts a schedule reference in front of a user.
