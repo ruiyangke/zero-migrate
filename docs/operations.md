@@ -455,7 +455,16 @@ disables `foreign_key_checks`.
 
 If an interrupted schema step leaves an inflight marker, automatic apply stops.
 The marker is preserved and the schema statement is not replayed because MySQL
-may already have committed some or all of it. A Rust host resolves it with
+may already have committed some or all of it. The refusal message names both
+resolutions and prints the exact statement for the first one.
+
+Any operator restores and verifies the complete pre-migration shape, deletes the
+marker row from `<projectSchema>_migrations.schema_migrations_inflight` for that
+version, and runs the normal apply again. The inflight side-table is mutable and
+a successful apply deletes from it, so this needs no privilege the migration
+account lacks. This is the route available from the CLI and the Node SDK.
+
+A Rust host that embeds the crate can instead call
 `MysqlBackend::recover_inflight_ddl`, supplying the exact reviewed `Migration`,
 the operator identity, and a non-empty reason:
 
@@ -465,10 +474,18 @@ the operator identity, and a non-empty reason:
   `MysqlInflightResolution::ClearForRetryAfterRollback`, then run the normal
   apply again.
 
-The recovery call locks the project, verifies the marker's version, name, and
-checksum against the supplied migration, and records the decision in immutable
-recovery history. It never reruns the ambiguous migration SQL. A marker mismatch
-or missing audit context is rejected without changing the marker.
+That call locks the project, verifies the marker's version, name, and checksum
+against the supplied migration, and records the decision in immutable recovery
+history. It never reruns the ambiguous migration SQL. A marker mismatch or
+missing audit context is rejected without changing the marker. It has no binding
+across the Node addon, so it is unreachable from the CLI and the Node SDK.
+
+Neither resolution reads the live schema. Recovery records the operator's
+assertion about the shape; it does not verify it. Verifying is the operator's
+step, before either resolution.
+
+See [Interrupted MySQL or non-transactional work](#interrupted-mysql-or-non-transactional-work)
+for the full checklist.
 
 ### SQLite
 
@@ -608,13 +625,43 @@ Plan the forward fix and restore path before approving a destructive migration.
 - leave the database and journal unchanged while investigating;
 - inspect the recorded recovery state and live schema;
 - determine whether the database change committed;
-- do not delete the inflight marker or retry the DDL blindly;
-- use a Rust host to call `MysqlBackend::recover_inflight_ddl` with the exact
-  reviewed `Migration`, operator identity, and reason;
+- do not retry the DDL blindly, and never fabricate a `completed` event in the
+  append-only `schema_migrations` table;
+- then resolve the marker one of two ways.
+
+Clearing the marker yourself is supported and is the only route available from
+the CLI and the Node SDK. `schema_migrations_inflight` is a mutable side-table,
+not part of the append-only event history, and a successful apply issues the
+same statement:
+
+- restore and verify the complete pre-migration shape;
+- clear the marker, then repeat normal apply.
+
+```sql
+DELETE FROM `<projectSchema>_migrations`.schema_migrations_inflight
+ WHERE version = '<version>';
+```
+
+The refusal message from apply prints this statement with your project schema
+and version already filled in.
+
+A Rust host that embeds the crate has an audited alternative:
+
+- call `MysqlBackend::recover_inflight_ddl` with the exact reviewed `Migration`,
+  operator identity, and reason;
 - choose `MarkAppliedAfterVerification` only after verifying the complete new
   shape, or `ClearForRetryAfterRollback` only after restoring and verifying the
   complete old shape;
+- over the direct `DELETE` it adds a marker-identity check against the supplied
+  migration and an immutable recovery-history row, and it also resolves the
+  "the DDL fully landed" case without rolling anything back;
+- it has no binding across the Node addon, so it is unreachable from the CLI and
+  the Node SDK;
 - repeat normal apply only after that repair has resolved the inflight state.
+
+Neither route inspects the database. Recovery does not verify schema shape; it
+records the operator's assertion about it. Verifying the live shape is a step you
+perform first, outside zero-migrate.
 
 ### Interrupted backfill
 

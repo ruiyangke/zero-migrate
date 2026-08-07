@@ -459,16 +459,43 @@ auto-commits.
 - Check whether the intended database object change exists.
 - Compare the journal event with the current schema.
 - Follow a reviewed recovery or forward-repair procedure.
-- Do not add a fake completion event or delete journal rows.
+- Do not add a fake completion event to `schema_migrations` and do not edit or
+  delete rows in it. That table is append-only and trigger-guarded; a fabricated
+  `completed` event claims a shape nobody verified.
+- Clearing the inflight marker is a different action on a different table, and
+  it is supported. `schema_migrations_inflight` is mutable by design, and normal
+  apply deletes from it on every success.
 
 For an interrupted MySQL schema step, zero-migrate keeps the inflight marker and
-will not replay the possibly committed DDL. Repeating apply will fail closed
-until a Rust host calls `MysqlBackend::recover_inflight_ddl` with the exact
-reviewed migration. Use `MarkAppliedAfterVerification` only after verifying the
-complete new shape. Use `ClearForRetryAfterRollback` only after restoring and
-verifying the complete old shape. Both choices require an operator and reason,
-verify marker identity, and append immutable recovery history; neither choice
-reruns the DDL.
+will not replay the possibly committed DDL. Repeating apply fails closed until
+the marker is resolved. There are two supported resolutions.
+
+Any operator, including through the CLI and the Node SDK, can restore and verify
+the complete pre-migration shape by hand and then clear the marker:
+
+```sql
+DELETE FROM `<projectSchema>_migrations`.schema_migrations_inflight
+ WHERE version = '<version>';
+```
+
+Run the normal apply again afterwards. The migration account already holds the
+privilege this needs, because successful applies issue the same `DELETE`. The
+refusal message from apply prints this statement with your project schema and
+version filled in.
+
+A Rust host that embeds the crate can instead call
+`MysqlBackend::recover_inflight_ddl` with the exact reviewed migration. Use
+`MarkAppliedAfterVerification` only after verifying the complete new shape. Use
+`ClearForRetryAfterRollback` only after restoring and verifying the complete old
+shape. Over the direct `DELETE`, this route adds a marker-identity check against
+the supplied migration and an immutable recovery-history row, and it also covers
+the "the DDL fully landed" case without rolling anything back. It requires an
+operator identity and a reason. It has no binding across the Node addon, so it
+is unavailable from the CLI and the Node SDK.
+
+Neither resolution reruns the DDL, and neither inspects the database. Recovery
+does not verify schema shape; it records the operator's assertion about it.
+Verifying the live shape is your step, before either resolution.
 
 For a backfill, keep the source, name, cursor, and batch definition unchanged,
 then rerun the same approved migration. It resumes after the last committed
