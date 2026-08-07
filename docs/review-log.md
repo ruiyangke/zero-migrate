@@ -2299,3 +2299,59 @@ assert author-declared shape, which resolution leaves untouched.
 
 Not fixed here. Whether preview should resolve the policy, or should state
 plainly that it omits injection, is a product decision.
+
+### F37 decided - preview should resolve, and the module's own header says so
+
+Reconciled from one full opinion, my own verification, and a partial second. Being
+precise about that: the Opus job returned a complete recommendation; the codex job
+ran about eighteen minutes, produced 406KB that is almost entirely file dumps, and
+STOPPED WITHOUT A VERDICT. So this is not the two-opinion reconciliation the process
+calls for. It is one opinion plus independent checking, and the one thing that makes
+that acceptable is that the decisive evidence is three code contracts I read myself
+rather than anybody's reasoning.
+
+A circularity worth recording first. The Opus job's HEADLINE evidence that the
+behaviour is unintentional was `docs/review-log.md` F37 - an entry I wrote two hours
+earlier. My own review log cannot corroborate my own finding. This is the decay shape
+from F35 applied to prose: a claim I wrote becomes, one hop later, corroboration for
+itself. My review log is now an evidence source agents read and cite back to me, and
+I have to discount it accordingly.
+
+The real evidence, all three verified by me by reading:
+
+`crates/zero-migrate/src/render/sql_preview.rs:82-84` documents
+`PreviewOpts.effective_policy` as "The composed policy whose inject rules shaped any
+RESOLVED create-table operation being previewed." The design assumes the envelope
+arriving is already resolved.
+
+`crates/zero-migrate/src/model/load.rs:60-62` says the author-PK conformance check
+"is owned by the injection resolver `resolve_create_table_policy`, which the server
+runs over the operator's `EffectivePolicy` BEFORE this load."
+
+And the decisive one, which the codex job found before it stalled and which neither
+I nor the Opus job had looked at - the preview module's own header at
+`sql_preview.rs:13-19`, under a section titled "The honest boundary (the load-bearing
+design point)":
+
+    DB-INDEPENDENT ops - `createTable`/`dropTable`/`addColumn`/... render their REAL
+    SQL: their `up`/`template` is fully determined offline
+
+`createTable` is named in that list. So the module states that what it renders for a
+create-table IS the real SQL, and today it is not - it omits the policy-injected
+columns and indexes apply will create. The behaviour contradicts the contract written
+at the top of the file implementing it. That settles question four: not deliberate,
+and not merely undocumented, but documented in the opposite direction.
+
+The decision is to resolve, placed engine-side rather than in the addon so the Rust
+API stops diverging too. Not the show-both option: `plan --sql` output is piped to
+files and pasted into change reviews, so emitting two executable-looking `CREATE
+TABLE` blocks invites running the wrong one, and the operator already has the
+migration source for author intent.
+
+Recorded as unverified and required before this lands: whether
+`packages/zero-migrate-cli/tests/host/sql-preview-parity.test.ts` still passes once
+preview resolves. It runs under the injecting charter, its assertions are substring
+checks on author-declared facets, and the surviving-resolution argument is an
+inference from the fold logic that nobody has run. Its comment block also states that
+preview does NOT resolve, which becomes false and has to be rewritten rather than left
+as a stale explanation of a behaviour that no longer exists.
