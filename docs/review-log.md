@@ -2225,3 +2225,77 @@ be a partial silently presented as a total. Verified on this tree: with the flag
 2206 passed / 0 failed across 74 targets, identical to the count without it. The
 value is not today's number, it is the first day the number would otherwise be
 wrong.
+
+### F36 - the authoring recorder is now joined to hand-written SQL expectations
+
+The step both #62 opinions endorsed is in.
+`packages/zero-migrate-cli/tests/host/sql-preview-parity.test.ts` re-authors three
+of `crates/zero-migrate/tests/sql_preview.rs`'s cases through the public DSL,
+runs them through `buildEnvelope`, renders with the addon's `previewSql`, and
+asserts the SAME strings that Rust test pins by hand. Those strings were typed
+against the SQL, never generated from the recorder, so they are an expectation
+the recorder cannot influence.
+
+The valuable part of this was not the new test but what proving it cost.
+
+The first mutation tried - recording `text` instead of `{ string: { length } }` -
+WAS caught by the existing suites: the package suite went 219/1 and the host
+suite failed two tests. So for column-type spelling the gap was narrower than I
+had recorded, and the honest answer was to say so rather than claim a win.
+
+A second, equally realistic mutation found the real gap. In `recordCreateView`
+at `packages/zero-migrate/src/ops.ts:4294`, the STRUCTURED branch passes
+`replace: undefined` while the raw branch at `:4284` keeps `replace: args.replace`
+- a field dropped on one of two branches, which is what an ordinary refactor
+mistake looks like. I reproduced both halves myself:
+
+    not ok 93 - authored MySQL feature migration renders the SQL sql_preview.rs pins
+        CREATE VIEW `public`.`active_teams` AS SELECT `id`, `name` ...
+
+against a pinned `CREATE OR REPLACE VIEW`. And with that same mutation in place
+the existing package suite was COMPLETELY GREEN - 221 tests, 220 passed, 0 failed.
+The TypeScript suites pin op SHAPE deeply, which is why the type mutation was
+caught, but nothing connected recorder output to SQL MEANING until now.
+
+That contrast is the finding. A gap is not uniform across a surface: the same
+producer was well guarded for one facet and unguarded for another, and only
+running two different mutations distinguished them. One mutation would have
+produced a confident and wrong conclusion either way - the first would have said
+"no gap", the second "total gap".
+
+The test carries no regenerate affordance, deliberately, and says why: re-blessing
+from this side converts an independent oracle into a mirror of the recorder,
+which is the failure mode the corpus in F35 has already suffered 14 times.
+
+Its comment states what it does NOT prove, including that it is not a second
+renderer - the SQL text still comes from the one engine renderer, and only the IR
+reaching it comes from the TypeScript side.
+
+Mutation window recorded per the downstream-consumer rule: opened 10:16:52 UTC,
+closed 10:17:36 UTC, `src/ops.ts` restored byte-for-byte
+(sha256 3e7e196d033f2986763384ea0ba8acbd397cdf0761a98da3d95b5d76cb521b72) and the
+tracked build output rebuilt after a `touch`, so no stale artifact survived.
+
+### F37 - the SQL preview omits what apply will actually create
+
+Found while establishing whether the render path was reachable from TypeScript,
+and it is a user-facing divergence rather than a test gap.
+
+`crates/zero-migrate-node/src/bridge.rs:161` exposes `previewSql`, which calls
+`render_ir_envelope_sql` on the RAW envelope. It never calls
+`resolve_create_table_policy`. The apply path does, at
+`crates/zero-migrate-node/src/lower.rs:206`, and so does `sql_preview.rs`'s own
+golden helper.
+
+So `zero-migrate plan --sql` and `validate --explain` show an operator a
+`CREATE TABLE` WITHOUT the policy-injected columns and indexes that the
+subsequent apply will actually create. The preview is not a preview of the
+statement that runs.
+
+This also explains why the whole-file goldens under
+`crates/zero-migrate/tests/golden/` are not byte-comparable through the
+TypeScript path, and why F36 ports the hand-typed exact-SQL cases instead: those
+assert author-declared shape, which resolution leaves untouched.
+
+Not fixed here. Whether preview should resolve the policy, or should state
+plainly that it omits injection, is a product decision.
