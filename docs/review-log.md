@@ -4350,3 +4350,75 @@ exists" are not the same question.
 NOTHING IS IMPLEMENTED. #92 carries the reconciled design; #98 (the recovery API no CLI or
 SDK user can reach) and #99 (the SQLite plan/apply split) were spun out and #98 outranks
 this sequencing work.
+
+## F70 - The two opinions disagreed on the VERDICT, and one cheap measurement separates them (#98)
+
+F69's pair split on placement. This one split on the answer. Opus: misfiled, ship the reword
+only, defer the verb. Codex: ship the verb WITH the reword, and do not ship the reword alone
+because "a product that can create a fail-closed state during normal MySQL operation must
+also ship its audited exit path".
+
+WHAT I VERIFIED MYSELF, and each changes the shape of the question:
+
+  - THERE ARE TWO DEAD ENDS AND THE ONE I FILED IS THE BETTER ONE. executor.rs:1048-1056
+    returns `ApplyError::ChecksumDrift` BEFORE `let had_inflight = inflight.is_some();` at
+    :1057, and that message names neither the marker nor recovery. A user whose re-lower
+    does not reproduce the checksum never sees the recovery instruction at all.
+  - THE DOCS FORBID THE ONLY REACHABLE ACTION. docs/troubleshooting.md:461: "Do not add a
+    fake completion event or delete journal rows."
+  - AND THAT ACTION IS LEGITIMATE BY DESIGN. mysql/journal_sql.rs:143-147 calls the inflight
+    table "The MUTABLE inflight side-table ... NOT guarded by the immutability triggers; the
+    marker is deleted on successful completion or by an audited repair."
+  - POSTGRESQL AUTO-RECOVERS. postgres/session.rs:835-845 calls `recover_non_transactional`,
+    which clears the marker and re-arms before replaying. And MySQL's `ddl_is_transactional`
+    is false, so EVERY MySQL migration writes a marker while on PostgreSQL only a
+    `transaction:false` one does. Every MySQL user can get stuck; almost no PostgreSQL user
+    can.
+  - THE "LINK THE RUST CRATE" ESCAPE IS NOT A SHIPPED PATH. docs/embedding.md:9: "The Rust
+    crate is not published yet. From this source checkout, use a path dependency."
+  - RECOVERY DOES NO LIVE-SCHEMA VERIFICATION. Its complete call set is
+    `journal_sql::inflight_for_update`, `append_recovery_audit`, `append_completed`,
+    `clear_inflight`, `session::acquire_project_lock`, `insert_supersedes_edges`,
+    `release_project_lock`. Journal and lock only. The resolution is an OPERATOR
+    ATTESTATION, and the message's "the API verifies marker identity" invites a reader to
+    generalise that into "the API verifies".
+
+MY FIRST INSTRUMENT FOR THAT LAST ONE WAS BROKEN AND ITS POSITIVE CONTROL CAUGHT IT. I
+grepped a line range for `snapshot_schema|information_schema|SHOW COLUMNS` and got zero -
+then ran a positive control for `query|execute|INSERT|SELECT` over the SAME range and ALSO
+got zero. A range containing no SQL at all cannot tell you the function issues no schema
+read. The real answer came from enumerating what the function CALLS, which is the behaviour
+question rather than the spelling one. The control is the only reason I did not publish the
+first number.
+
+BOTH WORSE-CASES ARE THE SAME OUTCOME REACHED FROM OPPOSITE DIRECTIONS: a completion
+journaled over a table whose shape does not match the declaration. Opus reaches it through
+the guard-aware projection skipping on NAME presence rather than shape; codex reaches it
+through an operator running `--mark-applied-after-verification` having checked only that the
+table exists. That convergence is the strongest signal in the pair: whatever ships, the
+failure mode to defend is a green journal row over a wrong-shaped object.
+
+THE DECISION, AND IT IS NOT A COMPROMISE. Two parts, because the pair separates cleanly:
+
+  1. THE REWORD SHIPS AND DOES NOT DEPEND ON THE VERB. Both agents want it, and it must
+     carry the disclaimer codex found: recovery verifies marker and source IDENTITY and
+     audits the operator's assertion; IT DOES NOT VERIFY SCHEMA SHAPE. It must also amend
+     docs/troubleshooting.md:461, which currently forbids the reachable action, and add the
+     same pointer to the ChecksumDrift message so the reachable dead end is not fixed while
+     the unreachable one stays.
+  2. THE VERB IS GATED ON ONE MEASUREMENT, NOT ON A PREFERENCE. Opus objects that a CLI verb
+     can only obtain its `&Migration` by re-lowering, and Node lowering projects pending ops
+     onto the LIVE snapshot (zero-migrate-node/src/lower.rs:397-428), which a partially
+     applied DDL may have altered - so the shipped verb could fail `MarkerMismatch` and
+     leave the user stuck AND convinced the supported path is broken. Codex's own design
+     requires that same re-lowering and does not resolve the objection. NEITHER MEASURED IT.
+     The experiment is cheap: strand a marker, then re-lower and compare the checksum. If it
+     reproduces, codex is right and the verb is sound. If it does not, Opus is right and the
+     verb ships broken.
+
+That is the honest state: I am not choosing between two arguments, I am running the
+experiment that makes one of them wrong.
+
+ALSO CORRECTED: both agents caught that my ticket listed 11 addon exports when there are 12
+- I omitted `irVersion`. It does not change the reachability conclusion, and I would rather
+record the miscount than quietly fix it, because I had presented the list as exhaustive.
