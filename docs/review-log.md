@@ -1261,3 +1261,82 @@ DIFFERENTLY: the stale one passes two scripts and fails a third, the fresh one
 passes that third and fails one of the first two. The rebuild fixed one gate and
 broke another. CI runs neither, which is how it managed to rot in both directions
 at once.
+
+### D8 - Refuse MySQL-fatal storage shapes at validate, from one predicate the renderer shares
+
+Both reviews picked validate, dialect-scoped. They agreed on the destination and
+found different reasons, and the reasons matter more than the vote.
+
+The objection I raised against putting it in the renderer was weaker than the
+truth. I said a renderer refusal arrives too late, with a connection and lock
+already held. That is so - lowering happens inside the project-lock bracket - but
+the decisive fact is that it would never surface at all: `render_ir_ops` catches
+every lowering error and degrades it to a `-- [runtime-resolved]` comment, by
+deliberate design. `previewSql` would not throw, and lint would still print `ok`.
+The other half of lint's verdict, the load-and-validate gate, feeds the result
+directly, so only a validate-time refusal turns lint red. Apply runs that same
+gate before lowering, so one placement closes both.
+
+Precedent is exact: MySQL deferrable foreign keys are already refused at validate
+with a dialect check and a "use a dialectal leg" remedy. And lint already calls
+the gate once per selected dialect, so the same authored bytes can fail on MySQL
+while passing on PostgreSQL and SQLite. The worry that a dialect-scoped refusal
+would reject a dialect-agnostic artifact is answered by the architecture rather
+than needing a design.
+
+#### The constraint that decides how, not where
+
+A fresh predicate in validate would be a SECOND COPY of the renderer's storage
+decision, and a stale second implementation is exactly what produced this defect.
+So the rule is only sound if the predicate is lifted into one function that both
+validate and the MySQL type renderer call, with a test asserting they agree.
+Written as an independent reimplementation it reintroduces the drift class it
+exists to close.
+
+It must key on RENDERED storage, not the authored type name. A bounded string
+marked case-insensitive renders a bare `TEXT` regardless of its length, so
+`t.string({ length: 50 }).caseInsensitive().default("x")` is equally fatal while
+its authored name says "bounded". A name-keyed rule misses it. The coarse
+reference-compatibility helper already in validate cannot be reused either, since
+it collapses bounded and unbounded strings to one spelling and would refuse
+`t.string({length})`.
+
+Not every literal default is invalid, which a naive rule would get wrong. MySQL
+permits an expression default on TEXT, and the engine already renders bytes
+defaults and JSON container defaults that way. The rule must distinguish a bare
+literal from a parenthesized expression.
+
+#### It is a class of at least four, and the second one is already live
+
+Beyond the reported literal default on TEXT/BLOB/JSON/GEOMETRY:
+
+An index, primary key or unique constraint over a bare `TEXT` column without a
+prefix length, which MySQL refuses outright. This is not hypothetical: the same
+fixture renders `CREATE INDEX ... (sku)` over a bare text column and lint passes
+it. The engine already knows this rule for its own journal tables and does not
+apply it to user tables.
+
+A bounded string longer than MySQL's row limit, rendered as `VARCHAR(n)`
+unconditionally and refused by the server. The declarative schema path already
+caps that to `LONGTEXT`, so the two paths in this engine already disagree with
+each other about the same column.
+
+And case-insensitivity on a bounded string, which renders bare text and therefore
+inherits both of the above.
+
+Validate closes the three column-shaped ones cleanly. The index case needs the
+referenced column's type, which validate has for a column declared in the same
+envelope - the live case - but not for one from an earlier envelope or an
+unmanaged table. Neither placement closes the whole class alone; validate closes
+more of it, closes it earlier, and is the only one that turns lint red.
+
+#### What this does not fix
+
+Neither review claims it would have caught the defect before the addon was
+rebuilt. The refusal compiles into the same artifact as the renderer, so a stale
+addon carries a stale validator too. That makes failing loudly on a stale addon
+the load-bearing fix rather than a hygiene item, because no gate inside that
+artifact can be trusted while the artifact can silently be months old.
+
+A default set on a pre-existing column carries no type in its own op, so offline
+validation cannot classify it. That case stays uncovered.
