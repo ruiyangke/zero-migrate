@@ -4220,3 +4220,54 @@ not. And I ran the DDL directly against MySQL rather than through the engine's a
 the step I bridged by reading is that the engine emits exactly this bare DDL, which
 `tests/golden/sql_preview_mysql.txt:21-23` shows, but a golden is a rendering and not an
 execution.
+
+## F68 - Executing the join found a stranded journal row I had filed as a future risk (#79, #92)
+
+F67 closed one NOT-CHECKED and left another: I had confirmed MySQL's behaviour by issuing
+DDL directly, not through the engine, and said so - "a golden is a rendering, not an
+execution". zeroship named the same gap on their side. I closed mine with a throwaway host
+test: authored through the public DSL, lowered by the native addon, applied through
+`zero-migrate-cli`'s `apply()` over the real `mysql2` seam, against a table seeded OUT OF
+BAND with the EXACT shape the migration declares.
+
+    seeded:   CREATE TABLE `notes` (id INT NOT NULL PRIMARY KEY, body VARCHAR(255))
+    authored: table("notes").create({ columns: { id: t.int().notNull(), body: t.string() },
+                                      primaryKey: ["id"], ifNotExists: true })
+    result:   ERROR: migration mig_7n42DGM5Q8vB5mzPkuNAgR failed to apply:
+                     Table 'notes' already exists
+
+`t.string()` defaults to 255, so declaration and live table match exactly. The join holds:
+what the golden RENDERS is what the apply path EXECUTES, and `ifNotExists` does not reach
+the server.
+
+THE JOURNAL DUMP WAS THREE EXTRA LINES AND IT IS THE FINDING. After the failure:
+
+    schema_migrations:          []
+    schema_migrations_inflight: [{ version: "mig_7n42DGM5Q8vB5mzPkuNAgR",
+                                   name: "create_table_notes", checksum: "603f1a1d...",
+                                   applied_by: "zzprobe" }]
+    schema_migrations_recovery: []
+
+Nothing completed and a STRANDED INFLIGHT ROW. The failure is not merely a red deploy; it
+leaves the project needing recovery.
+
+AND IT RELOCATES #92'S CONSTRAINT FROM THE FUTURE TO THE PRESENT. #92 records the stranded
+inflight row as a consequence of the pending fix: making the projection guard-aware removes
+a pre-flight refusal, so the failure moves from before the deploy into the middle of one.
+This run used a SINGLE migration, which takes the empty-priors path where no such refusal
+exists (`crates/zero-migrate-node/src/verbs.rs:263`). So the stranded row is what MySQL does
+TODAY, for the first migration of any project whose guarded op meets an existing object. The
+pending change would widen it from one migration to all of them. It does not introduce it.
+
+That is the second time in two measurements that the incidental query beat the intended one
+- the identical-shape control in F67, the journal dump here. Both were cheap only because
+the rig was already standing. The rule is not "measure more", it is: WHILE THE FIXTURE IS
+UP, ASK IT THE QUESTIONS YOU WERE NOT SENT TO ASK.
+
+NOT CHECKED, and the gap is now precisely the one that matters: only `createTable`, and only
+the SINGLE-migration path. The multi-migration (non-empty priors) path is the one #92 is
+actually about, and I inferred its behaviour from the branch condition rather than running
+it. That inference is the same kind that was wrong twice today.
+
+The rig was deleted; `git status` is clean, `crates/zero-migrate/tests/*.rs` is 61, and
+`SHOW DATABASES LIKE 'zzprobe%'` returns nothing.
