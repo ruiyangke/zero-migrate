@@ -2575,3 +2575,64 @@ tree and is left for a separate change.
 The cwd hazard carried over from the previous gate was reproduced rather than assumed:
 with drift present, the identical command run from `crates/` returns exit 0, a false
 pass. The step comment says it must not be moved under a `working-directory`.
+
+### F40 - the schema-leak item, measured instead of estimated
+
+Every number I had for this item was a source-text count standing in for a runtime
+quantity. Measured against a live server, the item is BIGGER IN SCOPE and MUCH LESS
+URGENT than filed, and the fix I was about to write would have missed most of it.
+
+THE INSTRUMENT. `log_statement = 'ddl'` on the container plus before/after snapshots
+of `pg_namespace`, reset afterwards. An event trigger was considered and rejected for
+a reason worth recording: creating one would have added a schema to the very catalog
+being counted. The instrument must not perturb the population it measures.
+
+WHAT A GREEN RUN ACTUALLY DOES. Rust suite 2211 passed: 209 `CREATE SCHEMA`
+executions, 88 distinct schemas. Host suite 95 passed: 97 executions, 34 distinct.
+Total 306 executions, 122 distinct schemas, and ZERO survivors. User-schema count 14
+before and 14 after with byte-identical name lists.
+
+THE FINDING THAT CHANGES THE FIX. Most schema creation is not in the tests at all.
+`crates/zero-migrate/src/apply/journal.rs:446` issues
+`CREATE SCHEMA IF NOT EXISTS {meta}` on every apply - verified by me - which accounts
+for 159 of the Rust run's 209 executions and every `*_migrations` meta schema. A guard
+scoped to `CREATE SCHEMA` in TEST SOURCE would miss every meta schema, and those leak
+paired with their project schema. My enumeration source was test files; the property
+belongs to the engine as much as to the tests.
+
+THE PREMISE HOLDS, and now mechanically rather than by assumption. A temporary panic
+after schema creation in `uuid_generation.rs` left
+`uuid_v4_2152600_1786103915846099765_0` in `pg_namespace`, user-schema count 14 to 15.
+The mechanism: `grep -rn "impl Drop" crates/zero-migrate/tests/` returns ZERO, verified
+by me. Cleanup is a plain statement at the end of each test body, and a panic unwinds
+past it. Probe restored byte-for-byte, sha256 identical, `git diff` empty.
+
+MY COUNT WAS WRONG IN BOTH DIRECTIONS. Of the 19 occurrences, FOUR create nothing -
+`guard_security.rs` is a pure in-process guard suite with zero live-DB markers,
+confirmed by grep and by the DDL log containing none of its schema names. And there
+are FIVE helpers, not the two I found: the largest is
+`crates/zero-migrate/tests/pg_scenarios.rs:73 ensure_project_schema` with 28 callers,
+more than my two known helpers combined. So 19 occurrences are 15 executing sites are
+50 executions.
+
+The cross-check is what makes those numbers trustworthy: static analysis predicted 19
+plain non-`IF NOT EXISTS` executions for the Rust run and the DDL log observed 19;
+predicted 17 for the host run and observed 17. Two independent methods agreeing
+exactly.
+
+The host suite is genuinely uncovered - all TWELVE occurrences execute, none is an
+assertion on SQL text, so my upper bound was the actual count. It stays clean today
+only because every host site already has `try`/`finally`. The Rust side is where that
+equivalent is missing.
+
+URGENCY, honestly. Both suites are green and leak zero. The panic path fires only when
+a test is already broken, so this is hygiene for the debugging loop rather than a
+correctness or CI bug. Its real cost is visible in the BEFORE snapshot: THIRTEEN stale
+schemas from earlier failed runs - `proj_*` and `meta_*` names pointing at
+`pg_scenarios.rs`, `pg_declarative.rs`, and `truncated_identifier_pg.rs` - slowly
+dirtying a shared dev database. That is standing evidence the leak is real, just not
+observable on a passing run.
+
+NOT MEASURED, and the gaps are named rather than hidden: what a NATURALLY failing test
+leaks, as opposed to one synthetic panic; MySQL; and the `zero-migrate-guard` and
+`zero-migrate-node` crates' own occurrences, which were outside the questions asked.
