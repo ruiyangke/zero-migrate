@@ -3801,3 +3801,54 @@ existence guards entirely, so across the four cells the probe ONLY EVER EXECUTES
 CELL WHERE IT IS WRONG, and in the two cells the guard exists for the plan is refused
 before the probe runs. Not partition-specific - `dropTable ifExists` on a table no
 migration created is refused with `fold: table 'widget' does not exist`.
+
+### F61 - correcting F57: the control that refuted #79 was run on the wrong half of the space
+
+F57 recorded that #79's premise was refuted. The premise was that a guarded op on MySQL
+reaches bare DDL and errors at the server; the refutation was that the Node host's
+pending-schema projection refuses first, and - the sentence I put most weight on - that
+POSTGRESQL PRODUCES THE IDENTICAL REFUSAL, so "the positive control was not green".
+
+THE PREMISE WAS TRUE. The control was run in the one configuration where the difference is
+invisible.
+
+VERIFIED BY ME by reading, after an agent measured it against both live servers:
+`crates/zero-migrate-node/src/verbs.rs:263` branches on `prior_envelope_json.is_empty()`.
+With EMPTY priors, apply takes `lower_envelope_to_plan_with_live` and NEVER FOLDS. With
+non-empty priors it takes the folding path. And `packages/zero-migrate-cli/src/cli.ts:945`
+passes `migrations.slice(0, index)`, so:
+
+    MIGRATION #0        empty priors   -> probe path, guard evaluated
+    MIGRATIONS 1..N     prior slice    -> fold path, projection pre-empts the guard
+
+Measured by the agent across both dialects:
+
+    priors NON-EMPTY   PG and MySQL identical - both refused by the projection
+    priors EMPTY       PG honours the guard (OK); MySQL emits bare DDL and takes a
+                       server error (1051 / 1050)
+
+So F57's control was green in the sense that PG and MySQL agreed - AND THEY AGREE ONLY
+BECAUSE THE FOLD MASKS BOTH. Run the same comparison at migration #0 and they diverge
+completely, which is the case #79 was actually about.
+
+WHY THIS MATTERS BEYOND THE BOOKKEEPING: the realistic use of `createTable ifNotExists` as
+migration #0 is ADOPTING AN EXISTING DATABASE. That is the flagship case for the whole
+guard feature, it is the one an operator reaches for first, and it is the one cell where
+MySQL fails at the server. #79's verdict (c) - document it, do not implement - was decided
+against a premise that had been marked refuted. The verdict may still be right; it was
+reached on a false floor and has to be re-derived.
+
+THE SHAPE OF MY ERROR, and it is not "I trusted an agent". Both #79 opinions were honest
+and both measured what they said. I took a control that PASSED and read it as covering the
+question, when it covered one configuration of a two-configuration space and nobody had
+named the second. A CONTROL PROVES THE COMPARISON IT MAKES, NOT THE QUESTION YOU ASKED IT.
+The way to have caught it was to ask what varies that the control holds fixed - here, the
+prior chain, which is not a parameter anyone had thought of as one.
+
+Also corrected: the four-cell table filed under #92 has one cell now false. "Drop ifExists,
+child live-PRESENT, fold passes, probe SatisfiedNoop, silent skip" was the PRE-7c8404a bug
+and is fixed - the probe now returns RunBare and the DDL runs. The true statement is the
+DUAL of what I filed: the probe executes in the two cells where its verdict changes nothing,
+and the two cells where the guard exists to produce a no-op are pre-empted by the
+projection. Same conclusion, different mechanism, and the mechanism decides the fix -
+"let SatisfiedNoop through the projection" rather than "teach the fold to ignore drops".
