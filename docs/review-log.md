@@ -3981,3 +3981,55 @@ which is the only reason I trust it enough to file; reachability is unmeasured a
 first thing to settle. #96: `pnpm-workspace.yaml:16` commits `esbuild: set this to true or
 false` as the build permission, and pnpm 10.34.5 accepts the instruction text without a
 word and writes it verbatim into `node_modules/.modules.yaml`.
+
+## F64 - A security decision was committed as an instruction to write one (#96)
+
+`pnpm-workspace.yaml:17` read `esbuild: set this to true or false`. `allowBuilds` decides
+whether a dependency's install scripts execute - pnpm stopped running them by default in
+v10 because they are arbitrary code from the dependency tree - so that slot holds a
+decision, and what was committed was the reminder to make it.
+
+pnpm 10.34.5 accepted the instruction text without a word and wrote it VERBATIM into
+`node_modules/.modules.yaml`:
+
+    "allowBuilds": { "esbuild": "set this to true or false" }
+
+THE CAUSE I REACHED FOR WAS THE WRONG ONE, and isolating it is the only reason I know that.
+`pnpm install --frozen-lockfile` was exiting 1 in the devShell with
+`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY`, and a config value pnpm had just recorded is
+an obvious suspect. It is not the cause. Restoring the placeholder over a consistent
+`node_modules` and installing again exits 0:
+
+    placeholder restored, install  -> exit 0, "Already up to date"
+    fix restored,        install  -> exit 0, "Already up to date"
+
+The exit 1 was a one-time stale-modules purge that the reinstall cleared, and it would not
+have reached CI regardless (GitHub Actions sets `CI=true`, which suppresses the prompt). Had
+I written this up when the correlation looked clean, the entry would have named a cause that
+a two-command experiment refutes.
+
+SO THE DEFECT IS NARROWER THAN IT LOOKED, and still worth fixing: esbuild's build was not
+blocked (`@esbuild/linux-x64@0.28.1`'s binary is present and `transformSync("const a=1")`
+returns `const a = 1;`), nothing failed, and nothing warned. The value is simply undefined
+behaviour standing where a boolean belongs - pnpm documents `true`/`false` and says nothing
+about a string, so whether the build runs is decided by a coercion nobody chose. I did NOT
+measure what pnpm does with a non-boolean; I measured that it does not complain.
+
+Set to `true`, matching the intent the adjacent `onlyBuiltDependencies: [esbuild]` already
+expressed, and dropped that legacy key: pnpm superseded it in 10.26 and removes it in 11.0,
+so keeping both would leave the same permission recorded twice and read from once.
+
+THE GATE IS THE POINT. `packages/zero-migrate/tests/workspace-build-permissions.test.ts`
+asserts every `allowBuilds` value is a real boolean. It checks the SHAPE, not the answer -
+`esbuild: false` is a legitimate decision it must accept. Three states measured, not two:
+
+    committed placeholder   FAIL, naming `pnpm-workspace.yaml:17 esbuild: set this to ...`
+    esbuild: true           PASS
+    esbuild: "true"         FAIL  (planted: a string that READS as an answer)
+
+The third is the control that matters. A gate written as "is the value non-empty" would pass
+all three, and the quoted spelling is the one a person fixing this by hand would plausibly
+write. The block-presence assertion is separate from the entry check for the F49 reason: a
+renamed key and an empty block must not report the same green.
+
+Package suite 223 tests / 222 pass / 0 fail / 1 skip - the one moved count is the new test.
