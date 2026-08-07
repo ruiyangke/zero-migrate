@@ -1391,3 +1391,47 @@ one the Rust harness already settled on: an unset variable stays a skip, because
 breaking contributors without a database is not acceptable, but a DSN that is
 present and does not work is a failure, and `ZERO_MIGRATE_REQUIRE_LIVE_DB` turns
 the skip into a failure where a database is guaranteed.
+
+### D9
+
+A skip and a pass print the same exit code, so a gated suite has to make the
+difference visible somewhere else. The rule adopted for the Postgres host suites,
+mirroring what the Rust harness already does: an unset DSN skips, a configured DSN
+that does not connect fails.
+
+The asymmetry is the whole point. "This machine has no database" is a contributor
+without Docker running, and failing them would be hostile. "A database was
+configured and it did not work" is a wrong password, a missing database, or a
+driver regression, and reporting that as a skip is how a real defect reaches main
+looking green. The old bare `catch` could not tell the two apart because it never
+asked which one it was in.
+
+`ZERO_MIGRATE_REQUIRE_LIVE_DB` turns the remaining skip into a failure, and it
+demands an EXPLICIT DSN rather than accepting a reachable default. That looked
+over-strict until the reason was written down: the flag exists so a run can prove
+it was configured for live coverage, and a default that happens to answer on one
+machine proves only that the machine had a database. Accepting it would make the
+flag mean "somebody nearby is running Postgres", which is exactly the ambient luck
+the flag is there to rule out.
+
+The gate lives in its own module rather than in `tests/host/policy.ts`. Policy owns
+charter fixtures; a database gate filed there would be findable only by accident.
+
+### F23
+
+Rebuilding the addon turned `pnpm --filter zero-migrate-cli test:host` red, and the
+engine is right to do it. `tests/host/mig/20260711000001_create_widgets.ts:9`
+declares `status: t.text().notNull().default("new")`, and MySQL refuses a literal
+DEFAULT on TEXT, BLOB, JSON and GEOMETRY. The refusal is the validation added for
+the MySQL storage shapes; the fixture predates it and was always invalid for MySQL.
+
+What makes this worth recording is why it was invisible. The refusal compiles into
+the same artifact as the renderer, so while the checked-in `.node` was stale the
+validation simply was not present, and the fixture passed. The defect and the proof
+of the defect shipped in the same binary, and only rebuilding surfaced either. That
+is the third finding in this family, after the stale addon itself and the drifted
+`index.d.ts`: a generated artifact committed to the tree does not merely go stale,
+it suppresses the gates that would have reported it stale.
+
+The fixture is shared by four suites, so bounding the column changes PostgreSQL
+rendering too. Left open rather than fixed in passing.
