@@ -3911,3 +3911,73 @@ any `t.string()` column fails closed - was found by the Opus agent in passing an
 live by me with a `text` control that adopts cleanly. That defect says the guard rejects the
 principal case it exists for on the one dialect that evaluates it, which plausibly outranks
 deciding where else to evaluate it.
+
+## F63 - The guard's principal case was broken by a catalog column nobody recomposed (#94)
+
+`information_schema.columns` splits a length-qualified type in two: `data_type` holds the
+bare base name and `character_maximum_length` holds the modifier. The desired side spells
+the length INLINE - `character varying(255)` for `t.string()`, which defaults to
+`length: 255` (`packages/zero-migrate/src/ops.ts:1101`). `snapshot_schema` recomposed
+`character(N)` and nothing else, so the two sides could never compare equal and every
+bounded varchar column false-drifted.
+
+WHAT THAT COST. `t.string()` IS the default string type, and the existence guard's whole
+purpose is adopting a table that already exists. So the guard refused the principal case it
+was built for, on PostgreSQL, which is one of only two dialects that evaluate it at all
+(`existence_probe::decide` has three call sites, none MySQL - see #79). The same
+`ColumnSnapshot.data_type` feeds `diff_snapshots`, so `plan_declarative` would also plan a
+spurious `ALTER COLUMN TYPE` on a table that is already correct.
+
+THE FIX IS KEYED ON THE CATALOG DATUM, NOT ON A NAME. `crates/zero-migrate/src/apply/drift.rs:919`
+now recomposes whenever `character_maximum_length` is non-null and positive, rather than
+matching another type name. Measured against the live PostgreSQL 18 at 5434:
+
+    character varying(255) -> cml 255      character(10)   -> cml 10
+    bit(8)                 -> cml 8        bit varying(16) -> cml 16
+    varchar (unbounded)    -> cml NULL     numeric(10,2)   -> cml NULL, numeric_precision 10
+    timestamp(3)           -> cml NULL, datetime_precision 3
+    varchar(3)[]           -> data_type ARRAY, cml NULL
+
+Exactly four base types populate it and nothing else does, so the datum IS the predicate. A
+per-name arm would have left the same trap open for the next type - which is how the
+`character`-only arm came to exist in the first place.
+
+WHAT IT DELIBERATELY DOES NOT COVER, and why that is not an omission: `numeric` precision
+and time/interval precision arrive through OTHER catalog columns and stay bare on BOTH
+sides on purpose - the desired side routes decimal precision to `ddl_type_override` and
+keeps `numeric` as the comparison key, so recomposing those here would CREATE the drift
+this removes. Arrays and domains never reach the arm; the earlier `type_kind`/`USER-DEFINED`/
+`ARRAY` arms claim them, and PostgreSQL reports a NULL length for an array of a bounded type
+anyway.
+
+THE THIRD ARM IS THE ONE THAT MATTERS. Two arms would have been satisfied by a "fix" that
+stopped comparing `data_type` at all, so the test also declares `t.string({ length: 100 })`
+against a live `varchar(255)` and requires the refusal to NAME BOTH WIDTHS. That arm passed
+BEFORE the fix for the wrong reason - it refused because the length was missing, not because
+the widths differ - which is the same false-green shape as F49 and #83. Reproduced by me
+with an env-gated mutation, RED and GREEN from the SAME compiled addon:
+
+    mutation ON   arm 1 FAIL  arm 2 (text control) PASS  arm 3 FAIL
+    mutation OFF  arm 1 PASS  arm 2 PASS                 arm 3 PASS
+
+and the RED messages read from the server:
+
+    declared character varying(255) but the live database has character varying
+    declared character varying(100) but the live database has character varying
+
+Arm 3's RED says `character varying` where the fix makes it say `character varying(255)`.
+That difference is the whole finding: before, the refusal was about an absent length; after,
+it is about the widths.
+
+Gates, both DB URLs exported: fmt 0, clippy 0, workspace 74 targets / 2227 passed / 0
+failed, package 222/221/0/1, host 107/107/0/0 - the only moved count is host 104 -> 107,
+exactly the three arms.
+
+TWO THINGS FOUND WHILE VERIFYING, both filed rather than fixed here. #95: `render/fold.rs:1570`
+dispatches a column's ID default on `data_type` and lists `== "character varying"`,
+`starts_with("varchar")` and `starts_with("char(")` but NOT `starts_with("character varying(")`
+- which is exactly what the desired side spells. Found independently by me and by the agent,
+which is the only reason I trust it enough to file; reachability is unmeasured and is the
+first thing to settle. #96: `pnpm-workspace.yaml:16` commits `esbuild: set this to true or
+false` as the build permission, and pnpm 10.34.5 accepts the instruction text without a
+word and writes it verbatim into `node_modules/.modules.yaml`.
