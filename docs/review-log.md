@@ -2794,3 +2794,58 @@ BEING RECONSIDERED.
 Ignore behaviour is unchanged, confirmed rather than assumed: `git check-ignore`
 still exits 1 for `embedded-recorder.js` (not ignored) and 0 for other `dist/`
 output, and the file is still tracked.
+
+### F44 - the second opinion killed a change the first opinion and I both endorsed
+
+`#38` is NOT being implemented as filed, and the reason is the whole value of the
+two-opinion rule. The Opus opinion and my own reading CONVERGED on one change: add a
+dialect capability and, at the three `DuplicateIndex` sites in `render/fold.rs`, scan
+`tables.values()` instead of only `snap.indexes`. Codex was asked the narrow design
+question and refused that shape on four grounds. I verified each one myself.
+
+THE CONVERGENT ANSWER WOULD HAVE MADE ONE CASE WORSE, NOT BETTER. During
+`Op::CreateTable` the pending snapshot is a local: `build_resolved_table_snapshot` at
+`fold.rs:1015` builds `snap`, the inline indexes are folded into it, and only then
+does `fold.rs:1047` run `tables.insert(name.clone(), snap)`. VERIFIED by reading the
+span. So at the moment the inline-index check runs, the table being created IS NOT IN
+THE MAP. Replacing the local scan with a map scan would have ACCEPTED two identically
+named inline indexes on one new table - a case the current per-table check catches
+today. THE FIX HAD TO BE ADDITIVE, AND BOTH OF US WROTE IT AS A REPLACEMENT.
+
+IT WOULD ALSO HAVE REJECTED VALID INPUT. `TableSnapshot` at `model/snapshot.rs:696`
+carries columns, indexes, constraints, runtime options, partition spec, comment and
+stored SQL - and NO owning schema. VERIFIED. Ops do carry one: `fold.rs:1011` reads
+`schema.as_deref().unwrap_or(project_schema)`. PostgreSQL scopes index names PER
+SCHEMA, so an unqualified `tables.values()` scan would refuse `s1.a/shared_idx`
+alongside `s2.b/shared_idx`, which PostgreSQL accepts. Worth stating precisely: the
+map is ALREADY schema-blind, since `tables.insert` keys on the bare name, so the
+blindness is not new - but the REJECTION would be, because today the per-table scope
+never asks the cross-table question at all.
+
+THE BREAKING-CHANGE ANSWER IS PATH-DEPENDENT, WHICH IS WHY ASKING IT MATTERED.
+Ordinary PostgreSQL apply is safe: `zero-migrate-node/src/lower.rs:397` calls
+`ops_without_completed_journal_evidence` (defined at `:812`) and folds only pending
+ops, so a completed historical index is not re-judged. Artifact generation is NOT
+safe: it replays every envelope, and `render/gen_types.rs:356` calls
+`fold_to_field_defs(ops, SqlDialect::Postgres, ...)` with the dialect HARD-CODED.
+VERIFIED by reading the call. So `genArtifacts` would newly fail on already-applied
+history.
+
+AND A LEGACY HISTORY THAT HITS IT DEMONSTRABLY EXISTS. `render/declarative.rs:8113`
+emits `CREATE {unique}INDEX IF NOT EXISTS`. VERIFIED. A second, colliding create is
+therefore SKIPPED BY PostgreSQL and the migration journals as successful - so a
+project can be carrying a silently-missing index right now, with a green journal. The
+widened check would reject that history. It is a real defect being exposed, but it
+arrives as a build that used to pass and now does not.
+
+THE CONCRETE WORSENING, which is the question I added precisely because the first two
+opinions agreed: a VALID MySQL history with `idx_shared` on two tables would fail
+`genArtifacts`, because that dialect-neutral entry point hard-codes Postgres. The
+capability cannot be honoured there until the real target dialect is threaded in.
+That is now a prerequisite task, not a detail.
+
+WHAT I TAKE FROM THIS. Two independent analyses agreeing is not corroboration when
+both are reading the same three call sites; it is the same view held twice. The
+objection that mattered came from asking a question whose answer could only be NO -
+"name a case where this makes things worse" - and from asking about a path neither of
+us had opened. CONVERGENCE IS WHEN A SECOND OPINION IS MOST WORTH BUYING, NOT LEAST.
