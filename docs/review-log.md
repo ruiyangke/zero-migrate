@@ -4127,3 +4127,49 @@ NOTHING IS IMPLEMENTED. #79 is rewritten to carry the corrected mechanism and th
 sequencing, and the old framing is struck from it, because a ticket that reads as a silent
 data-loss hole when the behaviour is a loud declared limitation will misdirect whoever picks
 it up next - which is the specific way it misdirected me.
+
+## F66 - "Phase" is two different words, and only one of them ages (#71, #97)
+
+#71 asked whether the comment rule ("no phase/milestone/stage references") covers deferral
+vocabulary that carries no number. Settled by reading all seventeen surviving sites rather
+than by ruling in the abstract, because the answer turned out to depend on which word is
+actually being used.
+
+THE RULE, with its own test cases:
+
+  A CAPABILITY STATEMENT SAYS WHAT THE ENGINE CANNOT DO. Keep it. The reader needs it, and
+  it stays true until someone changes the code, at which point they change the sentence.
+      "supersession journaling is not supported on SQLite"
+      "the rebuild is not built"
+
+  A SCHEDULE CLAIM SAYS WHEN SOMEONE WILL FIX IT. Delete it. It is unkeepable by the file
+  it lives in, and it is wrong the moment it ships.
+      "in v1"   "deferred to a later phase"   "a later cut adds it"   "when it lands"
+
+  "NOT YET" IS THE SCHEDULE CLAIM WEARING THE CAPABILITY STATEMENT'S CLOTHES. "yet" is a
+  promise; drop the word and the sentence says the same thing about the code and stops
+  making one. Six sites about the SQLite 12-step rebuild now read "is not built".
+
+  AND "PHASE" IS SOMETIMES NOT A SCHEDULE AT ALL. Three sites use it for a stage of a
+  PIPELINE, and deleting the word would cost real meaning:
+      sqlite/authorizer.rs:388, :895   "the 12-step rebuild's engine ALTERs, later phase"
+      render/fold.rs:8                 "later phases (`gen-types`) emit the `env.db`"
+  A blanket sweep would have taken these, which is the reason #71 existed and the reason it
+  is answered by reading sites rather than by choosing a vocabulary.
+
+THE MEASUREMENT THAT PRODUCED THIS. #97 shipped the user-facing strings; the sweep then
+found four release claims in comments (`zero-migrate-node/src/lib.rs:17`,
+`plan/author.rs:6`, `zero-migrate-ir/src/ir.rs:648`, `zero-migrate-ir/src/validate.rs:978`),
+six "not yet built", and the three pipeline uses. Seventeen sites, three verdicts.
+
+A NOTE ON MY OWN INSTRUMENT, since it failed the way #83 and F49 keep failing. My original
+#97 list was built with
+
+    grep -rnE '"[^"]*(in v1|not yet implemented|a later cut|for now)[^"]*"' --include='*.rs' crates/*/src
+
+which requires the literal to sit on ONE LINE. It missed `declarative.rs:4395`,
+`mysql/mod.rs:847` and two others solely because those are multi-line literals, and it
+missed `sqlite/mod.rs:730` because "later-phase capability" was outside the alternation. I
+did not notice; the agent working the ticket found them by reading around each hit. A grep
+that returns five results feels like a complete answer in a way a grep that returns zero
+does not, and it is exactly as incomplete.
