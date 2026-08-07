@@ -187,6 +187,10 @@ jobs:
     env:
       ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
       ZERO_MIGRATE_MYSQL_URL: mysql://root:zero_migrate@127.0.0.1:3306/zero_migrate_test
+      # This job exists to drive the suites against live databases. The DSN above
+      # already turns a failed connect into a failed job; this catches the other way
+      # in, where the DSN line is deleted and every gated suite quietly skips.
+      ZERO_MIGRATE_REQUIRE_LIVE_DB: "1"
 
     steps:
       - uses: actions/checkout@v4
