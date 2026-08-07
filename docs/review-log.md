@@ -740,8 +740,18 @@ can admit the statement. The engine hands the guard the same `EffectivePolicy` i
 hands the shape resolver (`engine.rs:479` and `:486`, `node/lower.rs:209` and
 `:225`), and `plan_declarative` at `engine.rs:747` overwrites the caller's guard
 policy outright. So under any charter that injects over the project schema, no
-table can be created by any path, and there is no seam where a caller could pass
-a second, inject-free charter instead.
+table can be created, and there is no seam where a caller could pass a second,
+inject-free charter instead.
+
+Scope, stated precisely, because it is narrower than "no path anywhere". The gate
+lives in the pg_query walker, so it binds the enforced PostgreSQL path only:
+`GuardMode::Off` skips the walk, and SQLite and MySQL route to the descriptor
+guard, which has no such gate. Within that path the gate runs after the
+statement-kind and cross-schema checks and specifically before the create-table
+grant. `confined_charter()` is also a test fixture rather than a shipped
+constructor. None of that makes the feature work - `[[inject]]` is documented,
+and on the normal PostgreSQL paths it cannot create a table - but the blast
+radius is the enforced PostgreSQL guard, not every dialect.
 
 The rule shipped in `de1d652` and was never wired: that commit touched the guard,
 the policy crate, and two guard tests, and no engine call site. Across the whole
@@ -791,17 +801,30 @@ lowering path would not reach the guard that runs against the live database, and
 would turn the marker into a persisted capability stored in the very artifact the
 guard exists to distrust.
 
-What this gives up: names are checked, types are not. A raw author can write
-`deleted_at text` where the charter says `timestamptz` and pass. Types cannot be
-compared at text level without re-deriving the whole dialect type-rendering table
-inside the security layer, where it would drift from the renderer. This is not a
-new weakness - name-matching is already the granularity of every inject rule the
-guard enforces (`check_alter_table_injected` and `check_rename` compare names
-only, and the pinned-PK check is coarser still, denying any `DROP CONSTRAINT` on a
-table with a pinned key without looking at which one). Real type conformance
-already exists a layer up in `system_columns_match`, which every path that lowers
-an `Op::CreateTable` runs. The text-level check is a belt over that invariant, and
-it was set to deny-always.
+What this gives up, stated without softening it. Names are checked; types,
+nullability, defaults, and injected indexes are not. An author holding
+`schema.create_table` can write `created_at integer`, `version text NULL`, or a
+pinned `id` of the wrong type, and can omit the injected indexes entirely, and the
+create is admitted. Worse, the name-only immutability rules will then defend that
+malformed column as though the operator had placed it. Types cannot be compared at
+text level without re-deriving the whole dialect type-rendering table inside the
+security layer, where it would drift from the renderer.
+
+Both reviews agreed this is simultaneously two things, and it is worth holding
+both. It IS a real regression against the categorical denial we have today. It is
+ALSO exactly the granularity the guard's other inject rules already use:
+`check_alter_table_injected` and `check_rename` identify a protected column by
+name alone, and the pinned-PK rule is coarser still, denying any `DROP CONSTRAINT`
+on a table with a pinned key without asking which constraint. So the create gate
+stops being uniquely absolute and starts matching the gates that follow it.
+
+One claim I made earlier does not hold and should not be repeated: the IR-level
+`resolved_create_table_matches_inject` is NOT the same predicate. It checks full
+column shape, exact primary key, and injected indexes, and `system_columns_match`
+compares type, nullability, and default. The text-level check is strictly weaker.
+It is a belt over that invariant, not a copy of it, and the honest statement of
+what it buys is "the create does not omit an injected column slot and does not
+contradict a pinned primary key".
 
 Stripping injects from the guard's policy was rejected: the same `injects_for`
 feeds the shape- and primary-key-immutability rules, so a strip would also let a
