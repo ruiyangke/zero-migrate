@@ -4892,3 +4892,52 @@ test now has a verified before-picture rather than an assumed one.
 STILL NOT ESTABLISHED, and narrower than F76 left it: general equivalence of the two
 constructions. One document pair, one draft shape, one pin. The `finalize_charter` lints are
 the obvious place they could diverge and nobody has looked.
+
+## F80 - A green suite across a branch nobody crosses, and two checks that catch it
+
+F78 recorded that the ownership refusal I shipped contradicts an adoption contract I shipped
+the same day, and that they never collide because one takes the empty-priors branch and the
+other the priors branch. zeroship named the class and supplied a detector, plus a second
+check that applies to something I do constantly.
+
+THE CLASS. Every instrument failure catalogued so far - F66, F76, F79 - is about a SEARCH
+that cannot see. This one is about a TEST SUITE that cannot see, and it is worse, because a
+green suite is what everyone treats as the answer. Their instance: a test named for a process
+restart drops an outbox and reopens it, hand-passing the same path to both opens, while
+production derives that path from a per-boot UUID and never reopens the same file. The test
+asserted a property the system does not have, passed, and its passing is why the gap
+survived.
+
+THE DETECTOR, and it is the only one either of us has for this:
+
+    Of a GREEN test, ask: what would production have to do for this assertion to be
+    reachable? If the answer is "something it never does", the assertion is decorative.
+
+Mine fails that question in the same way: the two contracts are both green and no product
+invocation crosses from one branch to the other, so neither test can ever observe the
+other's condition.
+
+THE SECOND CHECK, which applies to how I write comments. They claimed in a doc comment that
+a test "fails if someone bounds the count with a constant", then ran the mutations instead of
+trusting the sentence. `n.min(65535)` - the capacity-capping form - left the test GREEN,
+because the vector still grows past its reservation. Only the REJECTING form,
+`if n > 65535 { return Err(..) }`, turned it red. The claim was true of one mutation in the
+class and false of another, and the comment stated the general form.
+
+    A COMMENT CLAIMING WHAT A TEST CATCHES MUST NAME THE MUTATIONS ACTUALLY RUN,
+    NOT THE CLASS IT HOPES TO COVER.
+
+I have been writing exactly that kind of general claim all day - "the control does not move
+with the mutation", "this arm is what makes it a real RED" - each verified against ONE
+mutation. Those claims are true as far as they were tested and stated more broadly than they
+were tested.
+
+AND THE SCOPE FAILURE SURVIVES BEING WRITTEN DOWN. They adopted F79's amendment and hit the
+same failure an hour later: reviewing 27 clippy-flagged numeric casts, all 27 accounted for,
+a clean negative - while the actual defect had NO lint, because `u32 as usize` is widening on
+64-bit and clippy does not fire. A 6-byte frame requesting ~16 GiB. Their search universe was
+"the sites the tool flagged", which is the most seductive scope of all, because it arrives
+pre-justified.
+
+That is the second time today the lesson has been that adopting a rule does not prevent the
+failure the rule describes. Recording it is not the same as being protected by it.
