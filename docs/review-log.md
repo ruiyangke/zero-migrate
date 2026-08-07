@@ -1772,3 +1772,41 @@ A milder version survives at `driver-pg.test.ts:362-372`, unchanged: its comment
 credits the oid-20 pin, but the query selects `event_seq::text`, so PostgreSQL
 formats server-side and the pin is bypassed on that read. The surrounding test is
 sound; only that line's stated justification is wrong.
+
+### F29
+
+The sibling of F28 turned out to be the smallest of three problems, and chasing it
+found something larger about the arm that contained it.
+
+The `event_seq::text` cast was really there, and removing it would have fixed
+nothing. The read goes through the gate's client, built with no type-parser
+overrides, so the oid-20 pin is not in that path with or without the cast. Worse,
+under this file's poison - which leaks the raw wire text - a borrowed oid-20 parser
+and the pin return the identical string, because the raw wire text of an int8 is
+exactly the digits the pin's verbatim parser hands back. Measured, both give
+`"9007199254740993"` as a JS string. No assertion on the value can distinguish them
+here at all.
+
+So the agent could not make the assertion sensitive and said so rather than
+shipping a fix that would have carried a fresh claim of having been checked. That is
+the right outcome and worth recording as one, because the tempting move was to drop
+the cast, watch the suite stay green, and call it repaired.
+
+The larger finding came from testing the enclosing arm rather than the line. Its
+header claimed that nothing the apply path reads depends on a parser a host
+application can rewrite. Removing every pin from `connectionScopedTypes` and running
+the file fails six of eight arms and leaves this one green. The poison is genuinely
+live - the arms that read a bool or a `name[]` fail - and this arm simply never
+reads a value a raw-text leak corrupts. The claim was unsupported. It is a smoke arm
+and now says so.
+
+Two more of the shape were found and left for their own judgement. A test named for
+MySQL session pinning asserts only that an exported constant contains two mode
+flags, so deleting the line that issues it to a session leaves the test green; that
+is worse than F28, since F28 was true of every value while this is true whether the
+guard exists at all. And a UUIDv4 test checks 128 values for format and never for
+distinctness, so a generator returning one constant passes.
+
+The pattern across all four: the test asserts a property of a STRING while its name
+or comment claims a property of a MECHANISM. Format is the easy half and it reads
+like the whole thing.
