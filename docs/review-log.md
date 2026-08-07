@@ -1876,3 +1876,30 @@ One hazard recorded for future stub cycles through the Rust addon: restoring a
 stubbed source with `cp -p` preserves the original mtime, so cargo sees the file
 as unchanged, skips the rebuild, and the confirming green run still executes the
 stub binary. Force a recompile with `touch` before trusting the restore.
+
+### F31 sibling - the SQLite UUIDv4 test has the same gap
+
+`crates/zero-migrate/src/render/dml.rs:3491`
+`sqlite_uuid_v4_samples_have_canonical_rfc_bits` evaluates the rendered
+expression 128 times and checks length, the four separator positions, the
+version nibble, the variant nibble, hex-digit membership, and lowercase spelling
+- every one of them in place, against a value it then drops. It never collected
+the values, so there was nothing to compare and a constant satisfied all 128
+iterations. This is a separate implementation from the MySQL one
+(`crates/zero-migrate/src/render/renderer.rs:411` versus `:534`), so it needed
+its own fix rather than inheriting F31's.
+
+Proven without stubbing any source, by shadowing the rendered expression with a
+constant well-formed v4 inside the test itself. The run panicked at the new
+assertion and nowhere else:
+
+    panicked at crates/zero-migrate/src/render/dml.rs:3532:9:
+    assertion `left == right` failed: 128 evaluations of the rendered UUIDv4
+    expression must all differ
+      left: 1
+     right: 128
+
+Feeding the assertion body a known constant is preferable to breaking the
+mechanism when other work is in flight: it proves the same thing with no build
+artifact left behind and no window in which a downstream consumer could load a
+deliberately broken tree.
