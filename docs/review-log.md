@@ -3372,3 +3372,55 @@ FROM ONE THAT ACCOUNTS FOR EVERY FACT.
 For multi-line content the practical instrument is a whole-file slurp with a
 dot-matches-newline pattern - `perl -0ne` - rather than a pipeline of line filters. Use
 it, and keep the positive control either way.
+
+### F54 - the obvious spelling of the NUL gate is not broken, it is INVERTED
+
+Preparing #83's gate, I measured three candidate detectors against a PLANTED NUL before
+writing any of them into the tree. The obvious one is the one that would have shipped:
+
+    for f in ...; do LC_ALL=C grep -qU $'\0' "$f" && echo "NUL: $f"; done
+
+Run over one clean file and one file with a NUL in the middle, it reports:
+
+    A says NUL:   clean.txt      <- WRONG
+    A says clean: dirty.txt      <- WRONG
+
+BOTH ANSWERS ARE BACKWARDS. Two independent faults compose into an exact inversion:
+
+  1. The shell cannot put a NUL in an argument, so `$'\0'` reaches grep as the EMPTY
+     pattern, and the empty pattern matches every file. Every clean file is reported
+     as an offender.
+  2. F49: this `grep` is ugrep, which silently declines to read a file containing a
+     NUL and exits 1. The ONE file that actually has the byte is the one reported
+     clean.
+
+Neither fault announces itself. There is no error, no warning, and no exit code that
+differs from a normal run.
+
+WHAT THIS WOULD HAVE COST is worse than a gate that does nothing. A gate that matches
+nothing looks like a clean tree; this one looks like a tree where every file is dirty
+EXCEPT the dirty ones. The first response to 406 flagged files is an ignore list, and
+the ignore list is written against the clean files, because those are the ones being
+flagged. The gate ends up green, permanently, on exactly the corpus it was built to
+catch - and the ignore list is the artifact that makes the green look earned.
+
+TWO DETECTORS SURVIVE THE PLANTED NUL, both verified on the same pair:
+
+    tr -d '\0' < "$f" | cmp -s - "$f"                       # unchanged => no NUL
+    perl -0777 -ne 'print "$ARGV\n" if /\0/' -- "$f"        # prints offenders only
+
+Both avoid grep entirely for the NUL itself, which is the point: the instrument that
+cannot read the byte cannot be the instrument that looks for it.
+
+MEASURED SCOPE, with the working detector, at this commit: 406 tracked files, ZERO
+carrying a NUL - so the gate installs at zero and the planted NUL is the only thing
+that can prove it works. The naive filesystem walk remains the wrong scope for a
+separate reason already recorded (it reaches the gitignored compiled addon).
+
+THE GENERAL SHAPE, and it is the same one F49 and F53 keep circling from different
+sides: I HAD BEEN TREATING "THE CHECK RETURNS SOMETHING PLAUSIBLE" AS EVIDENCE THE
+CHECK RUNS. Here the check returned 406 hits and 0 misses, which is a perfectly
+plausible-looking pair of numbers for a corpus with a real problem, and every single
+one of them was wrong. The only thing that separated it from a correct detector was
+planting a byte I already knew the answer for. A GATE'S FIRST TEST IS NOT THE TREE IT
+GUARDS - IT IS AN INPUT WHOSE ANSWER YOU FIXED IN ADVANCE.
