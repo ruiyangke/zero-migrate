@@ -3493,3 +3493,67 @@ survives there (#85 - and I have NOT confirmed that premise myself, which is the
 subject of this entry). And the MySQL arm of `Capability::SchemaWideIndexNames` still
 cannot be pinned end to end, because `existence_probe::decide` has exactly three call
 sites and none is MySQL (#79, verified here with a positive control).
+
+### F56 - I fixed four instances of a bug and left the bug, and did not notice for an hour
+
+Auditing comment citations for #84, my first pass reported 30 dead paths. Four were
+`scripts/gen-ir-types.mjs` and `scripts/gen-dialect-table.mjs`, cited from
+`packages/zero-migrate/package.json` and two test files in that package. Measured, both
+spellings side by side against a file that plainly exists:
+
+    packages/zero-migrate/scripts/gen-dialect-table.mjs      exists, 10073 bytes
+
+    root-only resolution of "scripts/gen-dialect-table.mjs"  -> FLAGGED (false positive)
+    ancestor walk from packages/zero-migrate/package.json    -> not flagged (resolved)
+
+A citation written inside a package is PACKAGE-RELATIVE. I was resolving every path
+against the repository root only.
+
+WHAT I DID ABOUT IT IS THE ENTRY. I recognised the four filenames, added ONE HARDCODED
+LINE to the detector - `next if -e "packages/zero-migrate/$p"` - and got 26, which was
+the right answer. I never named the class. Because I never named it, I never asked
+whether any other directory in the tree had the same shape, and the general fix (walk
+every ancestor of the citing file) never occurred to me. I FIXED THE FOUR INSTANCES AND
+LEFT THE BUG, and shipped an hour of work on top of it.
+
+It happens to be harmless here: re-resolving all 26 with a proper ancestor walk still
+returns 0 resolvable, so the finding stands and no rewrite removed a live citation. That
+is a fact about this tree's layout, not about my method. In a tree with more
+nested packages the same detector would have reported a number I had no way to doubt.
+
+THE TELL I RELIED ON WAS NOT A CHECK. I caught the other first-pass false positives
+(`ir-envelope.schema.js`, `package-lock.js` - a regex alternation listing `js` before
+`json`, matching inside `.json`) because THE FILENAMES LOOKED WRONG. Zeroship caught the
+same class in their own run because THE NUMBER LOOKED TOO ROUND. Both of us were rescued
+by a surface property of the output. Neither of us had an instrument for it.
+
+THE MISSING DEFENCE, and it is a third axis rather than a stronger version of the other
+two:
+
+    LOOSE      catches what you failed to PREDICT       - a guard calibrated to your
+                                                          belief cannot refute it
+    PLANTED    catches an instrument that is not READING - F54's inverted NUL detector
+    ALIVE-HIT  catches an instrument RESOLVING wrongly   - this entry
+
+CHECK A HIT YOU EXPECT TO BE ALIVE. Not a planted absence - a known PRESENCE the detector
+claims is missing. It is the only one of the three that tests the MODEL rather than the
+mechanism. A planted input proves the detector reads and matches, but only for the one
+path planted; it cannot reveal that a whole CLASS of paths is being resolved against the
+wrong base, because that class never appears in the output as anything but a number.
+
+Cheapest form, now adopted: for any detector that reports absences, take the LOUDEST
+SINGLE ENTRY and `ls` it before believing the total. My four `scripts/gen-*.mjs` were the
+top repeated target of that run, and one `ls` would have shown the model was wrong rather
+than the corpus dirty.
+
+NOT DONE, and worth stating because the whole point of this entry is not to let a partial
+fix read as a whole one: I have applied the alive-hit test to the citation detector ONLY.
+The NUL gate from F54 is plant-verified but I have not fed it a file I expect to PASS and
+confirmed it passes for the right reason. The phase-tag sweeps are three rounds old and
+were never tested this way at all. One of their misses is already known to be
+resolution-shaped: three of the dead citations found in #84 name PHASE-TAGGED DOCUMENTS
+(`docs/proposals/p4-search-implementation-plan.md` at `schema/query.rs:1725`,
+`docs/proposals/p5-encryption-backup-implementation-plan.md` at `:2496` and
+`schema/descriptors.rs:70`). Those sweeps searched comment PROSE for phase vocabulary and
+the tag was living in a PATH, so the scope hole was not the corpus and not the pattern -
+IT WAS WHICH PART OF THE LINE I COUNTED AS TEXT.
