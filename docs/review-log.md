@@ -3187,3 +3187,46 @@ that comes back empty, the instrument is broken rather than the corpus clean.
 
 fmt 0, clippy 0, workspace 2212 passed / 0 failed across 74 targets, the
 `dialect_table_faithfulness` drift test green, package suite 221 / 220 / 0 / 1.
+
+### F50 - the phase-named errors, and the wording was already in the tree
+
+`#68` closed. Four sites, and the two that mattered are runtime errors a user hits:
+
+    apply/backend/sqlite/mod.rs:518  "sqlite backend P2: supersession (squash)
+                                      journaling is not yet implemented (P5/P6)"
+    apply/backend/sqlite/mod.rs:524  "sqlite backend P2: journal kind '{kind}'
+                                      not yet implemented (only 'apply')"
+
+Someone running a squash against SQLite was told about "P2" and "P5/P6" - internal
+planning labels that mean nothing outside this repository. The other two were
+`render/declarative.rs:6549` and `render/lower.rs:7138`, both carrying the identical
+string "renameColumn is not live-rendered for MySQL in render-only Phase 1", plus a
+`**P7**` marker in a test comment at `schema/query.rs:3538`.
+
+I DID NOT INVENT THE REPLACEMENT WORDING, AND THAT IS THE PART WORTH RECORDING.
+`model/op_support.rs:214` already said the same thing correctly and without a tag -
+"renameColumn is render-only for MySQL, not live-rendered" - so a third site had the
+right sentence the whole time and the two defective ones just had to match it. The
+SQLite pair likewise now match the MySQL backend's house style, which never carried
+tags: "mysql backend: precondition evaluation is not yet implemented on MySQL in v1".
+When a codebase already contains a correct phrasing of the thing you are about to
+reword, use it; a fourth independent phrasing is a fourth thing to keep consistent.
+
+NO TEST PINNED ANY OF THE FOUR. Checked with fixed-string searches for the full
+strings and for the substrings "not yet implemented", "journal kind" and
+"render-only Phase 1" - and, because of F49, WITH A POSITIVE CONTROL ON EACH FILE
+FIRST. `grep -Fc "sqlite"` on the SQLite backend returns 62, so the instrument was
+demonstrably reading that file before I believed its silence about tests.
+
+LEFT DELIBERATELY, and the boundary is the point. Three sites keep a tag: the test
+function name `p7_id_prefix_decl_emits_single_id_column` (`schema/query.rs:3536`), a
+test name at `packages/zero-migrate/tests/ops.test.ts:2171` ending "(P4)", and an
+assertion label at `crates/zero-migrate/tests/ir_author_render_parity.rs:950` reading
+"C1/P1:". The standing rule is about COMMENTS and about text a USER can see. An
+identifier is neither, and renaming a test function is a different decision with a
+different blast radius. That question is `#71`, which now has three concrete instances
+instead of an abstract prompt.
+
+fmt 0, clippy 0, workspace 2212 passed / 0 failed across 74 targets, package
+221 / 220 / 0 / 1, host 101 / 101 / 0 / 0 with both database URLs exported. No count
+moved, which is what a pure message change should do.
