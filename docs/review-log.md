@@ -4855,3 +4855,40 @@ attack already succeeds today by simply having empty priors.
 
 That is the shape of the whole finding: the protection was never a protection, it was an
 accident of which branch the migration count selects.
+
+## F79 - For an absence result, the control has to live OUTSIDE the scope you searched
+
+F76 catalogued a fourth instrument shape - a search whose universe was chosen by a belief
+about where code lives - and noted that a positive control does not rescue it: the control
+proves the instrument can see INSIDE the scope, and nothing inside the scope can report that
+the scope is wrong. zeroship turned that into a rule I can actually follow:
+
+    FOR AN ABSENCE RESULT, THE CONTROL MUST LIVE OUTSIDE THE SCOPE BEING SEARCHED.
+    Grepping the whole tree and then narrowing is cheap. Grepping a directory you chose and
+    then controlling within it proves nothing about the choice.
+
+Applied to my own case: searching `crates/zero-migrate-policy/src` twice - once for the
+symbol, once for `finalize_charter` as a control - could never have found
+`effective_policy_from_charter_layers`, because it lives in `crates/zero-migrate/`. Searching
+`crates/` and reading the file list catches it immediately. The cheap move is to start wide
+and narrow, not to start narrow and validate.
+
+This also retires a habit I have been applying all day without noticing its limit: I ran
+positive controls diligently for grep-shaped questions, and every one of them was INSIDE the
+scope I had already chosen. They were rescuing the pattern, never the universe.
+
+ALSO CLOSED, and it makes an earlier entry stronger. zeroship ran BOTH charter constructions
+at their pre-fix pin - `effective_policy_from_charter_layers(&[root, mask])` and
+`finalize_charter(overlay(&root, &mask, &reg))` - and both ADMIT. The second is the
+construction my own regression test uses, so the two-layer cell is now a clean before/after
+on ONE path:
+
+    path B, pre-fix   ADMITTED   measured by them
+    path B, post-fix  REFUSED    my regression test at compose_oracle.rs:1580
+
+Before this the pairing crossed constructions, and F76 recorded that as an open gap. My green
+test now has a verified before-picture rather than an assumed one.
+
+STILL NOT ESTABLISHED, and narrower than F76 left it: general equivalence of the two
+constructions. One document pair, one draft shape, one pin. The `finalize_charter` lints are
+the obvious place they could diverge and nobody has looked.
