@@ -4583,3 +4583,57 @@ NOT DONE: no test pins the new rollback message. The apply-side equivalent IS pi
 `crashed_ddl_is_not_blindly_replayed`, so the two variants now have unequal protection - the
 one an operator is more likely to see is the guarded one, which is the right way round, but
 it is an asymmetry rather than a decision.
+
+## F74 - The agent solved hazard 1 better than I specified it (#92, first slice)
+
+F69 reconciled the design; this is the PostgreSQL/SQLite slice. The projection now asks the
+executor's own `existence_probe::decide`, per lowered UNIT, and drops an op only when every
+unit is `SatisfiedNoop`.
+
+I BRIEFED HAZARD 1 AS A NAME LOOKUP AND GOT AN INVARIANT INSTEAD. My instruction was
+"refuse when a SatisfiedNoop createTable's target is absent from the incoming registry".
+What shipped is:
+
+    let mut projected = registry.clone();
+    advance_ownership_registry(&mut projected, std::slice::from_ref(op), dialect, owner_app);
+    projected == *registry
+
+an op the guard drops must leave the ownership registry UNCHANGED. Because `lower.rs:1077`
+inserts this app unconditionally, that holds exactly when the registry already records this
+project as the owner - so it covers my case, plus the one I did not name (present but owned
+by ANOTHER app, where the insert overwrites), plus every other registry-mutating op, with no
+enumeration. My version would have needed a new clause per op; this one cannot fall behind
+the ops list because it asks the mutation itself.
+
+That is the difference between specifying a CHECK and specifying the PROPERTY the check
+exists to preserve. I specified the check.
+
+VERIFIED BY ME WITH AN ENV-GATED MUTATION, RED and GREEN from the SAME compiled artifact -
+one `napi build`, the branch forced to `NotSatisfied` behind `ZM_MUT_GUARD_OFF`:
+
+    mutation ON   1 FAIL  2 FAIL  3 FAIL   4 PASS (unguarded control)  5 PASS (MySQL scope)
+    mutation OFF  1 PASS  2 PASS  3 PASS   4 PASS                      5 PASS
+
+BOTH CONTROLS HOLD IN BOTH DIRECTIONS, which is the property that matters: the unguarded
+control and the MySQL leg are unaffected by the mutation, so they are testing something
+other than the branch under test. A control that moves with the mutation is not a control.
+
+Arm 3 is the one worth naming. It REFUSED before the fix too - with "already exists" - so a
+pass/fail assertion would have been green on the broken code. It asserts on `/ownership/`,
+which is what makes it a real RED rather than an accidental one, and it is exactly the state
+in which a careless widening would have transferred ownership silently.
+
+Gates run by me, both DB URLs exported: fmt 0, clippy 0, workspace 74 targets / 2227 passed /
+0 failed (unmoved), package 223/222/0/1, host 107 -> 112 (the five new arms, no existing test
+moved), 61 test files, no residue of the mutation.
+
+THE DECLARED GAP THAT MATTERS. SQLite is IN SCOPE of the change (`dialect != Mysql`) and is
+NOT MEASURED: the Node host `DriverConfig` has no SQLite seam, so no arm drives it through
+the real path. The agent said so plainly rather than letting "PostgreSQL and SQLite" in the
+brief imply both were exercised. That is half the stated scope resting on reading, and #99 -
+where SQLite's plan and apply already disagree - is the ticket that will have to close it.
+
+ALSO NOT MEASURED: guarded ops other than `createTable`; a partially matching table whose
+secondary index is absent (the per-unit rule is designed for it and no arm proves it); and
+multi-op interaction inside one envelope, which the doc comment now states is out of scope
+because the projection asks about the base snapshot.
