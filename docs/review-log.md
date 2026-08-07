@@ -4737,3 +4737,63 @@ STILL OPEN, and it is their caveat, not mine to close by reading: whether
 implement the charter surface; they are different construction paths and nobody has verified
 they agree. Their ADMITTED describes the first. My regression test describes the second. If
 the paths diverge pre-fix, the matrix has a cell nobody has actually filled.
+
+## F77 - The same scoped-grep failure, one hour after I wrote it down (#102, corrects F74)
+
+F76 catalogued a fourth instrument shape: a search whose UNIVERSE was chosen by a belief
+about where code lives. I then made that exact error again, in the ticket I filed the same
+hour, and an agent caught it.
+
+MY #102 PREMISE IS FALSE. I claimed the ownership invariant lives only in the node crate and
+that `deploy_envelopes` therefore cannot enforce ownership at all. I had grepped for
+`guard_skip_preserves_ownership` - MY symbol, added hours earlier - and concluded from its
+absence that the CONCEPT was absent. VERIFIED, the engine enforces ownership on every path:
+
+    crates/zero-migrate/src/engine.rs:497   author.load_and_lower_guarded(.., app, &effective_registry, ..)
+    crates/zero-migrate/src/model/load.rs:67    enforce_ir_ownership(&ir, deploying_app, registry)?
+    crates/zero-migrate/src/model/load.rs:23    pub use zero_migrate_ir::load::*;
+
+The checker lives in a THIRD crate, `zero-migrate-ir`, re-exported through the engine. Two
+crates in my search universe, three in the answer. So a Rust embedder calling
+`deploy_envelopes` does get per-table ownership enforcement on PostgreSQL, MySQL and SQLite -
+the hypothesis "the guard protects the CLI's PostgreSQL path and nothing else" is refuted.
+
+THE REAL GAP IS ONE CASE. `enforce_ir_ownership` pre-registers every `createTable` target
+with `owners.entry(table).or_insert(deploying_app)` - the documented DECLARER RULE. A table
+the registry names as another app's is already refused, everywhere, SQLite apply included. A
+table the registry does not name is CLAIMED. That is sound when declaring and unsound when
+ADOPTING an object that already exists out of band, and the engine never consults the live
+catalog for ownership, so it cannot tell the two apart.
+
+TWO CORRECTIONS TO F74, both mine:
+
+  1. F74 credits the invariant with covering "present but owned by ANOTHER app, where the
+     insert overwrites - the one I did not name". It does not reach that case:
+     `enforce_ir_ownership` refuses it upstream, before the projection loop runs. The only
+     reachable input for `guard_skip_preserves_ownership` is ABSENT FROM THE REGISTRY.
+     REPORTED as INFERRED by the agent and NOT yet confirmed by mutation; that confirmation
+     is the first thing to run.
+  2. The test comment I shipped says the arm covers the case where "some OTHER app created
+     it". Per (1) that is not what it tests. It tests a maintained registry that omits the
+     table.
+
+AND THE ONE THAT MATTERS MOST: THE REGISTRY DEFAULTS TO EMPTY. VERIFIED at
+`packages/zero-migrate-cli/src/cli.ts:439` - `loadRegistry(undefined)` returns `{}` - and
+`--registry` is optional, flattened at four `opts.registry ?? {}` sites in
+`packages/zero-migrate-cli/src/index.ts`. So for every user who never passes `--registry`,
+"absent from the registry" is the DEFAULT STATE, not evidence of foreign ownership.
+
+The consequence for what I shipped in ea8d3ff: the guard-aware projection's benefit is
+UNAVAILABLE to those users. Their guarded adoption still refuses - not with the old
+"fold: table already exists", but with an ownership message that blames project ownership for
+a missing CLI flag. Not a behaviour regression, since it refused before too, but the fix does
+not do for the default configuration what its commit message says it does, and the new
+message is less accurate than the old one for that population.
+
+My host arm passes `{ [BASE_TABLE]: OWNER_APP }` - a maintained registry that omits the
+table, which is the meaningful case. The EMPTY registry, which is the common one, is
+untested.
+
+NOTHING IS CHANGED YET. Codex is still running on the same question and the fix is not
+obvious: gating the refusal on "a registry was supplied" would disable the alarm exactly when
+a CI refactor silently drops the flag, which is the agent's own worse-case and a good one.
