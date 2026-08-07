@@ -3052,3 +3052,83 @@ now half wrong, so the replacement has to speak about each separately. Recorded 
 being touched twice.
 
 Package suite unchanged at 221 tests / 220 pass / 0 fail / 1 skip.
+
+### F48 - #38 is rejected as filed, and one of my own objections was backwards
+
+Two independent opinions, and this time THEY DISAGREED - which is where the value
+was. Both refused to widen the fold. They differed on what follows, because they were
+answering different questions: codex answered the one I asked ("is there a coherent
+FOLD formulation?" - no) and the Opus opinion questioned the placement instead.
+
+MY OBJECTION (c) WAS FACTUALLY WRONG, AND IT WAS WRONG IN THE DIRECTION THAT MATTERED.
+I asserted across three separate dispatch briefs that after renaming `old` to `new`,
+`old_pkey` lingers, so recreating `old` collides - and that this argued FOR a
+whole-snapshot post-mutation invariant. VERIFIED BY ME against live PostgreSQL 18:
+
+    CREATE TABLE v_c.old (id int PRIMARY KEY, x int);
+    ALTER TABLE v_c.old RENAME TO new;
+    CREATE TABLE v_c.old (id int PRIMARY KEY, x int);   -- SUCCEEDS
+
+     tbl |    idx
+    -----+-----------
+     new | old_pkey
+     old | old_pkey1
+
+PostgreSQL AUTO-UNIQUIFIES implicit constraint names. Only an explicitly named
+constraint errors, and zero-migrate renders a single-column PK INLINE, hence
+auto-named: `should_render_table_pk` (`render/declarative.rs:3635`) returns true only
+when the PK has more than one column. So the invariant I was arguing for WOULD HAVE
+REJECTED A HISTORY POSTGRESQL ACCEPTS. The objection did not argue for the post-
+mutation shape; it argued against it.
+
+OBJECTION (b) DISSOLVES TOO. `drift::snapshot_schema` (`drift.rs:622`) takes one
+project schema and filters every query on it, so a `SchemaSnapshot` is single-schema
+by construction; same-named tables in two schemas already collide as `DuplicateTable`
+at `fold.rs:1003`; and `effective_schema` is read at exactly one site (`fold.rs:1011`)
+only to build FK definitions. The cross-schema false positive I feared is unreachable,
+because a multi-schema fold is already incoherent for reasons that predate this check.
+
+Objection (a) still binds exactly as stated.
+
+THE REAL DEFECT IS ON A PATH #77 NEVER TOUCHED, AND IT IS THE SAME FAILURE MODE.
+VERIFIED by me:
+
+    lower.rs:4368     if let Some(g) = guard { probe = Some(GuardProbe::Index { ... }) }
+    declarative.rs:8113   "CREATE {unique}INDEX IF NOT EXISTS {} ON ..."
+
+The rendered statement carries `IF NOT EXISTS` UNCONDITIONALLY, but the decision
+machinery is stamped ONLY when the author wrote a guard. So an UNGUARDED
+`op.createIndex` on a name another table owns is silently skipped by PostgreSQL,
+journaled green, and the index never exists - which is precisely what F45 fixed, on
+the branch F45 did not cover. `existence_probe.rs:504` says as much in its own
+comment. My #77 fix closed the guarded path and left the unguarded one open, and I
+did not notice because the ticket framed the whole question around guards.
+
+WHY THE FOLD IS THE WRONG HOME, stated as the reason rather than the conclusion. At
+apply time the base is the LIVE CATALOG, which is single-schema by construction, and
+history is never replayed - so the retroactive-failure problem that blocked #38 simply
+does not arise. `genArtifacts` stays untouched, and no project's build can break on
+history it cannot change. The fold-level version would also produce a STRICTLY WEAKER
+end-to-end test: a fold rejection fires before any SQL runs, so the post-state is
+identical to a run that never happened, and there is no catalog to read back.
+
+CODEX'S THREE STRUCTURAL FINDINGS STAND, all verified by me, and they are why the
+alternatives fail rather than merely being unattractive: `fold_ops_onto` (`fold.rs:872`)
+receives no journal or envelope provenance; `GenArtifactsReply` (`wire.rs:473`) is
+`{ok, env_db_ts, runtime_json, error}` with NO WARNING CHANNEL; and `api.rs:170`
+flattens every envelope into one `Vec<Op>` before folding, discarding boundaries. So
+"scope to pending ops" and "warn at generation" are not tuning choices, they are
+unimplementable without new plumbing.
+
+BOTH OPINIONS NAMED A CASE WHERE THEIR OWN RECOMMENDATION IS WORSE, which is the
+question that has now paid off three times. Codex: a fresh disaster-recovery database
+has no completed journal evidence, so replaying a legacy history hard-fails at the
+second migration even though production journaled it green. Opus: a MySQL-authored
+history applied to PostgreSQL currently degrades silently but DEPLOYS, and would
+instead wedge MID-BATCH, because existence-guard verdicts are evaluated in the second
+pass inside `execute_pending` after earlier migrations have already committed - and
+the remedy changes checksums the applied prefix will then refuse.
+
+DECISION: #38 as filed is rejected, not deferred. Widening the fold is the wrong
+change on three counts and one of my own stated reasons for it was inverted. The
+defect is real and moves to the unguarded lowering path.
