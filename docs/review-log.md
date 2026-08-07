@@ -2524,3 +2524,54 @@ what it produces with ONLY `ZERO_MIGRATE_MYSQL_URL` set. With BOTH database URLs
 is 95 / 95 / 0 / 0, which I re-ran and confirmed. The five skips were the PG-gated
 arms all along. The number was never wrong, it was quoted without its environment -
 the same failure I wrote the "always name the env" rule about.
+
+### F39 - the committed bundle is gated, and the design I adopted would have destroyed an oracle
+
+The gate is one CI step comparing the regenerated `dist/embedded-recorder.js` against
+the committed copy. That file is the ONE thing under `packages/zero-migrate/dist/`
+that is force-tracked, so a consumer loading this tree by absolute path reads the
+checked-in bytes and nothing compared the two.
+
+THE PLAN WAS WRONG AND THE AGENT WAS RIGHT TO REFUSE HALF OF IT. I had adopted a
+suggestion - switch the three tests to import from `src/` so one gate owns the
+artifact comparison - and endorsed it as better than my own first idea. It would have
+created twenty unfalsifiable assertions.
+
+`packages/zero-migrate/src/embedded-recorder.ts` is a PURE RE-EXPORT: seventy-one
+lines whose body is a single `export { ... } from "./ops.js"`. So the tests' two
+recorders would become the same objects. Verified by me, running it:
+
+    src/ops.table === src/embedded-recorder.table : true
+    src/ops.table === dist/embedded-recorder.table: false
+
+Those tests re-author the same migrations through `src/ops.ts` AND through the built
+artifact, then assert the recorded ops match. That is a differential oracle, and it
+requires the two sides to be DIFFERENT objects. Importing both from source would have
+made roughly twenty `assert.deepEqual(publicOps, engineOps)` calls compare a thing to
+itself - category (a) of the taxonomy, unfalsifiable for any value, which is the shape
+this whole review exists to find. I would have shipped it while quoting the taxonomy.
+
+The premise was also partly false. I recorded the dist import as "accidental
+coverage". It is a working behavioural staleness detector: mutating `src/ops.ts`
+without rebuilding fails twenty tests, every one a parity oracle.
+
+So the tests stay as they are and the gate is ADDITIVE. The division of labour is
+written into the step's comment: the tests catch drift that changes recorded output,
+the gate catches drift that does not. I reproduced the justifying case myself - a
+comment-only edit to the committed artifact makes the gate exit 1 while the package
+suite passes 220 of 220. Neither mechanism subsumes the other.
+
+Determinism was the precondition and was verified before the gate was trusted: two
+forced rebuilds and the committed copy are three-way byte-identical at sha256
+`129cd32d396cdf2863bd13a0ae2ffec7c80b66568a53055f9ac8261191b77bf7`.
+
+Two corrections to my own brief, both found by reading rather than assumed. THREE
+tests import the artifact, not four - `golden-parity.test.ts` only mentions it in a
+comment. And `.gitignore:15-16` describes the file as "include_str!'d by the crate",
+which is false: nothing under `crates/` references it, so its only consumers are those
+three tests and the out-of-tree absolute-path consumer. That comment is wrong in the
+tree and is left for a separate change.
+
+The cwd hazard carried over from the previous gate was reproduced rather than assumed:
+with drift present, the identical command run from `crates/` returns exit 0, a false
+pass. The step comment says it must not be moved under a `working-directory`.

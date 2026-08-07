@@ -99,6 +99,34 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: pnpm -w build
         run: pnpm -w build
+      # `dist/embedded-recorder.js` is tsup output, but it is the ONE file under
+      # `packages/zero-migrate/dist/` that is COMMITTED - `.gitignore` ignores the
+      # directory's contents and then force-tracks this single file. A downstream
+      # consumer that loads this tree by absolute path reads the checked-in bytes,
+      # not anything a build produced, and nothing compared the two until this
+      # step. The build above just rewrote the file; a non-empty diff means the
+      # committed copy is stale and must be regenerated in the commit.
+      #
+      # Safe to gate because the bundle is byte-deterministic for a fixed source:
+      # two forced rebuilds of an unchanged tree emit identical bytes. Adding any
+      # wall clock, absolute path, or git state to the tsup output would make this
+      # step permanently red.
+      #
+      # Scope: this ONE file, byte for byte. It does NOT check that the recorder
+      # behaves correctly - `zero-migrate test` below owns that, by re-authoring
+      # the same migrations through both `src/ops.ts` and this artifact and
+      # asserting the recorded ops match. That parity catches drift that changes
+      # recorded output; this step additionally catches drift that does not, such
+      # as a bundling, ordering, or comment-only change. It does NOT cover
+      # `dist/index.js`, `dist/internal/recorder.js`, or the `.map` sidecars,
+      # which stay ignored and are rebuilt per checkout.
+      #
+      # Runs from the repo root, as every step in this workflow does (no
+      # `working-directory` is set). A `git diff` pathspec issued from a
+      # subdirectory can fail to resolve and report a false pass, so this step
+      # must not be moved under one.
+      - name: embedded-recorder.js matches tsup build (no committed drift)
+        run: git diff --exit-code -- packages/zero-migrate/dist/embedded-recorder.js
       - name: zero-migrate check (tsc x2)
         run: pnpm --filter zero-migrate check
       - name: zero-migrate test
