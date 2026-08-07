@@ -4797,3 +4797,61 @@ untested.
 NOTHING IS CHANGED YET. Codex is still running on the same question and the fix is not
 obvious: gating the refusal on "a registry was supplied" would disable the alarm exactly when
 a CI refactor silently drops the flag, which is the agent's own worse-case and a good one.
+
+## F78 - Both agents said (C), and codex found the tested contract my own fix contradicts (#102)
+
+The pair split on reasoning and converged on the verdict. Opus refuted my premise (the engine
+DOES enforce ownership, via `enforce_ir_ownership` in a third crate - F77). Codex accepted
+that and found the thing that settles what to do about it.
+
+THE DECIDING EVIDENCE, VERIFIED BY ME. `packages/zero-migrate-cli/tests/host/existence-guard-varchar-adoption.test.ts`
+seeds a table OUT OF BAND, passes `registry: {}`, and requires the guarded adoption to
+SUCCEED. It carries no `priorMigrations` (grep exit 1), so it takes the empty-priors branch
+at `verbs.rs:263` and never reaches the projection. It comes from commit `9d1e0fd` - my own
+#94 fix - whose message calls adoption "the principal case the guard exists for".
+
+So for one authored scenario:
+
+    empty priors     -> ADOPTS   (tested, required, mine, hours earlier)
+    non-empty priors -> REFUSES  (ownership, mine, hours later)
+
+The two never collide because they take different branches, which is exactly why I did not
+notice. I shipped a refusal that contradicts a contract I had shipped the same day, and the
+suite stayed green because no test crosses the branch.
+
+WHAT THE LOADER ALREADY DISTINGUISHES, and what my helper conflates
+(`crates/zero-migrate-ir/src/load.rs:321` and around `:341`):
+
+    registry does not name the table   -> declarer rule, the deploying app owns it
+    registry names ANOTHER app         -> preserved, and refused
+
+My `guard_skip_preserves_ownership` treats both as "would change ownership, refuse". The
+first is the default state for anyone not passing `--registry`, and the second is already
+refused upstream before the projection runs.
+
+CODEX'S COVERAGE TABLE, which corrects mine in both directions. REPORTED, and I verified only
+the rows marked:
+
+    Rust deploy_envelopes, PostgreSQL   silently adopts, journals completed
+    Rust deploy_envelopes, SQLite       silently adopts, journals completed
+    Rust deploy_envelopes, MySQL        does NOT adopt - bare CREATE errors, marker stranded
+    CLI PostgreSQL, no priors           silently adopts   <- VERIFIED BY ME via the test above
+    CLI PostgreSQL, non-empty priors    projection refuses <- VERIFIED BY ME, host arm
+    CLI SQLite apply                    adopts; plan refuses <- VERIFIED BY ME, F75
+
+THE DECISION: narrow the refusal rather than mirror or delete it. Refuse only when the
+registry EXPLICITLY names a different owner; let an absent entry take the declarer rule, so
+the priors path matches the empty-priors path that is already tested. Then settle whether the
+explicit-foreign-owner branch is reachable at all - Opus says `enforce_ir_ownership` refuses
+it upstream, INFERRED and not confirmed by mutation. If it is unreachable, the honest outcome
+is to remove the helper and say why, not to keep a branch nothing can select.
+
+CODEX'S WORSE-CASE IS THE COUNTERWEIGHT AND IT IS REAL: an incomplete registry that omits
+`accounts`, app A applying a matching guarded `createTable("accounts")` followed by an
+approved `dropColumn("accounts", "ssn")`. Under the narrowing, A adopts and then drops app
+B's column; today's projection refuses at the create. So the narrowing removes real
+defence-in-depth against an incomplete registry - and the counter to THAT is that the same
+attack already succeeds today by simply having empty priors.
+
+That is the shape of the whole finding: the protection was never a protection, it was an
+accident of which branch the migration count selects.
