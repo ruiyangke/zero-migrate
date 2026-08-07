@@ -1846,3 +1846,33 @@ the name describes. Only deleting the mechanism finds it.
 
 The question that catches all three, and the one to ask of any test already open:
 could this body pass if the mechanism its name describes were deleted entirely.
+
+### F31 - the UUIDv4 test could not tell a generator from a constant
+
+`packages/zero-migrate-cli/tests/host/mysql-authoring.test.ts` inserted 128 rows
+whose default came from `MysqlDmlRenderer::uuid_v4`
+(`crates/zero-migrate/src/render/renderer.rs:534`), then checked each value
+against the v4 regex, `value[14] === "4"`, and `"89ab".includes(value[19])`.
+Nothing compared any value to any other. A generator reduced to a single
+well-formed constant satisfied all three checks 128 times over.
+
+Category (c) of axis two: falsifiable, matching the right thing, never connected
+to the mechanism the test name describes. Proven by stubbing `uuid_v4` to return
+`('1b4e28ba-2fa1-4d1b-883f-e9b1f7c3a2d5')` - the format loop ran to completion
+over all 128 identical values and the run failed on the new assertion alone,
+`1 !== 128`.
+
+The fix is `new Set(values).size === values.length`. Its comment states the
+bound rather than implying a stronger one: 128 samples catch a constant or
+near-constant generator and cannot detect bias, low entropy, or a long repeat
+period.
+
+The TypeID and ULID neighbours in the same file are a different shape and need
+no change. Neither generates values; both insert hand-written literals and
+assert a CHECK constraint accepts the valid ones and rejects the invalid ones,
+so deleting the constraint fails 21 TypeID and 9 ULID rejection cases.
+
+One hazard recorded for future stub cycles through the Rust addon: restoring a
+stubbed source with `cp -p` preserves the original mtime, so cargo sees the file
+as unchanged, skips the rebuild, and the confirming green run still executes the
+stub binary. Force a recompile with `touch` before trusting the restore.
