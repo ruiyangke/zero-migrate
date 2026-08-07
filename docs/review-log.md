@@ -4637,3 +4637,52 @@ ALSO NOT MEASURED: guarded ops other than `createTable`; a partially matching ta
 secondary index is absent (the per-unit rule is designed for it and no arm proves it); and
 multi-op interaction inside one envelope, which the doc comment now states is out of scope
 because the projection asks about the base snapshot.
+
+## F75 - #99 was already fixed, and the reason I recorded for its gap was wrong (#99, #102)
+
+Two corrections and one new defect.
+
+THE HEADLINE CLAIM WAS ALREADY CLOSED. #99 said SQLite `plan`/`status` refuse a guarded
+migration that `apply` runs. Measured against the real CLI on live SQLite, two identical
+databases from one seed: plan exit 0 and apply exit 0, agreeing. `ea8d3ff` fixed it, because
+SQLite is `dialect != Mysql` and the projection now asks the probe. The right outcome for
+#99 was a test pinning the agreement, not a fix - which is the outcome I told the agent to
+prefer, and it is worth noting that "the ticket is already fixed" only surfaced because the
+brief asked for a measurement BEFORE a change.
+
+F74'S STATED REASON FOR THE GAP WAS WRONG, AND IT WAS MY SENTENCE. I recorded that SQLite
+went unexercised because "the Node host `DriverConfig` has no SQLite seam". It has one:
+`packages/zero-migrate-cli/src/index.ts:73` is
+`| { kind: "sqlite"; appPath: string; journalPath: string }`, and both `apply()` and
+`statusEnvelopes({ readOnly: true })` accept it. The real obstacle was narrower - the
+un-exported `authorEnvelope` - and it has a workaround I did not look for: the exported
+`plan()` returns the envelope it authored. I took a reported obstacle and wrote it down as a
+structural fact without checking whether the structure said so.
+
+THE NEW DEFECT IS THE ONE WORTH KEEPING (#102). With the target absent from the incoming
+registry:
+
+    plan  -> exit 1, "the existence guard is satisfied, but dropping the operation would
+                      change project ownership the incoming registry does not record"
+    apply -> exit 0, and `schema_migrations` carries the migration as COMPLETED
+
+SQLite apply silently adopts a table this project does not own. On PostgreSQL both refuse,
+because PG's apply routes through the same projection. VERIFIED BY ME structurally:
+`guard_skip_preserves_ownership` exists in exactly two places, both in the NODE crate
+(`crates/zero-migrate-node/src/lower.rs:1031` and its one call site at `:444`), while SQLite
+apply goes `index.ts:186` -> `applyIrSqlite` -> `bridge.rs:748` -> `deploy_envelopes`, which
+lives in the ENGINE crate and cannot see it.
+
+So the ownership invariant ea8d3ff added is PLAN-TIME ONLY. That is worse than no check in
+one specific way: the refusal tells the operator the engine enforces project ownership, and
+on the path they may actually run, it does not. Not fixed here - it changes shipped SQLite
+apply semantics and the check lives in the wrong crate for the fix.
+
+NOT MEASURED: whether a Rust embedder calling `deploy_envelopes` directly loses the same
+invariant on PostgreSQL and MySQL too. Structurally it should, since the check is in the node
+layer, and if so the guard protects the CLI's PG path and nothing else. That is the first
+thing to settle on #102.
+
+Gates run by me: fmt 0, clippy 0, workspace 74 targets / 2227 passed / 0 failed, package
+223/222/0/1, host 112 -> 115, 61 test files, probe project removed, no mutation residue in
+the shipped addon.
