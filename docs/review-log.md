@@ -2849,3 +2849,69 @@ both are reading the same three call sites; it is the same view held twice. The
 objection that mattered came from asking a question whose answer could only be NO -
 "name a case where this makes things worse" - and from asking about a path neither of
 us had opened. CONVERGENCE IS WHEN A SECOND OPINION IS MOST WORTH BUYING, NOT LEAST.
+
+### F45 - the guard defect was real, on the dialect the ticket did not name
+
+`#77` is fixed, and the ticket was wrong about where it bites. I filed it as "the
+probe assumes schema-wide index names, so MySQL silently no-ops". The dialect fact
+was right and the consequence was not reachable there.
+
+MYSQL NEVER EVALUATES EXISTENCE GUARDS AT ALL. VERIFIED by me, with the
+under-counting grep that makes a hit meaningful:
+
+    $ grep -rn "existence_probe::decide" --include='*.rs' crates/zero-migrate/src/apply/
+    backend/postgres/session.rs:443
+    backend/postgres/session.rs:766
+    backend/sqlite/mod.rs:541
+
+Three call sites, none MySQL. Every `existence_guard` mention under
+`apply/backend/mysql/` is an `existence_guard: None` constructor. So the verdict
+function cannot be reached with `SqlDialect::Mysql` in production, and the silent
+no-op I described cannot happen there.
+
+THE SAME SILENT NO-OP IS REACHABLE ON POSTGRESQL, which does evaluate guards. That
+is worse than the ticket, not better. A guarded `createIndex` for a name another
+table already owns returned `SatisfiedNoop`: apply reported success, the version was
+journaled, and the index was never created.
+
+THE DEFECT GENERALISES DIFFERENTLY THAN I FILED IT. It is not "the scope assumption
+is wrong on MySQL". It is that the fallback resolved an index by NAME and ignored
+WHICH TABLE owned the hit. For `ifNotExists` that is wrong wherever names are
+schema-wide: a hit on another table means the name is taken AND the declared index is
+absent, which is the one case that must fail rather than no-op.
+
+THE VERDICT HAD TO BE `FailDrift`, NOT `RunBare`, AND THAT IS NOT A STYLE CHOICE.
+`render/declarative.rs:8113` and `:8390` always emit `CREATE INDEX IF NOT EXISTS`, so
+letting the statement run bare on a name collision is ALSO silent - PostgreSQL
+swallows it. Only a typed refusal surfaces.
+
+MY OWN RED, run from ONE compiled addon with an env-gated restore of the old lookup,
+window 13:57:48 - 13:59:57 UTC, residue grep zero after removal:
+
+    not ok 1 - PostgreSQL: a guarded createIndex is refused, not skipped, when
+               another table owns the name
+      Missing expected rejection: the guarded create must fail closed on a name
+      another table owns
+    ok 2 - PostgreSQL control: the same guarded createIndex still runs when the
+           name is free
+    ok 3 - MySQL: a guarded createIndex lands on its own table under a name
+           another table also uses
+
+The control passing IN THE RED RUN is what makes it a control rather than a second
+symptom. A NEGATIVE RESULT NEEDS A CONTROL THAT WOULD HAVE BEEN POSITIVE.
+
+A MUTATION THAT WAS NOT CAUGHT, AND IT IS THE INTERESTING ONE. Flipping the MySQL arm
+of `Capability::SchemaWideIndexNames` to `true` leaves every arm of the suite green.
+That is not a gap in the tests, it is a consequence of the first finding: the MySQL
+arm governs a code path MySQL never reaches, so nothing end to end can pin it. It is
+correct by construction and it is what `#38` will consume. RECORDING AN UNPINNED
+VALUE IS BETTER THAN MANUFACTURING A TEST THAT PINS IT THROUGH A PATH THE PRODUCT
+DOES NOT USE - that test would pass forever and prove nothing.
+
+WHAT THE MODIFIED SQLITE SUITE ACTUALLY DID, since a changed existing test is where a
+fix hides. `git diff --stat` shows 98 insertions and 1 deletion, and the deletion is
+an import line reflowed to add `IndexElement`. No assertion was relaxed.
+
+Counts moved and both are explained: workspace 2211 -> 2212 across the same 74
+targets (the new SQLite arm in an existing target), host 96 -> 99 with both database
+URLs exported (two PostgreSQL arms and one MySQL arm in a new file).
