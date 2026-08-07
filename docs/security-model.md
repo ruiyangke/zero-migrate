@@ -297,10 +297,25 @@ For non-transactional PostgreSQL work and MySQL DDL:
 1. preserve the database and journal state;
 2. inspect the started/completed recovery record;
 3. verify whether the schema change took effect;
-4. use the supported PostgreSQL recovery path, or call
-   `MysqlBackend::recover_inflight_ddl` with the exact reviewed migration,
-   operator identity, reason, and verified live shape;
-5. never invent a completion event just to clear the incident.
+4. use the supported PostgreSQL recovery path; for a MySQL inflight marker,
+   either restore and verify the complete pre-migration shape and then delete
+   that version's row from the mutable `schema_migrations_inflight` side-table,
+   which is the only route the CLI and the Node SDK can reach, or call
+   `MysqlBackend::recover_inflight_ddl` from a Rust host that embeds the crate
+   with the exact reviewed migration, operator identity, and reason, which adds
+   a marker-identity check and an immutable audit row over the direct delete;
+5. treat the shape verification as your own step, because neither MySQL repair
+   inspects the database: recovery records your assertion about the shape
+   rather than verifying it;
+6. never invent a completion event in the append-only, trigger-guarded
+   `schema_migrations` table just to clear the incident.
+
+Deleting an inflight marker needs no privilege the migration account lacks: a
+successful apply issues the same statement on the same mutable side-table. That
+table is not the append-only event history, and the two are not interchangeable.
+See
+[Interrupted MySQL or non-transactional work](operations.md#interrupted-mysql-or-non-transactional-work)
+for the checklist and the exact statement.
 
 There is no public high-level rollback workflow. Low-level Rust down operations
 do not provide complete selection, approval, guard, or state validation. Prefer

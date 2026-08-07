@@ -702,7 +702,7 @@ perform first, outside zero-migrate.
 - [ ] Rows arriving after a backfill starts are covered by a later migration
 - [ ] MySQL data targets use InnoDB and have no user triggers
 - [ ] SQLite application and journal databases pass the required safety checks
-- [ ] MySQL DDL has an audited inflight repair procedure and is not blindly retried
+- [ ] MySQL DDL has a reviewed inflight repair procedure and is not blindly retried
 - [ ] Every PostgreSQL rename is its table's only operation in that migration
 - [ ] Every PostgreSQL online rename has completed its application cutover and
       explicit resolution before the deployment is closed

@@ -370,11 +370,20 @@ status. Saved backfill progress without a final completion event appears as an
 An interrupted MySQL schema step is different from a resumable backfill. MySQL
 may have auto-committed the DDL before completion history was written, so
 zero-migrate preserves the inflight marker and does not replay the statement.
-Inspect the live schema before normal apply continues. A Rust host resolves the
-marker with `MysqlBackend::recover_inflight_ddl` and the exact reviewed
-`Migration`. Choose `MarkAppliedAfterVerification` only after verifying the
-complete new shape, or `ClearForRetryAfterRollback` only after restoring and
-verifying the complete old shape.
+Inspect the live schema before normal apply continues, then take one of two
+repairs. Any operator, including through the CLI and the Node SDK, restores and
+verifies the complete pre-migration shape and then deletes that version's row
+from the mutable `schema_migrations_inflight` side-table; the append-only
+`schema_migrations` event table is never edited. A Rust host that embeds the
+crate can instead call `MysqlBackend::recover_inflight_ddl` with the exact
+reviewed `Migration` and `MarkAppliedAfterVerification` after verifying the
+complete new shape, or `ClearForRetryAfterRollback` after restoring and
+verifying the complete old shape; over the direct delete it adds a
+marker-identity check and an immutable audit row, and it has no binding across
+the Node addon. Neither repair inspects the database: recovery records the
+operator's assertion about the shape rather than verifying it. See
+[Interrupted MySQL or non-transactional work](operations.md#interrupted-mysql-or-non-transactional-work)
+for the checklist and the exact statement.
 
 PostgreSQL and SQLite use the exact columns in `onConflict.columns`. MySQL 8
 cannot name a particular unique constraint in its duplicate-key syntax. For

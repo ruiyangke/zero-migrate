@@ -584,7 +584,10 @@ Do not convert sequence values to `Number`; large values can lose precision.
 
 ## Avoid these recovery shortcuts
 
-- Do not edit or delete journal rows to make status look healthy.
+- Do not edit or delete rows in the append-only `schema_migrations` journal to
+  make status look healthy. Clearing a stranded MySQL `schema_migrations_inflight`
+  marker is a different action on a different, mutable table, and it is
+  supported; see [An incomplete migration is reported](#an-incomplete-migration-is-reported).
 - Do not mutate an applied migration.
 - Do not retry while another apply may still be running.
 - Do not grant broad database permissions to bypass a scoped denial.
