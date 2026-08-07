@@ -1632,3 +1632,21 @@ posture unreachable in shipped code, and that the test proving the
 construct the real precondition and restricts a charter against itself instead.
 Both are the manufactured-precondition shape and both need checking before they are
 treated as findings.
+
+### F25 narrowed
+
+The measured no-leak result is true and narrower than it reads. VERIFIED: the only
+non-test implementation of `SqlSession` in this workspace is `NapiHostSession`
+(`crates/zero-migrate-node/src/session.rs:118`), which dispatches every query across
+the napi bridge to a JS host driver. Every other implementation is a
+`RecordingSession` inside a `#[cfg(test)]` module.
+
+So in the shipped product this engine never owns a database socket. The connection
+belongs to the consumer's driver on Node's event loop. The sockets measured were
+test-support sockets opened by `PgDevSession` so the Rust integration suites can
+reach a real server.
+
+The engine does not retain connections in production because it does not open them.
+Connection lifecycle in the shipped path is the host's concern, which also means a
+consumer's pooling and teardown behaviour is not something this repo's tests can
+observe.
