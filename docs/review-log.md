@@ -1734,3 +1734,41 @@ been poisoned, so raw text from that poisoned parser satisfied it, and a small
 JavaScript number would satisfy `String(number)` too. It never established what it
 claimed. Whether the surviving equivalent shares that hole is being checked as part
 of the removal, and matters more than the deletion does.
+
+### F28
+
+Deleting the dead oracle turned up a worse defect in a test that is staying, which
+is the more useful half of that task.
+
+`e2e-pg.test.ts` asserted `/^\d+$/` over `String(event_seq)` and its comment called
+that proof that connection-scoped exact-integer parsers prevent float rounding. The
+assertion could not fail, measured three ways.
+
+The read goes through the test's own client, built with no type-parser overrides, so
+the driver's oid-20 pin is not in the path. A digits-only check cannot see precision
+loss anyway: `Number("9007199254740993")` is `9007199254740992`, and that stringifies
+to digits. And the companion guard against exponential notation defended a range no
+int8 reaches, since `toString` only goes exponential above `1e21`. A lossy parser, a
+raw wire string and the default value all satisfy it identically.
+
+The oracle had the same check and the same comment, which is presumably where it was
+copied from or to. Deleting one and leaving the other would have removed the dead
+copy and kept the live one.
+
+This is the shape worth naming. The other members of this taxonomy are tests that do
+not run, or run against inputs that avoid the defect. This one runs, on every CI
+build, against the real path, and asserts something that is true of every possible
+value. It is not weak coverage; it is a sentence that reads like coverage. The
+comment above it is what made it survive - it stated a mechanism confidently enough
+that nobody checked whether the line below exercised it.
+
+The fix keeps the loop for what it does prove, ordering, and moves the exactness
+claim to where it is established: `driver-pg.test.ts` asserts the driver never
+consults a global parser for a pinned oid, with the pinned set asserted equal to the
+sample so a new pin cannot be added silently, and the `history()` arm asserts
+`typeof eventSeq === "bigint"`, which no formatting coincidence satisfies.
+
+A milder version survives at `driver-pg.test.ts:362-372`, unchanged: its comment
+credits the oid-20 pin, but the query selects `event_seq::text`, so PostgreSQL
+formats server-side and the pin is bypassed on that read. The surrounding test is
+sound; only that line's stated justification is wrong.
