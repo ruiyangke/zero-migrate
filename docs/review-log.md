@@ -3681,3 +3681,57 @@ TWO GAPS RECORDED RATHER THAN CLOSED, both filed: `dropColumn` on a masked colum
 unit and leaves the sibling behind (#89, NOT verified by me), and the sibling's probe checks
 the column's shape but not its sentinel `COMMENT`, so a sibling present but unmarked reads
 as satisfied (#90, mechanism verified, reachability not).
+
+### F59 - two independent reviews agreed, and the premise was still wrong on three counts
+
+#88 came from BOTH #79 opinions, independently: `createPartition ifNotExists` and
+`dropPartition ifExists` return early before building a probe, and therefore bypass the
+fail-closed `GuardProbeUnbuildable` check that exists precisely to stop a guard being
+silently dropped. Two reviews, arrived at separately, saying the same thing. I filed it as
+worse than the rest of the guard gaps for exactly that reason.
+
+VERDICT: REJECTED AS FILED. Every load-bearing part was wrong.
+
+  1. EVERY LINE NUMBER BOTH REVIEWS CITED MISSED. Real: CreatePartition 4427-4476 with the
+     early return at 4461-4464; DropPartition 4505-4539 returning at 4519-4527; the
+     fail-closed check at 5243-5258, not the ~5230 I passed on. The two reviews cited
+     DIFFERENT wrong ranges, which I noted in the brief as a reason to read rather than
+     trust - and it was the only part of my framing that held.
+
+  2. THE GATE IS `!matches!(self.dialect, SqlDialect::Postgres)` - ALL NON-POSTGRES. Both
+     reviews framed it as MySQL, and I carried that framing into the ticket. SQLite is
+     equally affected and neither report mentioned it.
+
+  3. THE REMEDY IS NOT IMPLEMENTABLE, which is the part no amount of re-reading the arm
+     would have shown. The early return yields `LoweredOp::Dml(step)`. The fail-closed
+     check inspects `migs`, a DDL unit list, so it STRUCTURALLY CANNOT SEE a Dml result -
+     routing these arms through it is not a small change, it is a category error. And
+     `PlanStep::Dml` (`render/step.rs:90-134`) HAS NO `existence_guard` FIELD AT ALL, so
+     building a probe for them is blocked too. On the default/hash path the return is
+     `LoweredOp::Ddl(Vec::new())`, where `migs.iter().any(...)` over an empty vec is false
+     and the check would be VACUOUS even if reached.
+
+AND THE BEHAVIOUR IS HARMLESS WHERE I SAID THE BUG WAS. Guarded and unguarded lowerings are
+BYTE-IDENTICAL on SQLite and MySQL. Live MySQL: a guarded createPartition produced the
+identical catalog, identical journal and identical downstream error as the unguarded
+control.
+
+THE REAL DEFECT IS IN THE ARM NOBODY LOOKED AT - the one that DOES build a probe, on the
+one dialect that DOES evaluate probes. `drift.rs:670` excludes partition children from the
+tables snapshot (`AND c.relispartition = false`); `existence_probe.rs:297` is
+`live.tables.contains_key(table)` and never consults `live.partitions`. So a partition
+child is ALWAYS absent to the probe. Observed live, control differing only by the flag:
+`dropPartition({ifExists:true})` skipped the DROP, journaled the migration `applied`, and
+left both the partition and its rows in place. The unguarded form dropped correctly. THE
+GUARD DOES NOT WEAKEN THE DROP, IT CANCELS IT. Filed as #91.
+
+WHAT I ACTUALLY GOT WRONG IS NOT "I BELIEVED TWO AGENTS". Their reports were honest, both
+labelled the claim as read-not-run, and I recorded that. The error was treating AGREEMENT
+as if it were INDEPENDENT CONFIRMATION. Two readers of the same twenty lines who share a
+prior are one measurement, not two - and the shared prior here was mine, since both were
+answering a #79 brief that framed the whole area as a MySQL problem. I MANUFACTURED THE
+CORROBORATION I THEN TREATED AS EVIDENCE.
+
+The thing that settled it was none of the reading: it was running the op against a live
+server and reading the catalog back. Third time today that a premise survived every review
+and died on first contact with a database.
