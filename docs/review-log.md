@@ -4686,3 +4686,54 @@ thing to settle on #102.
 Gates run by me: fmt 0, clippy 0, workspace 74 targets / 2227 passed / 0 failed, package
 223/222/0/1, host 112 -> 115, 61 test files, probe project removed, no mutation residue in
 the shipped addon.
+
+## F76 - Which drafts were ever exposed by the masked hole, and a grep scope that nearly made me contradict a correct message
+
+zeroship closed the last cell of the 17b297a matrix by running the two-layer masked hole at
+their PRE-FIX pin, which is the only direction my tree cannot reach. The bug reproduces:
+ADMITTED. Combined with the three cells already measured, the fix closes a real hole and
+leaves legitimate single-layer charters alone.
+
+THE FINDING THAT REFINES MY OWN COMMIT. 17b297a's body says the single witness "sat outside
+it, where the charter still granted". True, and it understates a boundary condition worth
+stating outright:
+
+    A DRAFT NARROWER THAN OR EQUAL TO THE MASK IS REFUSED EVEN PRE-FIX.
+    ONLY A DRAFT SPANNING BOTH REGIONS SLIPS THROUGH.
+
+Measured by them at the pre-fix pin: a draft scoped to `secret` alone is REFUSED
+(`GrantExceedsCharter`), because a draft whose scope IS the mask gets its witness inside the
+mask, where the charter says false. The escape needs the draft to span the boundary so the
+single witness lands in the granted part and the mask is never sampled.
+
+VERIFIED BY ME that my own regression test only exercises the spanning shape:
+`crates/zero-migrate-policy/tests/compose_oracle.rs:1580`, the refused draft is
+`scope = "all"` with the comment "An untrusted draft re-granting over the whole universe
+must be refused." So the test pins the exposed shape and says nothing about the narrower one
+- correctly, since the narrower one was never exposed.
+
+That matters to anyone auditing whether they were affected: it is not "any draft re-granting
+a masked key", it is "a draft whose scope crosses the mask boundary".
+
+AND I NEARLY CONTRADICTED THEM WITH A SCOPED GREP. They noted they built their probe with
+`effective_policy_from_charter_layers` rather than my test's
+`finalize_charter(overlay(...))`. I grepped for it in `crates/zero-migrate-policy/src` and
+got EXIT 1 - nothing. The obvious reading is "that function does not exist at my HEAD", which
+would have been a confident, wrong correction of a correct message.
+
+It exists. Nineteen hits, in a different crate: `crates/zero-migrate/` uses it, including
+`crates/zero-migrate/tests/layered_policy.rs:4`. My grep was scoped to the crate I assumed
+owned the concept, and the assumption was the error, not the pattern.
+
+The positive control I ran (`finalize_charter` IS in the policy crate) proved the DIRECTORY
+was readable and told me nothing about whether the SYMBOL was elsewhere. A control proves the
+instrument can see inside the scope it was given; it cannot tell you the scope was wrong.
+That is a distinct failure from the ones catalogued so far - not a bounded output, not a
+guessed window, but a search whose universe was chosen by a belief about where code lives.
+
+STILL OPEN, and it is their caveat, not mine to close by reading: whether
+`effective_policy_from_charter_layers(&[root, mask])` and
+`finalize_charter(overlay(&root, &mask, &reg))` produce equivalent layer stacks. Both
+implement the charter surface; they are different construction paths and nobody has verified
+they agree. Their ADMITTED describes the first. My regression test describes the second. If
+the paths diverge pre-fix, the matrix has a cell nobody has actually filled.
