@@ -980,3 +980,67 @@ does not reject embedded NUL although its siblings do.
 publicly-constructible Rust API rather than the strict TOML loader that is the
 actual trust boundary, so the real severity is likely lower than reported. Needs a
 verification pass before any change.
+
+## What the two user-reported defects actually cost to close
+
+Both entries in `ISSUES.md` are now fixed or decided, and the shape of the work is
+worth recording because almost none of it was the fix itself.
+
+`6b4cf16` closes issue 1. `5e920ae` and `730796b` came out of the same stretch.
+All three are on `origin/main`.
+
+### The first attempt at every one of them looked finished and was not
+
+The inject-gate fix passed the full suite and seven new tests of its own, and was
+bypassable two ways. Neither bypass was subtle once seen, and no amount of green
+would have shown either, because both were about what the check ADMITS and the
+suite only asserted what it denies.
+
+The pattern generalises past this repo. A conformance check that re-normalizes a
+value its parser already normalized will admit whatever the parser was
+distinguishing. Fold one side, never both.
+
+### Reproducing the failure yourself is the step that pays
+
+For each fix the failing state was reproduced independently before the fix was
+accepted: the guard tests against a clean worktree pinned at the pre-fix commit,
+and the bool inversion by swapping the fix back out and watching `SELECT false`
+cross the seam as `true` against a live PostgreSQL. That last one converted a
+finding both we and the consumer had been calling "traced but not observed" into
+an observed fact, and it took about a minute.
+
+### A claim that costs nothing to make can cost a consumer real work
+
+Two of ours did. The first said the constraint spelling of the identifier-length
+defect reached the same silent failure the index check was written to stop; the
+consumer wrote that justification into their source within the hour, and it was
+wrong. The constraint spelling errors loudly; only the index spelling is silent,
+because the engine emits `CREATE INDEX IF NOT EXISTS`. The mechanism half was
+sound and the severity half was inferred, and only the mechanism half was labelled
+as verified.
+
+The second was worse in effect: every commit distance quoted to that consumer was
+measured against a LOCAL `main` that had never been pushed. Acting on it would
+have moved them onto a commit containing none of the fix. `main` was 57 commits
+ahead of `origin/main` and nothing had said so.
+
+Both are the same failure with different content: stating something checkable
+without checking the part that makes it actionable.
+
+## Findings that arrived as side effects
+
+None of these were being looked for.
+
+- The checked-in addon binary `crates/zero-migrate-node/zero-migrate-node.linux-x64-gnu.node`
+  is months stale and fails 18 host tests on its own. The host suite has been
+  substantially red, which means a genuine regression there would not stand out.
+- `bridge.rs` is `#[cfg(feature = "napi")]`, so the gate CI runs never compiles it
+  and the default-feature build cannot link. Clippy type-checks that file and
+  nothing executes it.
+- The connection-scoped pg type map pins some OIDs and borrows others from the
+  mutable global registry, so the array shadows are not actually pins. Same shape
+  as the bool defect, currently latent because the apply path reads no array
+  column.
+- A test deliberately scaffolds into a directory named `--json` and never cleans
+  up, which is why that path keeps reappearing untracked. The CLI is behaving
+  correctly; `--dir=--json` is its documented inline escape hatch.
