@@ -1650,3 +1650,43 @@ The engine does not retain connections in production because it does not open th
 Connection lifecycle in the shipped path is the host's concern, which also means a
 consumer's pooling and teardown behaviour is not something this repo's tests can
 observe.
+
+### F27
+
+The differential oracle runs never, and it is the harness whose whole purpose is
+checking two independent implementations against each other.
+
+`packages/zero-migrate-cli/tests/host/oracle.ts` states its own job in its header:
+run host `apply`/`status`/`history` over `driver-pg` against live PostgreSQL,
+assert journal ordering and checksum anchoring, prove the native recorder and the
+host recorder agree on authoring, and run under BOTH bun and node so the two
+runtimes can be compared.
+
+VERIFIED, four ways, none of which required running anything:
+
+Nothing invokes it. A search for the name across every `package.json`, the CI
+workflow, every `*.json`, `*.yml` and `*.sh` in the repository, and `docs/`,
+`CONTRIBUTING.md` and `README.md`, finds no invocation at all - only the file
+itself.
+
+It is outside the suite glob. `test:host` is
+`node --import tsx --test tests/host/*.test.ts`, and this file is not a
+`*.test.ts`.
+
+Its Node arm cannot resolve its fixture. Under plain Node it imports
+`./mig/20260711000001_create_widgets.mjs`. That file does not exist;
+`tests/host/mig/` holds three files and all are `.ts`. The `.gitignore` beside them
+ignores `mig/*.mjs` and says they are "regenerated via `bun build`", and no script
+in the repository runs that build.
+
+Its Bun arm has no runner. Bun appears in no `package.json` and no workflow.
+
+So a harness documenting six or seven distinct oracles, including the only
+cross-implementation parity check in the tree, is reachable by nothing and would
+fail on its first import if it were reached. This is the plainest instance yet of a
+suite that never runs, and it is worth noting that it was found while investigating
+a much smaller worry - whether its generated fixture might be stale. The fixture is
+not stale. It is absent, and so is the runner.
+
+The header's Bun-versus-Node parity claim is the part to fix first regardless of
+what else happens: it describes a comparison nothing performs.
