@@ -3325,3 +3325,50 @@ trivially green today, so the planted-NUL red run is the only thing that would p
 works, and a gate installed while the tree is dirty proves nothing about either.
 
 Package suite 221 tests / 220 pass / 0 fail / 1 skip, unchanged.
+
+### F53 - a line-scoped filter over multi-line SQL misses 70 percent of this file
+
+Not my finding. A downstream project described nearly shipping a wrong conclusion
+because their search was `grep "FROM .*audit" | grep -iE "select|query"` - a two-stage
+LINE filter run over SQL whose `SELECT` and `FROM` sit on different lines. The zero it
+returned produced a complete-feeling explanation ("nothing reads this table, so its
+non-atomicity protects a record with no reader") that survived until they wrote a test
+to DEFEND the premise and it failed on the very file they had read.
+
+I measured the same hazard here rather than agreeing with it. In
+`crates/zero-migrate/src/apply/drift.rs`, with a positive control first (`grep -Fc "fn "`
+returns 45, so the file is being read):
+
+    total SELECT..FROM pairs:  27
+    same-line only:             8
+    SPANNING LINES:            19
+
+A two-stage line filter sees 8 of 27. IT MISSES 70 PERCENT OF THE QUERIES IN THE FILE,
+and reports a number rather than an error while doing it.
+
+THIS IS A THIRD DISTINCT WAY A SEARCH HAS LIED TO ME TODAY, and the three do not share
+a mechanism. F49 was the tool declining to read a file at all (a NUL byte, silently
+binary). F47 was my own note standing in as the enumeration source. This one is the
+SHAPE of the query: line-oriented matching over content whose unit is not a line. A
+multi-line string, a formatted SQL block, a wrapped function signature, a doc comment
+spanning lines - each is a unit the grep cannot see whole, and each produces an
+undercount that looks exactly like a small true number.
+
+NO CONCLUSION OF MINE CURRENTLY RESTS ON ONE, WHICH I CHECKED RATHER THAN ASSUMED. The
+absence claims in this log used single-token searches - `existence_probe::decide`,
+`embedded-recorder`, `restrict(`, `genArtifacts` - where the token and the line are the
+same unit, so line-scoping costs nothing. The hazard is recorded because the NEXT
+search over SQL or any multi-line construct is where it would bite, and by then the
+number will look reasonable.
+
+THE DEFENCE THEY FOUND IS THE PART WORTH COPYING, and it is not "grep more carefully".
+They caught it by WRITING A TEST TO DEFEND A PREMISE THEY BELIEVED - and the test
+failed immediately. Their own note is that they would probably not have written it had
+the premise felt shakier, which inverts the usual instinct: the conclusions worth
+building a guard around are the ones that feel finished, not the ones that feel
+uncertain. AN EXPLANATION THAT ACCOUNTS FOR EVERY FACT YOU HAVE IS INDISTINGUISHABLE
+FROM ONE THAT ACCOUNTS FOR EVERY FACT.
+
+For multi-line content the practical instrument is a whole-file slurp with a
+dot-matches-newline pattern - `perl -0ne` - rather than a pipeline of line filters. Use
+it, and keep the positive control either way.
