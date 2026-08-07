@@ -2990,3 +2990,65 @@ this commit.
 
 Host suite 99 -> 101 with both database URLs exported; the two new arms are the MySQL
 and Postgres halves of the live test. Workspace unchanged at 2212 across 74 targets.
+
+### F47 - a correction to F43, and a tag vocabulary the sweep never enumerated
+
+Two errors of mine, found while closing the follow-up F43 left open.
+
+F43 SAID FOUR FILES REPEAT THE FALSE CONSUMER CLAIM. THREE DO. I listed
+`packages/zero-migrate/src/embedded-recorder.ts:4` among them. Reading it, that file
+says the OPPOSITE of what I recorded - it correctly names its real consumers:
+
+    // This module is compiled by `tsup` into ONE self-contained ESM artifact
+    // (`dist/embedded-recorder.js`) exposing the FULL recorder surface. The SDK's
+    // recorder-internal tests import it directly
+    // (`tests/{ops,sequences-exclusion,column-facets-lockstep}.test.ts`)
+
+The five genuine sites were `tests/ops.test.ts:47`,
+`tests/column-facets-lockstep.test.ts:8` and `:30`, and
+`tests/sequences-exclusion.test.ts:12` - three files, five occurrences, all now
+saying which suite imports the bundle rather than inventing an engine that reads it.
+The `column-facets-lockstep.test.ts:30` replacement also states what the oracle does
+NOT prove, since "artifact-identity" is easy to read as "the engine consumes this".
+
+I FOUND THE WRONG FILE BY GREPPING FOR THE PHRASE AND THEN TRUSTING MY OWN EARLIER
+NOTE FOR THE FIFTH. The note was the enumeration source, and it was wrong.
+
+THE SECOND ERROR IS LARGER. Opening `embedded-recorder.ts` to check the first one
+surfaced a phase tag on its line 1 - `(DSL redesign S0.5)` - which the schedule-tag
+sweep of `#10` and `#69` should have caught and did not. An over-counting grep for
+the `S<n>.<n>` form finds SEVEN surviving sites:
+
+    crates/zero-migrate/src/model/dialect_table.rs:9,10       (GENERATED)
+    packages/zero-migrate/src/generated/dialect-table.ts:11   (GENERATED)
+    packages/zero-migrate/tsup.config.ts:27
+    packages/zero-migrate/src/embedded-recorder.ts:1,23
+    packages/zero-migrate/src/ops.ts:427
+
+THE SWEEP ENUMERATED A TAG VOCABULARY, AND A FORM OUTSIDE THAT VOCABULARY WAS
+INVISIBLE HOWEVER THOROUGH THE SWEEP WAS OVER THE FORMS IT KNEW. Same axis as every
+other detector in this log; the enumeration source here was my own idea of what a
+schedule tag looks like.
+
+THEY ARE NOT FIXED IN THIS COMMIT, AND THE REASON IS WORTH RECORDING. Two of the
+seven are in files headed `GENERATED FILE - do not edit by hand`, both derived from
+`crates/zero-migrate/dialect-support.toml`, which carries the tags at its own lines
+2, 17, 21, 29 and 30. Editing the outputs would be overwritten on the next
+`pnpm --filter zero-migrate gen:dialect-table`, and
+`crates/zero-migrate/tests/dialect_table_faithfulness.rs` asserts output matches
+sidecar - so a source edit without regeneration turns that test red, which is the
+safety property working rather than an obstacle. That is a regenerate-and-verify
+change and belongs in its own commit.
+
+AND THOSE LINES CARRY A SECOND, NON-COSMETIC DEFECT. The sidecar says at :29-30
+"S0.1 is ADDITIVE - no consumer reads the table yet (that is S0.2)". VERIFIED FALSE
+for Rust: `crates/zero-migrate/src/model/op_support.rs:38` calls
+`crate::model::dialect_table::lookup(kind, variant)` in engine source, not a test.
+VERIFIED STILL TRUE for TypeScript, with an over-counting grep returning zero: no
+file in the repo outside the generated one references `generated/dialect-table`,
+`DIALECT_TABLE` or `dialectTable` on that side. One sentence covering both sides is
+now half wrong, so the replacement has to speak about each separately. Recorded on
+`#70` so the tag and the false claim get fixed in one pass rather than the lines
+being touched twice.
+
+Package suite unchanged at 221 tests / 220 pass / 0 fail / 1 skip.
