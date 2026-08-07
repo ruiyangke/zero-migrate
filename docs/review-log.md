@@ -3424,3 +3424,72 @@ plausible-looking pair of numbers for a corpus with a real problem, and every si
 one of them was wrong. The only thing that separated it from a correct detector was
 planting a byte I already knew the answer for. A GATE'S FIRST TEST IS NOT THE TREE IT
 GUARDS - IT IS AN INPUT WHOSE ANSWER YOU FIXED IN ADVANCE.
+
+### F55 - the cost I priced into #81 was not a cost, and three separate things say so
+
+I briefed #81 with an objection I was confident in: stamping an ownership probe on an
+unguarded `createIndex` would make one case WORSE. A MySQL-authored history replayed on
+PostgreSQL degrades silently today but DEPLOYS; with the probe it would wedge mid-batch,
+because guard verdicts are evaluated in the second pass after earlier migrations have
+committed, and the remedy - renaming the index - changes checksums the applied prefix
+refuses. I offered three answers and said plainly that shipping NEITHER was a real one.
+
+Every load-bearing clause of that objection is false, and each is false for its own
+reason:
+
+  1. THE REMEDY CHANGES NO CHECKSUM. `existence_guard` is DELIBERATELY EXCLUDED from
+     `ChecksumInput` / `Checksum::of` (`crates/zero-migrate-ir/src/migration.rs:691-699`,
+     which says so in its own words), and the IR-path anchor `Checksum::of_ir` folds the
+     OP LIST - and the op is unguarded, so it is unchanged. Stamping a probe moves no
+     checksum anywhere.
+
+  2. THE FAILING MIGRATION IS NOT IN THE APPLIED PREFIX. A `FailDrift` rolls back and
+     writes no journal row (`postgres/session.rs:454-465`), and on the non-transactional
+     path returns before `record_started` (`:818-826`). `compare_applied_to_set` reads
+     only `Phase::Completed` (`drift.rs:189`). So the refused migration stays pending and
+     is freely editable. The host test asserts exactly this from the server:
+     `after.length === before.length`.
+
+  3. THE HOIST WOULD NOT HAVE FIXED THE CASE I INVENTED IT FOR. A pre-flight catalog read
+     happens BEFORE the batch. A history replayed against a FRESH PostgreSQL sees an
+     EMPTY catalog, finds no collision, passes, and still fails later when a migration
+     collides with an index an earlier migration in the same run created. The mitigation
+     was blind to its own motivating scenario.
+
+And a fourth, which kills the repair: making the pre-flight batch-aware means folding
+each pending migration's index claims, which is blind to an unguarded `dropIndex` (it
+carries no probe, `lower.rs:4600`). A batch that drops `idx_shared` from A and recreates
+it on B is LEGAL and would be FALSELY REFUSED. The mitigation for a silent skip would
+have introduced a loud wrong answer.
+
+WHAT I ACTUALLY GOT WRONG IS NARROWER AND WORSE THAN "I WAS MISTAKEN ABOUT CHECKSUMS".
+I reasoned about the interaction of four mechanisms - checksums, journaling, batch
+boundaries, the second pass - from how I remembered each one behaving, and every step
+was individually plausible. The chain was coherent. Coherence is what made it survive
+being written into a brief three times without my checking a single one of the four at
+its source. THE COST OF A WRONG PREMISE IS NOT THAT IT IS WRONG, IT IS THAT IT ARRIVES
+PRE-JUSTIFIED, and a justified premise is the one nobody re-reads.
+
+This is the fifth premise of mine to fail this session (#77 named the wrong dialect, #78
+asserted no fold rule diverges by dialect, #38 had an inverted objection, #83 called a
+deliberate mechanism an accident). The pattern across all five: none was a fact I
+misremembered in isolation. Each was an INFERENCE I made from facts, and the inference
+step is the one I never labelled as such when writing it down.
+
+The practical rule that follows, and it is cheap: WHEN A BRIEF ASSERTS THAT A CHANGE HAS
+A COST, THE COST CLAUSE NEEDS A FILE:LINE THE SAME WAY THE DEFECT CLAUSE DOES. I gave
+`lower.rs:4368` for the defect and gave nothing for the cost, and the cost is what the
+agent was being asked to weigh.
+
+Shipped as 8f13611: probe alone, no hoist. Workspace 2218 passed across 74 targets (from
+2212 - five new decider unit tests and one SQLite end-to-end arm), package 221/220/0/1
+unchanged, host 104 passed / 0 skipped (from 101 - the three arms of the new file), with
+ZERO_MIGRATE_TEST_PG_URL and ZERO_MIGRATE_MYSQL_URL both exported. The 0 skipped is the
+part worth stating: both live databases actually ran.
+
+TWO GAPS RECORDED RATHER THAN CLOSED, both filed. An unguarded `createTable` with inline
+`indexes` goes through the `CreateTable` arm and gets no probe, so the same silent skip
+survives there (#85 - and I have NOT confirmed that premise myself, which is the whole
+subject of this entry). And the MySQL arm of `Capability::SchemaWideIndexNames` still
+cannot be pinned end to end, because `existence_probe::decide` has exactly three call
+sites and none is MySQL (#79, verified here with a positive control).
