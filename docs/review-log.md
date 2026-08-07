@@ -1467,3 +1467,33 @@ family carries through the lower.
 One trap worth recording because it would silently undo the fix: a bounded
 `t.string({ length })` marked `caseSensitive: false` renders bare `TEXT` again
 (`declarative.rs:1266-1270`), and the refusal returns.
+
+### F24
+
+The fixture fix uncovered a third defect in the same family, and the reason it was
+hidden is the more useful half.
+
+`create_gadgets` indexes `sku`, an unbounded `t.text()` column, with no prefix
+length. MySQL refuses that outright, and the rule is already written down at
+`docs/dialects.md:230` and already recorded here as live and unfixed. It survived
+for two independent reasons stacked on top of each other. That fixture is applied
+only against PostgreSQL, so nothing exercised the MySQL verdict at all; and
+validation returns on the first rejected op, so even once MySQL was asked, the
+index at op_index 2 stayed behind the default at op_index 0 until that one was
+fixed. Two masks over one defect, and removing either alone would have left it.
+
+The instruction given to the agent was to leave `sku` as `t.text()`, on the
+reasoning that one bare TEXT column should stay to cover TEXT rendering. That
+reasoning was sound and the instruction was still wrong, because the column it
+named is indexed. The coverage argument survives intact through `label` in
+`create_widgets`, which is the fixture that actually runs on both dialects.
+
+The general shape, now seen three times today: a rule the engine enforces
+correctly, a fixture that predates it, and no gate that asks the question. The
+remedy is to ask it unconditionally rather than only where a suite happens to
+look, so the new lint validates every fixture against every dialect offline and
+collects all failures instead of stopping at the first.
+
+Still open, and inherited by the new lint: validation stops at the first rejected
+op within one fixture, so a fixture carrying several bad shapes reports one per
+dialect per run. The lint collects across fixtures, not within them.
