@@ -1690,3 +1690,47 @@ not stale. It is absent, and so is the runner.
 
 The header's Bun-versus-Node parity claim is the part to fix first regardless of
 what else happens: it describes a comparison nothing performs.
+
+### D11
+
+Two independent reviews and my own verification agree: delete the differential
+oracle, porting one assertion. The reasoning is worth keeping because the file
+looked like the most valuable thing in the host suite and was worth less than
+nothing.
+
+It was born broken. The codex review traced it across all reachable refs, reflogs
+and dangling commits: introduced on 2026-07-11 with a genuine native-PostgreSQL
+reference fixture, and at that moment the package's only test glob was
+`tests/*.test.ts`, which already excluded `tests/host/oracle.ts`. Roughly five hours
+later the commit that deleted the native recorder binary removed the counterparty it
+invoked. A later commit stripped the native reference arm and left the prose
+describing it. CI arrived afterwards and wired only `test:host`. So no tracked
+script or CI step ever invoked it, at any of its four historical paths.
+
+It cannot run under any runtime. Verified by startup probe rather than by reading:
+plain Node fails on `./policy.js`, since Node does not remap it to the TypeScript
+source; Node with tsx gets past that and selects a `.mjs` fixture that does not
+exist and that no script generates; Bun imports the TypeScript fixture and then
+fails on the missing `target/debug/zero-migrate-js`, a binary that never existed in
+this repository's history.
+
+Everything it asserted is covered more strictly elsewhere, with one exception.
+`e2e-pg.test.ts` asserts exact step names, declared order, strictly increasing
+`event_seq` compared as `BigInt`, one shared anchor AND that the anchor is a 64-hex
+digest, against the oracle's non-empty-name and set-size-of-one. `driver-pg.test.ts`
+covers the poisoned-parser protection categorically better and, unlike the oracle,
+restores the poison afterwards. The exception is `status()` against a freshly created
+schema with no journal at all - the first call a new user makes on a cold database -
+which nothing else exercises. That one assertion moves; the file goes.
+
+The reason not to keep it as documentation of intent: its presence made an unguarded
+gap look guarded. There is no second recorder implementation, so cross-implementation
+authoring parity is genuinely unchecked, and a 340-line harness claiming to check it
+is worse than an honest absence. That gap is now tracked on its own terms.
+
+One assertion inside it was vacuous rather than merely unrun. Its exact-integer
+check read the journal through the ordinary admin client after the global parser had
+been poisoned, so raw text from that poisoned parser satisfied it, and a small
+JavaScript number would satisfy `String(number)` too. It never established what it
+claimed. Whether the surviving equivalent shares that hole is being checked as part
+of the removal, and matters more than the deletion does.
