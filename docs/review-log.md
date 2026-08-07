@@ -4474,3 +4474,60 @@ NOT TESTED, and the gap is specific: only ONE shape of partial application, wher
 `CREATE TABLE` committed. An `ALTER` that half-changed a column the lowering reads to build
 its plan is a different shape, and a guarded op is exactly where the projection consults live
 state. I would not generalise from two arms to "re-lowering is always stable".
+
+## F72 - The reword shipped, and the three docs it did not touch now understate the repair (#98 Part 1)
+
+F70 split #98 into a reword that ships independently and a verb gated on a measurement; F71
+ran the measurement and unblocked the verb. This is the reword.
+
+WHAT CHANGED. The MySQL inflight refusal now names two repairs: the reachable
+`DELETE FROM <meta>.schema_migrations_inflight WHERE version = '<v>'`, printed with the
+project's real meta database and version substituted, and `recover_inflight_ddl` as the
+Rust-host alternative with what it adds stated (marker-identity check, immutable audit row).
+Both carry the sentence that matters most: neither route inspects the database, so recovery
+records the operator's assertion rather than verifying it. `ChecksumDrift` gets the same
+pointer because it returns BEFORE the inflight branch and named neither the marker nor a
+repair. `docs/troubleshooting.md` and `docs/operations.md` stop forbidding the reachable
+action by separating the mutable marker table from the append-only events table.
+
+VERIFIED BY ME, not taken from the agent:
+  - The modified existing test is PURELY ADDITIVE. All four original conjuncts survive
+    (`inflight`, `inspect`, `recover_inflight_ddl`, the version) and three were added. The
+    only `-` line is a conjunct moving position.
+  - THE RED IS REAL WITHOUT REVERTING ANYTHING. `git show HEAD:...session.rs` contains
+    "recovery does NOT verify schema shape" 0 times and "schema_migrations_inflight WHERE
+    version" 0 times, while containing `recover_inflight_ddl` once - so the kept conjunct
+    passes on the old text and the two new ones cannot. That is the assertion's strength
+    proven by construction rather than by watching it fail.
+  - THE PRINTED DATABASE NAME IS THE RIGHT ONE. The message interpolates
+    `quote_ident_mysql(&cfg.pg.meta_schema)`, and `cfg.pg.meta_schema` is the same field
+    `journal_sql.rs:85` uses to build the meta database and `:200`/`:250`/`:300` pass as the
+    schema parameter. A confidently wrong DELETE would have been worse than the old message.
+  - `quote_ident_mysql` rejects only empty and NUL-bearing identifiers, so the `?` on the
+    error path cannot realistically mask the refusal.
+Gates run by me with both DB URLs exported: fmt 0, clippy 0, workspace 74 targets / 2227
+passed / 0 failed / 0 ignored. 61 test files. No count moved, because the agent extended
+`crashed_ddl_is_not_blindly_replayed` rather than adding a test.
+
+THE AGENT TOUCHED ONE SITE BEYOND ITS BRIEF AND WAS RIGHT TO. `docs/operations.md:456-487`
+sits 150 lines above the checklist it was asked to fix and said "A Rust host resolves it with
+`MysqlBackend::recover_inflight_ddl`" as though that were the only resolution. Left alone,
+the file would have contradicted itself after the fix. It flagged the excursion rather than
+burying it, which is the behaviour I want - a brief's line list is a starting set, not a
+fence, and the test of an excursion is whether it was declared.
+
+WHAT IS NOW INCONSISTENT, and it is the honest cost of a scoped fix: three further docs carry
+the Rust-host-only framing and were deliberately left - `docs/dialects.md:370-378`,
+`docs/security-model.md:296-302`, `docs/embedding.md:145`. They now UNDERSTATE the repair
+relative to the two files that were corrected. A reader who lands on dialects.md still
+believes the only route is an API they cannot reach. That is a smaller defect than the one
+just fixed and it is the same defect, so it should not sit long.
+
+ALSO UNTOUCHED: `RollbackError::ChecksumDrift` (executor.rs:1943) carries the identical
+original message text. The rollback path has no inflight-marker involvement, so the pointer
+would be wrong there - but the two variants having the same words and different correctness
+is the kind of thing that reads as an oversight later.
+
+NOT MEASURED: the printed DELETE was never executed against a live MySQL to confirm the
+privilege claim. That rests on `clear_inflight` (journal_sql.rs:671-683) issuing the same
+statement on every successful apply, which is a read, not a run.
