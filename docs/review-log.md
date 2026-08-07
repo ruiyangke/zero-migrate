@@ -4422,3 +4422,55 @@ experiment that makes one of them wrong.
 ALSO CORRECTED: both agents caught that my ticket listed 11 addon exports when there are 12
 - I omitted `irVersion`. It does not change the reachability conclusion, and I would rather
 record the miscount than quietly fix it, because I had presented the list as exhaustive.
+
+## F71 - The experiment ran and refuted the objection it was built to test (#98)
+
+F70 gated the recovery verb on one measurement neither agent had run: a CLI verb can only
+obtain its `&Migration` by RE-LOWERING the authored files, and Node lowering projects pending
+ops onto the LIVE snapshot (zero-migrate-node/src/lower.rs:397-428). If a partially applied
+DDL alters that snapshot, the re-lowered checksum could diverge and the shipped verb would
+fail `MarkerMismatch`.
+
+THE SECOND APPLY IS THE DISCRIMINATOR, because the two dead ends verified in F70 are its only
+outcomes: reaching the recovery message means the checksum REPRODUCED; reaching
+`ApplyError::ChecksumDrift` (executor.rs:1048-1056, which runs FIRST) means it DIVERGED.
+
+Two arms, because the easy case proves nothing about the hard one. Both against live MySQL 8
+through the real path, `notes` seeded out of band:
+
+  SIMPLE - one guarded createTable over the existing table. The failed CREATE changes
+           nothing, so the catalog at re-lower time is identical.
+      FIRST  -> Table 'notes' already exists
+      MARKER -> checksum adcccef52eb4145738849c957b4ce8663f39de0004ddbfbdfbed73cb36af886c
+      LIVE   -> [notes]
+      SECOND -> "has an inflight marker from an interrupted auto-committing DDL apply ..."
+
+  PARTIAL - two ops in ONE migration. `fresh` does not exist so op 1 SUCCEEDS and
+            auto-commits; `notes` does exist so op 2 fails. The catalog HAS changed when the
+            re-lower happens. This is the case the objection is about.
+      FIRST  -> Table 'notes' already exists
+      MARKER -> checksum ae213b13d82f11e1adebd5dc6d01740c9cdd9d2f13c9daac7fcdf025bfd487bc
+      LIVE   -> [fresh, notes]          <- the control: the schema really did mutate
+      SECOND -> "has an inflight marker from an interrupted auto-committing DDL apply ..."
+
+BOTH REACH THE RECOVERY MESSAGE. The re-lower reproduces the marker's checksum even after a
+DDL statement committed and changed the catalog. THE OBJECTION DOES NOT HOLD for this shape,
+and the verb is obtainable.
+
+THE `LIVE TABLES` LINE IS THE WHOLE EXPERIMENT. Without it the partial arm is
+indistinguishable from the simple one - a migration refused before any DDL would produce the
+identical transcript and I would have recorded a two-arm confirmation that was really one arm
+run twice. I added the line only because the previous SQLite rig taught me that the seed
+method decides the answer, and it is the difference between a measurement and a coincidence.
+
+WHAT THIS SETTLES AND WHAT IT DOES NOT. It settles the point that was actually in dispute
+between the two opinions: codex's position that the verb is obtainable survives, and the
+soundness objection that would have blocked it does not. It does NOT settle whether the verb
+should ship, because every other finding stands unchanged - recovery performs no live-schema
+verification, both worse-cases converge on a green journal row over a wrong-shaped table, and
+the reword is required either way.
+
+NOT TESTED, and the gap is specific: only ONE shape of partial application, where a preceding
+`CREATE TABLE` committed. An `ALTER` that half-changed a column the lowering reads to build
+its plan is a different shape, and a guarded op is exactly where the projection consults live
+state. I would not generalise from two arms to "re-lowering is always stable".
