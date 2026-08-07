@@ -830,6 +830,61 @@ Stripping injects from the guard's policy was rejected: the same `injects_for`
 feeds the shape- and primary-key-immutability rules, so a strip would also let a
 later migration drop `deleted_at` or the pinned key.
 
+### D5 - Do not narrow the uuid predicate; close the API gap first, then prove from the catalog
+
+Three independent reviews of F18. They disagreed on the fix and agreed on the two
+things not to do, which is the useful part.
+
+Rejected outright: dropping the `ColType::Uuid` arm from
+`reference_is_format_bearing`. It fixes one type and leaves the class - a
+consumer skipping already-applied files still breaks the moment any migration
+authors a TypeID or ULID foreign key. Worse, it is not even sufficient for uuid:
+checking catalog evidence in `validate_typed_reference_catalogs` cannot protect
+table-level constraints, which run through a separate loop, so table-level
+`uuid -> TypeID` on MySQL and SQLite and `uuid -> text` on SQLite would still be
+admitted.
+
+Also rejected: removing the `columns.len() <= 1` skip at `lower.rs:3285-3287` as
+a standalone change. It cannot fix the reported failure, because the model gate
+at `lower.rs:2994` runs before the catalog gate at `:3003`. And it is not
+backward compatible: `LiveSchema::from_tables` deliberately carries names with no
+snapshots, so a name-only consumer would start failing. The two reviews disagreed
+on whether the in-repo suite would catch that - one found the fixtures survive,
+the other named `ir_author_render_parity.rs` and `not_valid_validate_constraint.rs`
+as breaking. Unresolved, and not worth resolving, since neither concludes it
+should ship alone. If it is ever done it needs its own commit and a deliberate
+decision about name-only `LiveSchema` users.
+
+What ships, in this order.
+
+First, the API gap, because it is small, additive, and changes no gate.
+`LogicalColumnContract` has a private `candidate_key_sources` field and no
+constructor, so a downstream crate cannot build one. `advance_logical_columns` is
+the only door and it forces full strict revalidation as the price of
+accumulation. That is why the consumer's first attempt silently lost contracts
+for skipped files. Add a lenient sibling that accumulates under
+`DeferToLower`. It must be built on `validate_per_row_op`, not on
+`collect_logical_declarations_op`: the collector handles eight op kinds and would
+lose the candidate-key lifecycle maintained by the `CreateIndex`, `DropIndex`,
+`AddConstraint`, `DropConstraint` and `AlterPrimaryKey` arms, so a column made
+referenceable by a later UNIQUE index would be wrongly rejected.
+
+Second, the catalog proof, which is what the consumer actually asked for. Keep
+the predicate; build a proof set before the missing-contract rejection. Native
+`uuid` on PostgreSQL, an exact engine UUID format check on MySQL and SQLite, and
+exact equality against the already-recovered `ColumnSnapshot.value_format` for
+TypeID and ULID. Share one proof helper between the column-reference and
+table-constraint paths, and derive the expected format from the authored column
+rather than comparing two introspection-only booleans. A chained target that
+deliberately omits its own check stays unprovable and stays rejected.
+
+If that adds a field to `ColumnSnapshot` it must be excluded from `PartialEq`,
+`Hash`, and the drift attribute diff. `mysql_default_generated` and
+`mysql_text_storage` are the precedent. Made comparable it would produce
+permanent phantom drift on every uuid column, and on SQLite a column-attribute
+difference is reconciled by the table rebuild, so the cost is a rebuild of every
+uuid-bearing table rather than a harmless diff.
+
 ## Findings that did NOT survive verification
 
 Recording these so nobody re-chases them.
