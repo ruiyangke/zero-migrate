@@ -1435,3 +1435,35 @@ it suppresses the gates that would have reported it stale.
 
 The fixture is shared by four suites, so bounding the column changes PostgreSQL
 rendering too. Left open rather than fixed in passing.
+
+### D10
+
+Two independent reviews and my own reading agree on bounding the fixture column:
+`status: t.string({ length: 32 }).notNull().default("new")`. The reasoning that
+settled it was not about MySQL at all.
+
+`README.md:55` already writes `status: t.string({ length: 32 })` for exactly this
+kind of column, and `docs/dialects.md:216-218` states the rule plainly: bounded
+`t.string({ length })` for a value you index, filter or key on, `t.text()` for
+unbounded prose. The fixture contradicted the project's own documented guidance.
+So this is not a workaround for a dialect quirk, it is the authoring the docs
+already prescribe, and the MySQL refusal is what made anyone look.
+
+The premise challenge came back negative, twice, and the check is better than the
+objection assumed. MySQL 8.0.13 and later accept a default on TEXT, BLOB, JSON and
+GEOMETRY only in expression form - `DEFAULT ('abc')` is accepted where
+`DEFAULT 'abc'` is refused, even though both carry a literal. `validate.rs:6520`
+exempts any rendered default beginning with `(`, and the classifier keys on
+rendered storage rather than the authored type name, so a `t.text()` that renders
+`VARCHAR(191)` through a value format takes a literal default happily. The
+validation is correctly scoped. The fixture was wrong.
+
+Rejected alternatives. A MySQL-only fixture would cost the cross-dialect claim the
+shared artifact exists to make, and the two copies could drift in column set or op
+order while four suites kept asserting the same names. Dropping the default would
+turn the suite green while removing the only create-time default this fixture
+family carries through the lower.
+
+One trap worth recording because it would silently undo the fix: a bounded
+`t.string({ length })` marked `caseSensitive: false` renders bare `TEXT` again
+(`declarative.rs:1266-1270`), and the refusal returns.
