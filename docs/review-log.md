@@ -2044,3 +2044,77 @@ Two are not comments at all and so are a code change rather than a comment
 change: `render/declarative.rs:6549` and `render/lower.rs:7138` both raise the
 error text "renameColumn is not live-rendered for MySQL in render-only Phase 1",
 which puts a schedule reference in front of a user.
+
+### F35 - the differential oracle was not missing, it was disconnected
+
+The premise behind this item was wrong in the way that mattered. I recorded that
+`buildEnvelope` has one implementation and no independent producer to check it
+against, so a self-consistent recorder bug is invisible. The first half is right.
+The second is not: an independently-produced golden corpus exists, and its
+provenance is certified.
+
+It is `crates/zero-migrate/tests/op_fixtures/`, 26 `<stem>.mig.js` inputs paired
+with 26 `<stem>.golden.json` envelopes - verified by listing the directory. The
+goldens were produced by the Rust side, not by the TypeScript recorder, so they
+are a genuine second opinion rather than a self-portrait.
+
+The proof is a commit. `2726339` (2026-07-04) deleted the 3029-line V8 recorder
+`crates/zeroship-migrate/src/frontend/migrate_ops.js` and replaced it with the
+tsup build of `ops.ts`, and it re-blessed ZERO goldens - verified with
+`git show --name-only 2726339 | grep -c golden.json`, which returns 0.
+
+That only proves independence if the comparison was actually running at the time,
+so I checked. At `2726339` the corpus test `op_round_trip.rs` existed, was not
+touched by that commit, and carried NO cfg attribute at all - `git show
+2726339:crates/zeroship-migrate/tests/op_round_trip.rs | grep -n "cfg"` returns
+nothing, and the crate's feature block at that commit is only `default = []` and
+`standalone-cli = []`, with no `zsv8`. It was an ordinary integration test that
+ran under a plain `cargo test`. So the byte-comparison ran against the newly
+swapped recorder and passed without a single golden being re-blessed. The
+TypeScript recorder reproduced the independent V8 recorder exactly, and the
+goldens are a frozen snapshot of a comparison that passed.
+
+What was lost was the connection, not the oracle. `op_round_trip.rs` was deleted
+in `c07e98f` (2026-07-11), "move authoring and database drivers from V8 to
+N-API", because by then it was gated on the V8 feature that commit removed. The
+`oracle.ts` deleted earlier in this review was the second casualty of the same
+architectural move, not an isolated piece of rot.
+
+What remains today:
+
+- `UPDATE_CORPUS` appears nowhere in the tree, so there is no regeneration path.
+- The 26 `.mig.js` inputs are consumed by nothing. The only mention is a stale
+  comment at `crates/zero-migrate/tests/not_valid_validate_constraint.rs:222`.
+- `crates/zero-migrate/tests/op_support_matrix.rs:81,90` still reads the fixture
+  directory, but to enumerate op-kind coverage, not to compare against a
+  producer.
+- `packages/zero-migrate/tests/golden-parity.test.ts` is the only test comparing
+  the recorder to the goldens. It is live and green, but loads 6 of the 26
+  fixtures - `alter_primary_key`, `ddl_rename_table`, `fluent_ddl`, `fluent_dml`,
+  `pg_vendor`, `synchronize_identity` - and hand-transcribes the migration bodies
+  rather than importing the `.mig.js`, so the test's copy can drift from the
+  fixture it claims to mirror.
+
+The decay mechanism is the important part, and it is visible in that test's own
+header, which records re-blessing `fluent_ddl`'s `label` column from `string` to
+`text`. Every hand re-bless converts a fixture from independent to circular. The
+agent's count, which I did NOT recount, is 14 of 26 already re-blessed since the
+twin died. Left alone this reaches 26 of 26, at which point the corpus really does
+become the worthless self-portrait I assumed it already was.
+
+So the direction is to reconnect an oracle already paid for rather than build a
+new one, and NOT to restore an easy `UPDATE_CORPUS=1` affordance, since that
+affordance is precisely what converts the corpus into a mirror.
+
+Coverage figures from the agent, computed from the goldens and NOT recounted by
+me: 56 op kinds total, 34 compared against the recorder, 12 covered by a
+live-database result assertion, and 20 with neither.
+
+Provenance of this entry: I verified the corpus contents, the zero-golden commit,
+the absence of a cfg gate and of a `zsv8` feature at that commit, the absence of
+`UPDATE_CORPUS`, the unconsumed `.mig.js` inputs, and the six fixture stems, each
+with the command shown. I did not recount the 56/34/12 coverage figures or the
+14-of-26 re-bless count. A codex read-only job run on the same question
+independently reproduced the history - `op_round_trip.rs` at 261 lines, deleted
+in `c07e98f` - but I could not extract a clean final recommendation from its
+output, so this is a single opinion I checked rather than two reconciled.
