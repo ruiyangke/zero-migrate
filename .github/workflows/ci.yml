@@ -109,9 +109,13 @@ jobs:
         run: pnpm --filter zero-migrate-cli test:docs
 
   # ---------------------------------------------------------------------------
-  # napi: build the shipped release `.node` addon, then compile its generated
-  # schema artifact against the real authoring package (a single linux-x64
-  # target; the full cross-target matrix is a release concern).
+  # napi: build the shipped release `.node` addon, run the addon's own JS gates
+  # against it, then compile its generated schema artifact against the real
+  # authoring package (a single linux-x64 target; the full cross-target matrix is
+  # a release concern). A `cargo test -p zero-migrate-node` cannot stand in for the
+  # JS gates: linking a test binary against the Node ABI fails outside a `.node`
+  # (undefined `napi_*` symbols), which is why the Rust side is tested with
+  # `--no-default-features` in the rust job.
   # ---------------------------------------------------------------------------
   napi:
     name: napi (release .node build)
@@ -137,6 +141,12 @@ jobs:
         run: pnpm --filter zero-migrate build
       - name: build release addon
         run: pnpm --filter zero-migrate-node build
+      # The addon's own JS gates: the only tests that drive the real `.node` over a
+      # canned host driver (mock apply, plan-aware status, artifact generation).
+      # Three short node processes against the addon this job just built, so they
+      # add ~2s of wall clock and no extra build.
+      - name: addon JS gates (real .node, canned host driver)
+        run: pnpm --filter zero-migrate-node test
       - name: typecheck generated schema artifact
         run: pnpm --filter zero-migrate-node test:codegen
 
