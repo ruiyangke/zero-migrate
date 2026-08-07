@@ -3735,3 +3735,69 @@ CORROBORATION I THEN TREATED AS EVIDENCE.
 The thing that settled it was none of the reading: it was running the op against a live
 server and reading the catalog back. Third time today that a premise survived every review
 and died on first contact with a database.
+
+### F60 - both opinions agreed, and the premise they agreed against was mine
+
+#91: on PostgreSQL a partition child is invisible to `decide_table`, so
+`dropPartition({ifExists:true})` returns `SatisfiedNoop`, skips the DROP, journals the
+migration applied, and leaves the partition and its rows in place. The unguarded form drops
+correctly. THE GUARD DOES NOT WEAKEN THE DROP, IT CANCELS IT.
+
+I framed the decision around a cost that does not exist. I told both opinions that option
+(b) - a `GuardProbe::Partition` variant - "CHANGES A SERIALIZED WIRE SHAPE", citing
+`ir-envelope.schema.json` and the gen-artifact goldens, and pointed at `8f13611` as the
+precedent that made it expensive. VERIFIED BY ME after both came back:
+
+    GuardProbe in crates/zero-migrate/ir-envelope.schema.json   0
+    golden files carrying existence_guard/GuardProbe            0
+    positive control, GuardProbe in zero-migrate-ir/src/probe.rs 3
+
+`existence_guard` is excluded from `ChecksumInput` by design (`migration.rs:691`), the IR
+checksum covers the unchanged source op list, and migrations are stored as TypeScript
+SOURCE and re-lowered every run - the probe is a transient in-memory artifact. The
+`8f13611` precedent does not transfer either: that added a FIELD to an existing variant,
+which does move that variant's bytes unless skipped. A NEW VARIANT HAS NO EXISTING BYTES TO
+PRESERVE.
+
+BOTH RECOMMENDED (b), and the value was in where they DIVERGED rather than where they
+agreed:
+
+  - Codex refined the wire answer rather than repeating it: the checksum cost is zero, but
+    a new variant DOES change the serialized lowered-`Migration` wire, so an old reader
+    would reject an unknown tag - and no `serde(default)` can fix a discriminant. Opus
+    reached the same residual risk from a different direction (`bridge.rs:978-994` exposes
+    a napi entry deserializing `Migration` JSON supplied by JS). Same hazard, two routes,
+    neither of which was my framing.
+  - Codex CORRECTED Opus on the `expect_columns: []` question. Opus said the probe could
+    never return `SatisfiedNoop` "by any route"; codex found the exception - a ZERO-COLUMN
+    `TableSnapshot` falls through to `SatisfiedNoop` at `existence_probe.rs:351`. The
+    absolute was too strong.
+  - Codex found that option (a) needs more than the one edit it looks like: changing
+    `present` at `:297` is insufficient because `IfNotExists` independently calls
+    `live.tables.get(table)` at `:307`.
+
+AND THE MIRROR BUG I RELAYED FROM #88 WAS REFUTED. `createPartition ifNotExists` does NOT
+raise `relation "events_0" already exists`; the plan is refused before any DDL by the
+static projection, identically with and without the guard.
+
+THE BEST ARGUMENT AGAINST MY OWN PREFERRED FIX came from the mandatory "where does your
+recommendation make things worse" question, which has now paid for itself every time I have
+asked it. A team hit this months ago: production ran the guarded drop, it journaled green,
+the partition quietly survived with its rows, and nobody noticed - a silent no-op only ever
+leaves you with MORE data than you asked for. Ship the fix, and the next environment
+rebuilt from that same authored history - a fresh staging DB, a new region, a DR restore, a
+per-PR database - replays the identical migration text against the corrected engine and
+ACTUALLY DROPS IT. Production and staging diverge in the DESTRUCTIVE direction, from
+migration text that reads as already-proven, with nothing in the plan output to warn
+anyone. The current bug is a silent no-op; the fix converts it into a silent, correct,
+irreversible DROP delivered to the environment least likely to be watched.
+
+That is not an argument against fixing it. It is an argument that the fix must ANNOUNCE
+ITSELF - a plan-time note, or routing the newly-live drop through the existing destructive
+approval path - and that belongs in the same change rather than a follow-up.
+
+Recorded separately as #92, and larger than #91: the pending-schema projection ignores
+existence guards entirely, so across the four cells the probe ONLY EVER EXECUTES IN THE
+CELL WHERE IT IS WRONG, and in the two cells the guard exists for the plan is refused
+before the probe runs. Not partition-specific - `dropTable ifExists` on a table no
+migration created is refused with `fold: table 'widget' does not exist`.
