@@ -1497,3 +1497,40 @@ collects all failures instead of stopping at the first.
 Still open, and inherited by the new lint: validation stops at the first rejected
 op within one fixture, so a fixture carrying several bad shapes reports one per
 dialect per run. The lint collects across fixtures, not within them.
+
+### F25
+
+The reported duplicate foreign key was in the producer, not the fold, and my own
+localisation pointed at the wrong side of the seam. Worth recording because the
+error message is what misled me.
+
+`gen-types: fold the schema source failed` reads as "the source I just rendered",
+so I traced the renderer and its lifted column references. It means "the source you
+handed me". The fold runs over the OPS, before any TypeScript exists, so nothing in
+the rendering path was involved.
+
+The actual shape: `descriptors_to_create_ops` emitted two carriers of one key for a
+`ref` field - the `ColType::Ref` brand, which the shared snapshot builder already
+materializes into the derived `<table>_<column>_fkey`, plus a table-level `Fk`
+constraint given the same derived name. The fold then met the same name twice and
+failed closed.
+
+Three independent facts say the producer was wrong rather than the fold being
+strict. The recorder emits the brand alone. The lower pushes table-level keys with
+no duplicate check, so accepting the pair would have rendered `CREATE TABLE` with
+the constraint written twice - the fold would have been fail-open relative to apply.
+And the IR validator refuses a `ColType::Ref` as the local side of a table-level
+key, so those ops could never have been applied anyway.
+
+The reason it survived is the sixth taxonomy member exactly: the addon's gate for
+this verb runs, passes, and asserts byte-identical output, but builds its descriptor
+with no `references` field, so the branch was never entered. The test that pinned
+the producer's behaviour asserted the table-level constraint IS emitted - it
+encoded the defect as the contract, which is the other half of why nothing caught
+it.
+
+Left open, found on the way: `logical_reference_types_match` compares `ColType`s
+exactly except for the `String`/`Text` pair, so a `Ref` local against a `text` `id`
+never matches even though both lower to `text`. Harmless for gen-types, which does
+not validate, but it means no `ref`-branded column can carry a table-level key at
+all. Whether `Ref` should join that equivalence class is undecided.
