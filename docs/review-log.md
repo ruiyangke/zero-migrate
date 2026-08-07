@@ -1112,3 +1112,46 @@ authoring the same short index name still collide, and the engine emits `CREATE
 INDEX ... IF NOT EXISTS`, so the second create is the same silent no-op. That
 needs a schema-wide uniqueness check over the union of index names and
 constraint-backed index names, and it is not the same fix.
+
+### D6 - Bound authored identifiers on the create side everywhere, and on the drop side only where it is safe
+
+Two reviews of F19 agreed on the create side and split on the drop side, and the
+split is the useful part.
+
+Both agree: refuse an over-long authored identifier at validate, and extend it
+past the standalone `createIndex` that `f501f1e` bounded to every authored name
+that reaches DDL - `AddConstraint`, and the `constraints` and `indexes` authored
+inline on `createTable`. The bound is 63 bytes on every dialect, which is what the
+engine's two existing identifier checks already do.
+
+They split on `dropIndex`, `dropConstraint` and `validateConstraint`, and the
+objection I raised has a dialect-shaped answer I had not seen. A universal 63-byte
+bound on the drop side would strand valid existing objects on MySQL, whose limit is
+64 CHARACTERS rather than bytes, and on SQLite, which has no identifier cap at all.
+It does NOT strand anything on PostgreSQL, because a PostgreSQL object that was
+truncated has a physical name of at most 63 bytes by definition, so the bound can
+never refuse a name that could have dropped it. The remedy for a legacy
+PostgreSQL object is to name it as the catalog holds it.
+
+So: bound the create side on every dialect, bound the drop side on PostgreSQL
+only, and leave MySQL and SQLite reference names to their own limits.
+
+Two corrections to the write-up in F19. MySQL's limit is 64 characters, not 64
+bytes, so the boundary case is character-shaped rather than byte-shaped. And
+`diff_snapshots` is publicly exported, so "no production caller" is true of this
+repo and not of a downstream consumer that calls it directly.
+
+One thing that got worse on inspection rather than better. F19 described the
+unique-index approval gate degrading to trust the author's hint. For a GUARDED
+drop that produces the skip already described. For an UNGUARDED PostgreSQL drop,
+the server's own truncation resolves the name and the unique index is actually
+dropped, without the approval the gate exists to require. That is not a skipped
+operation, it is an unapproved destructive one.
+
+`validateConstraint` shares the probe defect with the two drops and belongs in the
+same change.
+
+The schema-wide namespace collision stays separate and is higher priority than it
+first looked: it affects valid short names, backing indexes and other relation
+kinds, and it is a relation-namespace problem rather than anything to do with
+truncation.
