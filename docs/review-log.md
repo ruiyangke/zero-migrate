@@ -1340,3 +1340,54 @@ artifact can be trusted while the artifact can silently be months old.
 
 A default set on a pre-existing column carries no type in its own op, so offline
 validation cannot classify it. That case stays uncovered.
+
+### F21
+
+Connection lifecycle across the test corpus, reviewed independently by Codex
+(read-only) and Opus and reconciled here. The headline is a negative result: there
+is no connection leak. Every live-PostgreSQL test builds a function-local
+`PgDevSession` owning one pinned client (`tests/support/mod.rs:242-263`), and the
+locked `postgres` 0.19.14 closes the socket in `Client::Drop` on both a normal
+return and a panic unwind. Nothing accumulates across a serial run.
+
+The bound is comfortable. Cargo runs integration binaries one at a time, so the
+ceiling is the largest binary: `pg_scenarios.rs`, 30 live tests plus one that opens
+a second session, giving `min(T + 1, 31)` for `T` test threads. Against a nominal
+`max_connections=100` that leaves 69 free. Even a runner that overlapped every
+live-PG binary at once reaches 51, leaving 49. Connection exhaustion is not a
+credible failure mode here and needs no semaphore.
+
+What the review found instead was a schema leak, tracked separately. 44 of the 48
+tests that create a persistent schema clean up only at the bottom of the happy
+path, so any assertion failure strands the schema. The four that guard an ordinary
+`Err` still do not guard a panic. Because schema names embed PID and time, no later
+run reclaims an earlier run's residue, and the cleanup helpers discard teardown
+failures with `let _ =`, so the leak is silent at both ends.
+
+### F22
+
+A connect failure in the CLI host suites is reported as a skip, and the default DSN
+guarantees it fires.
+
+`tests/host/e2e-pg.test.ts:67-77` catches every connect error with a bare `catch`
+and returns null, which the call site at :131-134 turns into
+`tc.skip("test Postgres unreachable ...")`. An authentication failure, a missing
+database, a TLS error and a driver regression are therefore indistinguishable from
+a contributor who has no database. The same shape repeats at driver-pg.test.ts:260,
+:299, :340, authoring.test.ts:192, :268, and e2e-dml.test.ts:187.
+
+The default DSN makes this constant rather than theoretical. Five files and
+`oracle.ts:55` default to `postgres://postgres:zero_migrate@localhost:5440/...`,
+but `docker-compose.test.yml:19` publishes `127.0.0.1:5434` with
+`POSTGRES_PASSWORD: postgres` at :16, and the compose file's own header at :5
+documents the correct DSN. Port and password are both wrong. A contributor who
+starts the documented stack and runs the host suite without exporting
+`ZERO_MIGRATE_TEST_PG_URL` connects to nothing and watches every PostgreSQL host
+test skip green while the database is running.
+
+CI exports the URL, so this is a local-developer trap rather than a CI hole - the
+same shape as F19 one layer up, in TypeScript instead of Rust. The remedy is the
+one the Rust harness already settled on: an unset variable stays a skip, because
+breaking contributors without a database is not acceptable, but a DSN that is
+present and does not work is a failure, and `ZERO_MIGRATE_REQUIRE_LIVE_DB` turns
+the skip into a failure where a database is guaranteed.
