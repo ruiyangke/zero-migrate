@@ -44,6 +44,10 @@ jobs:
     env:
       RUSTFLAGS: "-D warnings"
       ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
+      # This job exists to run the live-PostgreSQL suites, so a skipped one is a
+      # broken service rather than a contributor without a database. Fail instead
+      # of reporting the same pass count a real run reports.
+      ZERO_MIGRATE_REQUIRE_LIVE_DB: "1"
 
     steps:
       - uses: actions/checkout@v4
