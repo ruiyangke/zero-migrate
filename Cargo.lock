@@ -2362,11 +2362,13 @@ name = "zero-migrate-node"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "hex",
  "napi",
  "napi-build",
  "napi-derive",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "zero-migrate",
 ]
 
