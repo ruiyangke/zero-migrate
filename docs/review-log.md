@@ -6267,3 +6267,60 @@ The positive control in the next test remains worth keeping - it pins that armin
 end to end. But a negative test that only means something when read alongside its neighbour is one
 deletion away from meaning nothing, and nothing in the file said the two were load-bearing for each
 other. Now the negative test stands on its own.
+
+## F104 - The test measured the machine it ran on, and only CI was honest about it
+
+`packages/zero-migrate-cli/tests/host/live-db-gate.test.ts` audits the live-database gate: it drives
+a real gated suite in a child process with a deliberately broken DSN and asserts the suite FAILS
+carrying the driver's own message, because a skip and a pass print the same exit code.
+
+The broken DSN was a literal, `postgres://postgres:definitely_wrong@127.0.0.1:5434/...`. Port 5434
+is what `docker-compose.test.yml` publishes locally. CI publishes Postgres on 5432
+(`.github/workflows/ci.yml:216`) and exports its own DSN at `:236`. So in CI nothing answered on
+5434, the child died on `connect ECONNREFUSED 127.0.0.1:5434` instead of on authentication, and the
+`/password authentication failed/` assertion failed. Measured across five runs, always the same
+single test, 116 of 117 passing:
+
+    31244310747  31196967953  31196208934  31195608352  31195106351
+    not ok - a configured DSN that cannot authenticate fails the suite and names the driver error
+
+Reproduced locally with control and failure differing in exactly one variable, whether anything
+listens on 5434:
+
+    5434 up     exit 0   9 passed  0 failed
+    5434 down   exit 1   8 passed  1 failed   same assertion text, same ECONNREFUSED as CI
+
+The fix derives the broken DSN from the DSN the run actually uses, changing only the password, and
+probes that base DSN first so the arm skips where there is no server to authenticate against and
+fails where one was configured and does not answer.
+
+### The rule this belongs to
+
+A hardcoded host and port in a test is an assertion about the machine, not about the code. This one
+had been true on every machine anyone ran it on and false on the only machine that mattered.
+
+The failure mode is worse than a plain wrong test, because of which direction it fails in. It was
+GREEN locally and RED only in CI, and that is the shape people learn to read as CI being flaky. The
+honest reading is the opposite: the local pass was the false one. It passed because a container
+happened to be up, and it would have gone red on a contributor who had not started Docker, for a
+reason having nothing to do with what the test is about.
+
+The general form: when a test's verdict depends on the environment, changing exactly one variable
+between the working DSN and the broken one is what makes the failure attributable. A literal changes
+host, port, user, database and password all at once, and then any of the five can be what failed.
+
+### A second hole, found only because the first was being fixed
+
+`assert.notEqual(run.status, 0)` PASSES when `status` is `null`, and `spawnSync` returns `null` when
+the child is killed, including on this file's own 120-second timeout. A child that never reached a
+verdict would have satisfied the check that the child failed. Closed with an explicit
+`typeof run.status === "number"` alongside it, plus an assertion that the output carries the gate's
+own configured-DSN verdict rather than any child error at all.
+
+### What was deliberately not changed
+
+`DEFAULT_PG_URL` still names 5434. It is the documented local compose fallback, CI always overrides
+it, and `ZERO_MIGRATE_REQUIRE_LIVE_DB` turns a deleted override into a failure rather than a silent
+fallback. Repointing it at 5432 would break the documented local setup and could aim the suite at an
+unrelated Postgres. The constant was never the defect; a test treating it as guaranteed-reachable
+was.
