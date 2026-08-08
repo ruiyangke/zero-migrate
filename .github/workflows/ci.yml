@@ -79,8 +79,16 @@ jobs:
         run: cargo test -p zero-migrate-node --no-default-features
       # Doc links rot silently: a reference that cannot be resolved still reads as
       # authoritative, and several had come to name items that no longer exist.
+      #
+      # --document-private-items because without it rustdoc never reads a private
+      # item's doc comment, so a broken link there cannot reach this gate at all.
+      # That blind spot was load-bearing rather than theoretical: 0 broken links
+      # inside the gate's own configuration and 27 outside it, and among the 27 was
+      # a link an earlier commit message had claimed to fix. Nothing is published
+      # from these crates - the release workflow ships the napi addon and the npm
+      # packages - so this widens what the gate SEES without changing any artifact.
       - name: cargo doc (no broken intra-doc links)
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
 

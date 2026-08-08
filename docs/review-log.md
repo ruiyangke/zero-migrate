@@ -7271,3 +7271,72 @@ Only PostgreSQL 18.4 was measured. Whether older majors classify the expression 
 dependency the same way is untested. The fix is conservative in the direction that matters: it never
 cascades more than `conkey` names. SQLite and MySQL refuse `Capability::ExclusionConstraint` before
 the snapshot, so neither leg exercises this.
+
+## F120 - Widening what the doc gate sees, and the premise I put in both briefs that was false
+
+The doc gate ran `cargo doc --workspace --no-deps` under
+`RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"`. Without `--document-private-items` rustdoc never
+reads a private item's doc comment, so a broken link there could not reach the gate. `70e15fb` had
+already shown that blind spot was load-bearing rather than theoretical - 0 broken links in the gate's
+configuration, 27 outside it - and fixed all 27, leaving the flag itself as a separate decision.
+
+Taken as a decision with two independent opinions, because it bundles four questions that do not have
+to be answered the same way.
+
+### The premise that was wrong
+
+Both briefs carried my framing that adopting the flag "changes the published artifact by adding
+private-item pages". One opinion accepted that and argued the cost was acceptable. The other checked
+it and found there is no published rustdoc artifact at all: no `cargo publish` step, no Pages, no doc
+upload in either workflow. `release.yml` publishes npm packages and the napi addon. The only readers
+of this HTML are contributors and agents running `cargo doc` locally.
+
+So the one real argument against the flag did not exist. This is the fourth time this session the
+objection built into my own question was itself the thing that was wrong, and the only reason it
+surfaced is that one of the two opinions verified the premise instead of answering the question.
+
+### What was predicted, and what measuring showed
+
+Both predicted the 61 `private_intra_doc_links` would PERSIST under the flag rather than resolve away,
+on the reasoning that the lint's predicate is the TARGET's visibility, not whether a page exists for
+it. One backed that by reading the pinned rustdoc binary's string table and finding both note
+wordings, including `this link resolves only because you passed --document-private-items, but will
+break without` - proof the flag selects the note, not whether the diagnostic fires.
+
+Measured here, after `cargo clean --doc`, counting by lint code from `--message-format json`:
+
+    rustdoc::private_intra_doc_links    61   (predicted 61)
+    rustdoc::redundant_explicit_links   46   (was 44 without the flag)
+    rustdoc::broken_intra_doc_links      0
+    gate exit                            0
+
+The 61 was right. The 46 was NOT 44, and one opinion had predicted exactly that at about 70%
+confidence: `redundant_explicit_links` has no visibility precondition, so newly-scanned private doc
+comments add to it. That is the whole reason the landing order matters. Fixing "the 44" before
+adopting the flag would have fixed 44 of 46 and left the gate red on the remaining two at the moment
+it was tightened.
+
+A count taken under one flag set is a count over that configuration, and the number to plan against
+is the one measured under the FINAL flags.
+
+### What this commit does and does not do
+
+Adopts the flag alone, deny list unchanged. It widens what the gate can see; it does not tighten what
+it rejects. Verified green before landing: `cargo doc --workspace --no-deps --document-private-items`
+under the existing `RUSTDOCFLAGS` exits 0.
+
+#113 REMAINS OPEN and its headline is untouched: the gate still exits 0 while printing 107 warnings,
+because the only denied lint still has zero occurrences. Landing this by itself is deliberate, so that
+if CI goes red later it is attributable to the lint change rather than to the visibility change.
+
+Remaining, in order: fix the 61 (not mechanical - each is make the target public, re-point at a public
+item that actually covers the claim, or demote to plain text with a stated reason), fix the 46, then
+flip to `-D warnings` in a gate-only commit, re-measuring immediately before because that step also
+picks up lints nobody has counted. `missing_docs` (266) is deliberately not in that sequence: it is
+allow-by-default, so `-D warnings` cannot enable it, and it is a documentation-coverage project rather
+than a link repair.
+
+### Not verified
+
+That CI's runner reproduces these counts. Measured locally on the pinned 1.97.1 toolchain, which is
+the pin CI consumes through `nix develop`, so the toolchain matches even though the host does not.
