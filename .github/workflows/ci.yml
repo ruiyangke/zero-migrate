@@ -118,8 +118,11 @@ jobs:
       # asserting the recorded ops match. That parity catches drift that changes
       # recorded output; this step additionally catches drift that does not, such
       # as a bundling, ordering, or comment-only change. It does NOT cover
-      # `dist/index.js`, `dist/internal/recorder.js`, or the `.map` sidecars,
-      # which stay ignored and are rebuilt per checkout.
+      # `dist/index.js`, `dist/internal/recorder.js`, or the `.map` sidecars, and
+      # nothing else needs to: `.gitignore` excludes all of `packages/zero-migrate/
+      # dist/*` except this one file, so there is no committed copy of them that
+      # could go stale. `embedded-recorder.js` is the sole tracked artifact in that
+      # directory, which is exactly why it is the sole thing gated here.
       #
       # Runs from the repo root, as every step in this workflow does (no
       # `working-directory` is set). A `git diff` pathspec issued from a
