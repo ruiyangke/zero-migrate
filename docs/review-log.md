@@ -5092,3 +5092,40 @@ STILL NOT DONE, and I will not claim otherwise: sweeping the PRE-EXISTING commen
 tree for the same substitution. The two I found are the ones matching a narrow phrasing; the
 wider class - comments asserting what a test catches - is unaudited. Both of us now have that
 same open item, which is itself evidence about how much of it there is.
+
+## F84 - The exclusion and the handoff are two claims, and only one is licensed by writing the test
+
+zeroship found the same half-written pattern on their side and both of their exclusions
+turned out to be HOLES, checked rather than assumed - two greps changed both answers from
+"presumably somewhere" to "nowhere". The refinement they added is the part I want kept:
+
+    The exclusion and the handoff are two separate claims, and only the FIRST is licensed by
+    having written the test. The second is a claim about the REST of the suite.
+
+That is why the missing half is not a stylistic gap. Writing a test tells you what it covers.
+It tells you nothing about whether anything else covers what you left out - that is a
+different proposition needing its own evidence, and neither of us had been gathering it. A
+handoff asserted without checking is exactly the invented-reason failure in a friendlier
+costume.
+
+AND THE CITATION CLASS RECURRED, WHICH IS THE ARGUMENT FOR A GATE. They caught a filename
+typo by CHECKING THE PATH RESOLVES rather than rereading the sentence, noting that "a
+plausible filename reads correctly every time". #84 in my own list was 26 comment citations
+pointing at files that do not exist. So I ran it over today's added lines under crates/ and
+packages/: 122 path-shaped citations, two dead -
+
+    crates/zero-migrate/tests/truncated_identifier_defect_pg.rs  (real: truncated_identifier_pg.rs)
+    packages/zero-migrate-cli/tests/host/oracle.ts               (no such file)
+
+Both are ALREADY GONE from the working tree, removed by later edits rather than by any check.
+That is luck, and luck is what a class produces until it is gated. 28 instances across two
+sightings, both found by a human-shaped sweep, neither by anything standing.
+
+Filed as #103. The reason it deserves a gate rather than a third sweep is that its predicate
+is an EQUALITY - every cited path resolves - with no tolerance, no floor and no judgement,
+which is the same shape as the NUL-byte and build-permission gates that already work here. A
+sweep fixes instances; only a gate fixes a class.
+
+Does NOT cover line numbers in `file.rs:123` citations, which go stale constantly and cannot
+be checked this way. Nothing else covers those either - that is a hole, not a handoff, and
+#103 says so rather than implying a gate that does not exist.
