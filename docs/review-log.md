@@ -6973,3 +6973,78 @@ rather than unioned - which is exactly what `F114` established and what
 
 Gates: 79 targets / 2263 passed / 0 failed, exactly one new target and its two tests above 2261, 0
 skip banners, 178s.
+
+## F116 - One provenance field, four defects, and a test that refused the obvious shape
+
+`IndexSnapshot::predicate` and the `Expr` variant of `elements` are rendered SQL text, and that made
+two arms of the fold wrong for the same reason. `Op::DropColumn` could not cascade on them, so an
+index PostgreSQL had dropped survived as a phantom. `Op::RenameColumn` could not rewrite them, so a
+rename-then-drop left the same phantom by a second route.
+
+Both reproduced against live PostgreSQL 18.4 before the fix, four failing tests:
+
+    drop_column_cascades_a_partial_index_whose_predicate_reads_it
+      missing_objects: ["pred_cascade index pred_cascade_note_key"]
+    drop_column_cascades_an_index_keyed_on_an_expression_over_it
+      missing_objects: ["expr_cascade index expr_cascade_key"]
+    drop_of_a_renamed_column_cascades_its_partial_index
+      missing_objects: ["rename_pred index rename_pred_note_key"]
+    drop_of_a_renamed_column_cascades_its_expression_index
+      missing_objects: ["rename_expr index rename_expr_key"]
+
+The fix is `IndexSnapshot::expr_cascade_columns`, computed from the closed `Expr` at snapshot time
+where the AST is still in hand, and excluded from the hand-written `PartialEq` and `Hash` - the same
+discipline `opclass` and `nulls_not_distinct` follow, for the same reason: live introspection cannot
+recover it.
+
+### A test refused the shape I specified, and it was right
+
+The brief said to store the complete referenced-column set. A test rejected that:
+`custom_policy_snapshot_converges_across_declarative_and_resolved_fold` holds the declarative snapshot
+builder and the resolved-migration fold to every debug-visible byte, and the declarative path has no
+way to produce provenance for a plain column-list index. Storing the full set made the two paths
+diverge.
+
+Narrowing the field to the EXPRESSION SITES ONLY makes both paths emit `None` there and converge
+without special-casing, and it stops the field duplicating names the snapshot already carries in
+`columns` and `include`. The name says what it holds.
+
+That is the second time today an existing test corrected a design rather than merely confirming it.
+A convergence test that pins every byte is expensive to satisfy and worth what it costs.
+
+### The guards are the load-bearing tests, and they pass before the fix
+
+Three guards, all green BEFORE and after:
+
+    a predicate whose literal spells the dropped column      must NOT cascade
+    an expression key whose literal spells it                must NOT cascade
+    a dialectal predicate reading it only in an INACTIVE leg must NOT cascade
+
+Passing before the fix is what makes them guards rather than evidence: they fail the moment someone
+switches the walk to text matching, or unions the dialect legs the way `F114` found gen-types doing.
+The walk is `expr_column_refs(expr, dialect)` - the selected leg only, never a union.
+
+### What remains, and why a Vec<String> cannot close it
+
+The PURE-RENAME TEXT STALENESS is untouched and still real. Measured:
+
+    predicate  expected `("a" > 0)`      actual `(b > 0)`
+    elements   expected `expr:("a" + 1)` actual `expr:(b + 1)`
+
+Re-rendering needs the `Expr` itself, which the snapshot discards; swapping the name inside the text
+is the false positive this provenance exists to avoid, since `WHERE (note <> 'a')` would become
+`WHERE (note <> 'b')`. Recorded in the rename arm and in the test file's module doc as the same shape
+as the constraint-definition staleness held out of this change.
+
+### A separate divergence found while writing the guards
+
+PostgreSQL deparses a bare string literal with its inferred cast, so `('a')` reads back `('a'::text)`
+on every partial index or expression key carrying one. Verified with a probe history containing NO
+`dropColumn` at all, which is what makes it independent of the cascade. The two literal guards
+therefore assert survival rather than full cleanliness, with the reason recorded at each. Asserting
+`is_clean()` there would have been a test that fails for a reason unrelated to what it pins.
+
+Gates: 79 targets / 2270 passed / 0 failed, exactly seven tests above the 2263 baseline with the
+target count unchanged because both files were extended rather than added, 0 skip banners, 183s.
+`cargo test -p zero-migrate-node --no-default-features` 4 targets / 52 passed - that crate is in no
+other gate, and adding a snapshot field has broken it before.
