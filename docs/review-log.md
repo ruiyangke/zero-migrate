@@ -6134,3 +6134,60 @@ A cleanup that corrects a citation should ask what the surrounding paragraph ass
 fixing the name made the paragraph more credible without making it more true. Every individual
 identifier in the journal block either resolves or would after a rename pass. A sweep that checks
 citations one at a time reports it clean.
+
+## F101 - The pin for the external trust boundary could not detect its own subject
+
+`#120`. `crates/zero-migrate-guard/src/guard/mod.rs` pins the external trust boundary as two
+`compile_fail` doctests: an outside crate must not be able to forge a privileged `GuardConfig` or
+`EffectivePolicy` by struct literal. A doctest compiles as a separate crate, so it sits exactly
+where an external consumer sits. The idea is right and the implementation had rotted:
+
+    doctest wrote  GuardConfig { dialect, effective }
+    actual fields  dialect, effective, guard_mode
+
+    doctest wrote  EffectivePolicy { registry, grants, requires, injects, validates }
+    actual fields  registry, layers
+
+A `compile_fail` doctest passes when compilation fails for ANY reason. Both of these failed on a
+missing or unknown field, so both would have passed unchanged with every field on both structs made
+`pub`. The boundary was pinned by two tests that could not observe its removal.
+
+### The repair is worth less than the control
+
+Fixing the field lists is three lines. What makes it a fix rather than a hope is that the property
+was measured in both directions:
+
+    repaired lists, privacy intact   cargo test -p zero-migrate-guard --doc   2 passed,  exit 0
+    same lists, fields made `pub`    cargo test -p zero-migrate-guard --doc   2 FAILED,  exit 101
+
+The second run is the one that matters. It is the same discipline a negative runtime assertion
+needs: the test that says "this must not compile" is worthless until someone has made it compile.
+The original pair could not produce that second row.
+
+The comment above the doctests now says to keep the lists exact, why a stale list silently stops
+testing anything, that these two did exactly that, and how to re-check them - make the fields
+public, confirm the doctests fail, put the visibility back. A rule phrased as care would not have
+caught this; a rule naming the command does.
+
+### The gate that should have caught it was not in the gate set
+
+Five gates ran before every commit today. Not one compiles a doctest. `--all-targets` excludes them,
+and the rustdoc gate renders and resolves links without compiling code blocks, so it reports green on
+a doc comment that does not compile at all.
+
+Three commits touching doc comments went through that set, including one about a `compile_fail`
+doctest. `cargo test --doc` had never been run in this repository. Run now: three doctests
+workspace-wide, all passing. It is in the gate set from this commit, and it is the only one of the
+six that can observe a doctest at all.
+
+### Where the citations pointed
+
+Three comments say the boundary is "pinned by `tests/trybuild_*`". No such file exists, `trybuild`
+appears in no manifest or CI config, and `git log --all --diff-filter=D -- '*trybuild*'` is empty.
+But the commit that introduced T8 added the working doctests AND the false path reference in the
+same patch, so this is neither never-written nor removed: the citation was wrong the day it was
+written, beside a correct implementation of what it mis-cites.
+
+That is a third outcome for a stale reference, and it exposes a limit in settling these with
+`git log -S`: the search finds when a string first appeared, not what appeared alongside it. Only
+diffing the introducing commit shows the implementation landed under another name.
