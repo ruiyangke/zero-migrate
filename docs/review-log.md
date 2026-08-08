@@ -5456,3 +5456,75 @@ correct is exactly what stops anyone from checking. It survived because it was r
 The rule from F87 was that a count is a measurement of a population and the population belongs
 in the sentence. This adds: SO DOES THE COMMAND, and it has to be a command that was actually
 run to get that count, not the shortest one that describes the intent.
+
+## F91 - I read the lines a grep returned and called it the step, one turn after writing that the command belongs in the sentence
+
+`#105` is withdrawn as filed. I claimed the CI doc gate could not fail on a broken intra-doc
+link, and the claim was false.
+
+The step at `.github/workflows/ci.yml:82-85` is:
+
+    - name: cargo doc (no broken intra-doc links)
+      run: cargo doc --workspace --no-deps
+      env:
+        RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
+
+Five lines. I ran `grep -n 'cargo doc\|cargo nextest\|--exclude\|--features' ci.yml`, got 82
+and 83, and treated the matched lines AS THE STEP. **A YAML `env:` block contains no occurrence
+of "cargo doc", so the pattern I chose could not match the line the answer was on.** The flag
+was three lines below my last hit and I never read around it.
+
+Re-measured with the command CI actually runs:
+
+    RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --workspace --no-deps
+    -> exit 0, `grep -c 'unresolved link'` = 0
+
+The gate is installed, it works, and the broken class is genuinely at zero.
+
+### Why the planted positive did not save me
+
+This is the part worth keeping. I DID run a control. I planted
+`//! [`ThisTypeDoesNotExistAnywhere`]` and confirmed the command still exited 0, which felt
+like exactly the discipline F87 demands - proving the gate cannot fail rather than assuming it.
+
+But the command I planted against was `cargo doc --workspace --no-deps`, bare. **The control
+tested the right property of the wrong command.** A planted positive validates the INSTRUMENT;
+it says nothing about whether the instrument is pointed at the thing CI runs. I had a correct
+measurement of a command nobody executes, and its correctness is what made it convincing.
+
+F90, written ONE TURN EARLIER, ends: a count is a measurement of a population and the
+population belongs in the sentence, **and so does the command, and it has to be a command that
+was actually run to get that count.** I wrote that about a test baseline and then, within the
+hour, filed a finding whose entire content was a measurement of a command that is not the one
+in the workflow. Naming a rule does not install it.
+
+### The instrument catalogue gains an entry
+
+The existing entries were about bounding output (`head`), guessing extent (`-A 20`), choosing
+the search universe from a belief (scoped grep), and losing attribution (aggregated diff). This
+one is different and sharper:
+
+**A grep returns the lines that match. The answer may live on a line that CANNOT match, because
+the thing that carries it is expressed in a different vocabulary.** A shell command and its
+environment are the same fact split across two syntaxes; a pattern written for one is blind to
+the other by construction. The failure is not that I under-read the output - I read all of it.
+It is that the output could not have contained the answer.
+
+The detector: when a grep answers a question about BEHAVIOUR rather than about text, read the
+enclosing structure. A step, a function, a config block, a rule - the unit the answer belongs
+to is almost never the line the pattern matched.
+
+### What survives, and it is real
+
+Correcting the premise did not empty the ticket. The gate documents PUBLIC ITEMS ONLY, so
+broken links inside private-item docs are invisible to it. Verified by me:
+
+    RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --workspace --no-deps --document-private-items
+    -> exit 101, 27 unresolved links
+
+Among them, `model/op_support.rs:358` citing `[Op::vendor_capabilities]` - a link that commit
+`1f39b5a`'s own message names as fixed. It was not, because it sits on a private
+`fn support_tier`, and the gate installed alongside that commit has never been able to see it.
+So the finding is not "the gate is fake" but "the gate has a visibility boundary, and rot has
+been accumulating on the far side of it since the day it was installed." That is a smaller
+claim and a true one, and it took being wrong to reach it.
