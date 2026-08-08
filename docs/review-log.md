@@ -7794,3 +7794,88 @@ this morning. The widening paid for itself within hours, on a defect introduced 
 
 Exactly +4 against 83 / 2297 - two unit tests and two integration tests, no new target. Confinement
 composition unchanged: the same 17 tests by name, all still passing, plus the 2 new ones.
+
+## F127 - Unbreaking FTS by conceding one counter, and pinning the concession separately from the feature
+
+F123 established that adding an FTS index to a non-empty table fails, and so does any creator migration
+writing an FTS-indexed table. FTS5's `xUpdate` issues `PRAGMA data_version` internally on first access
+to the index, and the authorizer denied it. Two independent opinions reconciled in F126's ticket; this
+lands the decision they converged on.
+
+### The arm
+
+    AuthAction::Pragma { pragma_name, .. }
+        if targets_main && pragma_name.eq_ignore_ascii_case("data_version") => Allow
+
+Matched AHEAD of the existing pragma arm, in BOTH modes, scoped to the app database.
+`is_engine_allowed_pragma` is deliberately unchanged - it is name-only by construction, so adding
+`data_version` there would grant it for every schema.
+
+Three constraints, each from a measurement rather than a preference:
+
+  - BOTH MODES. The prepared statement is cached per connection, so the pragma fires once per
+    connection per index object. Engine-mode-only passes in a process that populated first and fails on
+    the next fresh connection. Non-deterministically incomplete is worse than plainly broken.
+  - SCOPED TO THE APP DATABASE. `data_version` counters are PER SCHEMA, and this arm is matched before
+    the CreatorUp journal backstop, so a name-only allow would make this arm the thing conceding
+    `PRAGMA "_mig".data_version`.
+  - NO `match`. The engine issues no FTS5 MATCH in production, so the tests read through a REOPENED RAW
+    connection. Worth recording that the security argument I had been carrying for denying `match` was
+    WRONG: FTS5 accepts table-name equality and table-valued syntax as MATCH equivalents, so denying
+    the function blocks nothing. The honest reason is that the engine has no business issuing it.
+
+### The concession, stated in a test rather than a comment
+
+This genuinely grants a creator a read of its own app file's `data_version` - the authorizer cannot
+distinguish FTS5's internal call from a creator typing the pragma, and the creator can forge the
+qualified spelling. So the suite now asserts the capability rather than claiming it was not conceded:
+the creator reads the counter, and it MOVES when another connection commits, so it is a live channel
+and not a constant.
+
+It also states what the suite no longer catches. A creator can wipe an index with
+`INSERT INTO "<coll>__fts"("<coll>__fts") VALUES('delete-all')`; DEFENSIVE does not stop it, because
+FTS5 reaches its shadow tables through the vtable. That is not a new capability class, and the test
+PROVES rather than asserts it by then dropping the index outright as an ordinary creator `up` and
+confirming it is gone. A capability discovered later reads as an escape; one stated in the suite reads
+as a boundary.
+
+### The mutation that showed why the scope needs its own pins
+
+    revert the arm         both e2e legs fail, each naming its own mode
+    name-only allow        both scoping tests fail, e2e ALL GREEN
+
+That second line is the finding. The FEATURE does not depend on the scoping at all - a name-only allow
+makes FTS work perfectly. Had the scoping tests not been written, the security-relevant half of this
+change would have been unpinned while every functional test passed. This is the fourth time in two days
+that a mechanism needed its own pin because the thing it protects is invisible to the feature's tests.
+
+I reproduced the name-only mutation myself. The capability test prints the leaked value:
+
+    the journal's counter is never conceded: [[Some("1")]]
+
+and the journal-denial test reports `attack must be denied, not applied: true`. `authorizer.rs`
+restored to the identical md5 afterwards.
+
+### The diagnostic paying for itself
+
+The pre-fix failures now name their own cause, because `bb66425` shipped this morning:
+
+    Exec("authorization denied [denied: PRAGMA data_version on \"main\", mode=EngineJournal]")
+    Exec("authorization denied [denied: PRAGMA data_version on \"main\", mode=CreatorUp]")
+
+Landing the diagnostic before the fix was the right order: the two legs are distinguishable in the
+mutation output by the mode each names, which is exactly the asymmetry that made engine-mode-only
+wrong.
+
+### Gates
+
+    fmt 0, clippy 0, workspace 83 targets / 2307 passed / 0 failed / 0 ignored,
+    node 4 / 52, doc 0, 0 skip banners
+
+Exactly +6 against 83 / 2301, no new targets: one authorizer unit test, three confinement, two
+end-to-end. Confinement composition 19 -> 22 by name, no removals and no renames.
+
+### Not verified
+
+That no FTS5 route needs a pragma other than `data_version`. The two routes these tests drive are
+clean; a route neither drives could in principle need another.
