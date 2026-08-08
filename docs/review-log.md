@@ -6596,3 +6596,80 @@ Left open rather than decided: a `pub` production-namespace constructor with zer
 invisible to dead-code analysis precisely because it is `pub`. Making it `pub(crate)`, gating it, or
 wiring the pre-deploy catalog read the comment now describes are all real options and none of them is
 a comment fix. Gates unchanged: 75 targets / 2244 passed / 0 failed, 0 skip banners, 104s.
+
+## F110 - The fold kept a CHECK PostgreSQL had already dropped, and the comment said CHECKs were not folded
+
+Two comments in `render/fold.rs` asserted "CHECK is never folded", and they were load-bearing: they
+justified why the `DropColumn` cascade's matcher could not false-match. Both were false. CHECKs enter
+the folded snapshot by two PostgreSQL-only paths, and facet-derived checks from `.min()`, `.max()`
+and enum lists go through one of them.
+
+The matcher, `constraint_local_columns_contain`, takes the FIRST parenthesized group of a definition
+as the local column list. That is exact for `UNIQUE (cols)`, `FOREIGN KEY (cols) REFERENCES ...` and
+`PRIMARY KEY (id)`. For a CHECK the first group is the EXPRESSION, so `CHECK ((qty > 0))` parses as
+the column list `(qty > 0` and never matches anything. A systematic false negative: the fold kept a
+CHECK that PostgreSQL had dropped, and `fold_ops != snapshot_schema(live)` forever.
+
+Measured against live PostgreSQL 18.4 before any fix, and this is what made the design possible:
+
+    CHECK ((qty > 0))                  drop qty     -> CHECK GONE
+    CHECK ((a < b))                    drop a       -> GONE, and drop b -> GONE
+    CHECK ((num_nonnulls(a, b) = 1))   drop a or b  -> GONE
+    CHECK ((status <> 'qty'::text))    drop qty     -> SURVIVES
+    CHECK (true), whole-row checks     any drop     -> SURVIVE
+
+The fourth line is the one that rules out text matching. A string literal spelling a column name is
+not a reference, and no lexer-free scan gets that right.
+
+### The fix, and why it needed provenance on both sides
+
+`ConstraintSnapshot` gains `cascade_columns: Option<Vec<String>>`, filled by both producers:
+structurally from the IR expression when the fold builds a CHECK, and from `pg_constraint.conkey`
+when introspection reads one. `conkey` is exactly PostgreSQL's own cascade predicate, and it renders
+a whole-row check as the empty set, which is the correct answer for a case no parser handles cleanly.
+
+Neither source alone is enough, which is the whole point. `fold_ops` folds onto an empty base and has
+IR expressions but no catalog; `fold_ops_onto` folds onto a live introspected base whose constraints
+have catalog rows but no IR. One field, two producers, one consumer.
+
+The field is provenance, not identity, so `PartialEq` is hand-written to exclude it - fold-derived
+and conkey-derived values legitimately differ for the same constraint. `IndexSnapshot` and
+`TableSnapshot` already hand-roll equality for the same reason.
+
+A CHECK that reaches the cascade with `None` now fails the fold loudly rather than falling back,
+because for a CHECK the fallback is a guaranteed false negative that would silently reproduce this
+bug. That refusal caught a THIRD producer during implementation, in `declarative.rs`, which the
+design had missed.
+
+### What the two reviews got wrong, and what checking them caught
+
+Two independent reviews agreed on the shape. Reconciling them beat either one:
+
+  - They disagreed on the blast radius, 47 sites versus 37. Measured: 43.
+  - One claimed EXCLUDE constraints would be fixed for free by `conkey`. The other corrected that
+    `conkey` is incomplete for an exclusion constraint's expression elements. The second is right, so
+    EXCLUDE stayed out and is filed.
+  - Both pointed at existing structural matchers to reuse. Reading them showed the repo's own
+    `expr_references_column` serialises the expression to JSON and walks EVERY value, so for a
+    dialectal expression it matches a column in ANY leg - while the renderer installs only the
+    SELECTED leg. Reusing it would have created a false positive: the fold dropping a CHECK
+    PostgreSQL kept. The new collector takes the dialect and descends one leg.
+
+The last one is the reason to reconcile rather than pick. Neither review found it; the disagreement
+about which function to reuse is what made me read both.
+
+### The test that matters most
+
+Seven tests, all through the real engine against live PostgreSQL, comparing the fold against real
+introspection. The load-bearing one is not any of the cascades - it is
+`a_literal_that_spells_a_column_name_does_not_cascade`, which pins the direction a text-matching fix
+would have broken. A fix that makes the fold drop MORE is not obviously better than one that drops
+too little; both are drift.
+
+The rename cascade was verified load-bearing by neutralising only the `RenameColumn` rewrite and
+watching `drop_of_a_renamed_column_cascades_the_check` fail with the phantom constraint, then
+restoring it.
+
+Gates: 76 targets / 2251 passed / 0 failed, exactly one new target and its seven tests above the
+2244 baseline, 0 skip banners, 180s. The tracked IR schema golden is unmoved; the two Debug goldens
+gained one line each per constraint block and nothing else.
