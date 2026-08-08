@@ -5589,3 +5589,66 @@ comment that will become false without anyone touching it.**
 That is a distinct failure from the citation rot around it, and worth separating: the citation
 sites were wrong about WHERE something lives, this one was wrong about WHY something happens
 while naming the right things.
+
+## F93 - A port is a citation, and a measurement's provenance has to be reachable
+
+`#108` is closed in 85e1903. Four comments named a PostgreSQL port that nothing serves. Three
+endpoints exist - `docker-compose.test.yml:19` publishes 127.0.0.1:5434, `ci.yml:46` uses
+:5432 - and the comments named a fourth.
+
+Two things worth keeping came out of it.
+
+### The citation class is wider than paths
+
+`#103` was specified as a gate that checks every cited PATH resolves. F92 had already widened
+it once: the citations that rot are the ones no compiler-adjacent tool parses, because the
+ones it parses get fixed by the build. This widens it again.
+
+**A port is a citation. So is a version number, a container name, an environment variable, a
+credential.** None of them resolve, none of them are checked, and all of them tell a reader to
+go somewhere. The four here were prose in `//` comments, invisible to every tool in the
+pipeline, and they had drifted from a value that has exactly one home in the repository.
+
+The fix for three of them was not to correct the port but to DELETE IT. A comment repeating a
+value that is defined elsewhere is a second copy, and a second copy is a thing that can drift
+from the first. They now name `ZERO_MIGRATE_TEST_PG_URL` and point at the compose file that
+carries the canonical DSN. **The most durable citation is the one that names where a fact
+lives rather than what it currently says.**
+
+### Provenance has to be reachable, or it is decoration
+
+The fourth was different in kind. `render/fold.rs` justified a conditional index retain with
+"verified live on :5440". That is a measurement, and it is the right shape for a comment to
+carry - except that the environment it names cannot be reached, so no reader can recheck it,
+date it, or tell what server version it held on.
+
+The temptation was to edit the port out and keep the claim. Instead it was re-run on
+PostgreSQL 18.4: a FOREIGN KEY constraint and a user index may share a name, and
+`DROP CONSTRAINT` leaves the index (0 constraints, 1 index afterward). **The claim held exactly
+as written**, so the code was right and only the provenance had rotted - which is the outcome
+that makes the discipline worth it, because editing on faith would have produced the same
+comment text with none of the confidence.
+
+The comment now records the SERVER VERSION rather than a host and port. The version is what
+the behaviour depends on; the host is an accident of where someone happened to be sitting. A
+reader on a different machine can check the version and know whether the claim still applies.
+
+zeroship arrived at the same rule from the other end within the hour, and their form is
+better: **state the QUANTITY alongside the claim.** They had used peak RSS as a proxy for
+isolate heap usage and retracted a defect over it - V8's own `used_heap_size`, the number the
+mechanism actually consults, disagreed by a factor of forty. A right instrument pointed at an
+adjacent quantity. Mine was "state the command", theirs is "state the quantity", and both are
+the same requirement: **the artifact carrying a measurement must carry enough of its
+provenance to be falsifiable by someone who was not there.**
+
+### And my own error inside the fix
+
+I wrote in the ticket that `packages/zero-migrate-cli/tests/host/driver-pg.test.ts:37` carried
+the same `:5440` default, citing `#36`'s notes. It does not - it imports `connectLivePg` and
+`pgUrl` from a shared `live-db.js` with no hardcoded endpoint, and my own repo-wide grep,
+already run, had not listed it. I repeated a recorded claim instead of reading the file, in a
+ticket whose entire subject was recorded claims that stopped being true.
+
+**Queue notes and ticket text are a RECORD, not a MEASUREMENT.** They were true when written
+and nothing re-checks them. The same rule that sends me back to a file before quoting a
+baseline applies to my own prose, and it applies hardest inside a change about stale prose.
