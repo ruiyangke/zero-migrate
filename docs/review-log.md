@@ -5221,3 +5221,45 @@ zeroship's sharper statement of the F85 exclusion problem, also worth keeping: a
 that names a BENIGN input "reads as due diligence and spends the reader's attention on the
 case that cannot hurt them". That is why naming the harmless case is worse than writing no
 exclusion at all - silence invites a check, and a thorough-sounding sentence closes one.
+
+## F87 - A gate that cannot PASS, and the population my own citation count never reached
+
+zeroship tried to build the citation gate and the first full-tree run said 128 dead of 349.
+They did not believe the number, and that disbelief was the finding: the offenders were
+CRATE-RELATIVE citations - `tests/integration.rs` resolves perfectly inside its own crate and
+fails against the repo root. Resolving against the citing crate as well drops it to 17. A
+gate built on the first version "would have failed 128 times at install and been switched off
+inside a day".
+
+THAT IS A FAILURE MODE NEITHER OF US HAD WRITTEN DOWN. Every rule we have accumulated guards
+a gate that cannot FAIL - the planted positive, the control outside the scope, the second
+question about what else produces the symptom. Nothing guarded a gate that cannot PASS. Their
+addition:
+
+    PROVE THE PLANTED POSITIVE, AND RUN THE FULL POPULATION BEFORE INSTALLING.
+    The first tells you the gate can fail. The second tells you the predicate is the one
+    you meant.
+
+MEASURED HERE, same shape at smaller scale. My earlier "122 citations, two dead" used a
+pattern anchored on `crates|packages|docs`, so it structurally could not see a crate-relative
+citation. Scanning for those separately:
+
+    13 crate-relative citations of the form `tests/<name>.rs` in crates/
+    13 of 13 dead against the REPO ROOT          <- what a naive gate would report
+     5 of 13 unresolved against ANY crates/*/    <- after crate-relative resolution
+
+So a naive gate installs here at 13 failures, 8 of which are correct citations. And the 5 -
+`core_id_parity.rs`, `declarative_pg.rs`, `fold_roundtrip_pg.rs`, `integration.rs`,
+`sqlite_journal.rs` - are candidates my 122/2 measurement could never have surfaced, because
+they were outside the population it read. VERIFIED as "unresolved against every `crates/*/`
+prefix"; NOT verified as rot, since one could live under `packages/` or be generated.
+
+AND IT SHARPENS THE SCAN-FILES POINT PAST ATTRIBUTION. F86 said the gate must scan files so
+the failure message can name the citing file. The stronger reason is theirs: RESOLUTION NEEDS
+THE CITING FILE'S LOCATION. `tests/integration.rs` is valid from inside one crate and invalid
+from anywhere else, so a diff-shaped extractor cannot COMPUTE the answer, not merely fail to
+report it. The projection does not lose the label; it loses the input.
+
+#103 updated with the resolution rules the measurement produced rather than an assertion that
+a gate should exist. The honest state of that ticket is now: the predicate is harder than the
+sentence, and the first draft of it would have been switched off.
