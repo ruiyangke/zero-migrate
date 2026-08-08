@@ -5388,3 +5388,71 @@ only justification for `pub` was a comment citing `tests/integration.rs`, which 
 exist. **A dead citation can hold dead code alive** - the comment suppressed the question,
 and the visibility suppressed the compiler. Reverted rather than deleted: removing a function
 is a decision, and I wanted the compiler output on the record before making it.
+
+## F90 - A shadowing test wrapper made two opposite caller counts both look right, and a baseline command that could never have produced its own number
+
+Closing `#104 OPEN 1` produced two findings, neither about the code being deleted.
+
+### The same name, defined twice, resolving differently by scope
+
+I measured that narrowing `pub fn build_create_table_with_fks` to `pub(crate)` gave
+`error: function build_create_table_with_fks is never used` and reported "no caller
+anywhere". Codex measured two `#[cfg(test)]` calls and reported that my premise was wrong.
+
+Both measurements were right. Both sentences were wrong.
+
+`schema/query.rs:3110` defines a TEST-LOCAL FUNCTION WITH THE SAME NAME, taking four
+arguments and supplying `&confined_policy()`. So the roughly forty unqualified
+`build_create_table_with_fks(...)` calls in the test module resolve to the WRAPPER, and only
+two `super::`-qualified sites reach the production function. Meanwhile the non-test lib build
+sees no caller at all, which is what `dead_code` reported.
+
+**A caller count is a measurement of a NAME RESOLVED IN A SCOPE, not of a function.** Neither
+of us said which scope, so "no callers" and "two callers" were answers to different
+questions, and each of us could have defended our number. The disagreement is what forced the
+read; had we agreed on either figure, nobody would have opened query.rs:3110.
+
+This is the population rule (F87, F88) with the population being a name-resolution scope
+rather than a set of files. It is harder to see than the file-set version, because the two
+scopes are in the SAME FILE and differ only by `#[cfg(test)]`.
+
+The deletion itself is recorded in c244e45, and the reason it is scoped to one function is
+worth keeping: `_for_dialect` and `_for_dialect_scoped` are dead by exactly the same
+standard, and appbase's fork calls `_for_dialect`. What licensed removing this one was its
+citation tracing to a specific foreign home, not the absence of a lib-build caller. **A rule
+that would delete more than you intend is not the rule you are actually applying.**
+
+### The baseline command that could not have produced its own number
+
+I have quoted "74 targets / 2227 passed / 0 failed, workspace" in every handoff for many
+turns. Verifying this change, I ran the command I had written down:
+
+    cargo test --workspace
+    -> exit 101, ZERO `test result:` lines
+    rust-lld: error: undefined symbol: napi_typeof
+      >>> referenced by js_values.rs:233 (napi-3.10.3/src/bindgen_runtime/js_values.rs:233)
+    error: could not compile `zero-migrate-node` (test "status_ir_host")
+    error: could not compile `zero-migrate-node` (test "mock_apply")
+
+N-API symbols are supplied by the host Node process, so a standalone Rust test binary linking
+the addon cannot link, and never could. Verified as pre-existing rather than mine by stashing
+the working change per-path, re-running those two targets alone at HEAD (exit 101, same
+symbol), and popping.
+
+What CI runs, `.github/workflows/ci.yml:75-79`:
+
+    cargo test --workspace --exclude zero-migrate-node
+    cargo test -p zero-migrate-node --no-default-features
+
+Re-run under the correct pair: 74 targets / 2227 passed / 0 failed / 0 ignored, and 4 targets
+/ 52 passed for the addon crate. The NUMBER was always right. The COMMAND recorded beside it
+was wrong, and it is a command that cannot produce any number at all.
+
+**A recorded measurement decays differently from a recorded fact.** Re-reading a fact costs
+nothing, so a wrong one gets caught on the next read. Re-running a measurement costs minutes,
+so the number gets quoted and the command beside it is never exercised - and the number being
+correct is exactly what stops anyone from checking. It survived because it was right.
+
+The rule from F87 was that a count is a measurement of a population and the population belongs
+in the sentence. This adds: SO DOES THE COMMAND, and it has to be a command that was actually
+run to get that count, not the shortest one that describes the intent.
