@@ -7879,3 +7879,85 @@ end-to-end. Confinement composition 19 -> 22 by name, no removals and no renames
 
 That no FTS5 route needs a pragma other than `data_version`. The two routes these tests drive are
 clean; a route neither drives could in principle need another.
+
+## F128 - Sixty-one dead links, and the three that could honestly be re-pointed
+
+The doc gate has read private items since `e2a74a9`, and its largest warning class was
+`rustdoc::private_intra_doc_links`: links in PUBLIC documentation pointing at PRIVATE items. rustdoc
+renders those as plain text, so every one is a dead link for every reader.
+
+Measured by lint code before and after, by me:
+
+    rustdoc::private_intra_doc_links     61 -> 0
+    rustdoc::redundant_explicit_links    46 -> 43
+
+The 43 fell out as collateral of demotions, not by touching them.
+
+### The ratio is the finding
+
+Only THREE of the 61 had a public item that genuinely covers the sentence's claim. The other 58 are
+demotions to plain text. Every target was a `pub(crate)`/private fn, a private field, a `pub(crate)`
+const or a `pub(crate)` module, and NO visibility was widened to satisfy a link - making an item `pub`
+to fix a comment inverts the dependency, letting prose shape the API surface.
+
+The three re-points are all the same shape: `IrAuthor`'s `scope` and `default_schema` are private FIELDS
+with no public accessor, so the honest targets are the builders that establish them. I spot-checked the
+load-bearing one rather than accepting the table. `DefaultSchemaOutOfScope` says
+
+    the friendly op-level cross-schema VALIDATE gate inspects ONLY the op's own qualifier,
+    never this connection default
+
+and `with_default_schema`'s own doc says
+
+    the friendly cross-schema VALIDATE gate only inspects the op's own qualifier, never this default
+
+Near-verbatim on the clause that matters, so the target documents the failure the variant reports. That
+is the test for a re-point: not that it resolves, but that it covers the claim.
+
+### The site I flagged was correctly NOT re-pointed
+
+I had named `apply/backend/mod.rs:605` in the brief - `run_dml_step` linking the `pub(crate)`
+`apply_with_lock_backend` - as the example. It is a demotion, and deliberately: the only public peers
+are `apply_with_lock` and `apply_with_lock_mysql`, both `#[cfg(pg_seam)]`, and citing either from a
+dialect-generic trait method is exactly the `70e15fb` failure where a proposed target would have broken
+a `--no-default-features` doc build. Same reasoning at `engine.rs:1045` and `executor.rs:563`.
+
+Three sibling `scope` links were also left as demotions rather than re-pointed, because the same doc
+block already links the builder a few lines down or the link would be a self-link. Adding a resolving
+link is not automatically an improvement.
+
+### A wire artifact moved for a doc fix
+
+`crates/zero-migrate-ir/src/ir.rs` doc comments are consumed by `schemars` into
+`crates/zero-migrate/ir-envelope.schema.json`, so removing brackets from one link made the committed
+golden stale. Regenerated through the test's own prescribed path. The diff is exactly ONE line - the
+`IrConstraint` `description` string, brackets removed - with no `$defs`, property, type or `Op` variant
+changed. Verified by reading the diff, not by trusting the report.
+
+Accepted rather than reverted: description text is not contractual, and the alternative is a dead link
+in the published docs kept alive to hold a JSON string constant. Worth knowing that the IR schema is
+reachable from a doc comment at all - an ordinary-looking comment edit in that crate moves a published
+artifact.
+
+### On the non-ASCII check
+
+Nine added lines carry non-ASCII, and the agent claimed each was carried verbatim from its removed
+counterpart. Checked at the CHARACTER level rather than the line level: the set of non-ASCII characters
+on added lines is identical to the set on removed lines, so nothing new was introduced - the lines
+differ only where brackets came out. A line-level diff would have looked like nine violations. The
+em dashes and the `<=` glyph are pre-existing and remain #11's job.
+
+### Gates
+
+    fmt 0, clippy 0, workspace 83 targets / 2307 passed / 0 failed / 0 ignored,
+    node 4 / 52, doc 0, 0 skip banners
+
+Unchanged in every total, which is what a docs-only change should look like.
+
+### What is left of #113
+
+The gate still exits 0 while printing 43 warnings. Fixing and denying `redundant_explicit_links` is the
+remaining step, and only then can `RUSTDOCFLAGS` become `-D warnings`. One opinion noted that the
+redundant set is not a coherent rule - over 400 links share its shape and which ones fire depends on
+whether the label happens to resolve in that module's scope - so it must be re-measured under the final
+flags rather than planned against a count taken earlier.
