@@ -7627,3 +7627,90 @@ them would make this file's name and its assertion messages lie about what broke
     0 failed / 0 ignored, node 4 / 52, doc 0, 0 skip banners
 
 Exactly +1 target and +3 passed against 82 / 2291.
+
+## F125 - A test named for a setting it did not depend on, and the setting turned out to matter elsewhere
+
+F124 pinned the SQLite DQS settings and, while deciding whether `DEFENSIVE` and `TRUSTED_SCHEMA`
+belonged in the same file, measured that both were unpinned - and that
+`sqlite_confinement::confine_direct_sqlite_master_write_still_blocked_by_defensive` PASSED with
+`DEFENSIVE` off, despite its name.
+
+Reproduced both mutations before touching anything: `DEFENSIVE=false` and
+`DEFENSIVE=false, TRUSTED_SCHEMA=true` each leave the whole workspace green, 83 targets / 2294 passed.
+
+### What the name was hiding
+
+On that test's scenario `DEFENSIVE` contributes NOTHING. The direct write fails with
+
+    Exec("table sqlite_master may not be modified")
+
+and that text is BYTE-IDENTICAL with `DEFENSIVE=false`. `sqlite_master` is writable only while
+`writable_schema` is on, which is off by default, and the authorizer independently denies the
+`PRAGMA writable_schema=ON` that would turn it on - already pinned by a sibling test. So the test
+pinned a real property under a wrong name, and the name is what made the setting look protected.
+
+The other documented legs were checked rather than assumed: `sqlite_dbpage` is not compiled into the
+bundle, and `PRAGMA journal_mode=OFF` is an authorizer deny in `CreatorUp`.
+
+### The setting does matter, somewhere nobody had looked
+
+FTS5 lays its index down in ORDINARY tables in `main` - `docs__fts_data`, `_idx`, `_docsize`,
+`_config`. A later creator `up` runs against that same database, and the authorizer permits creator
+DML on any table that is neither a schema table nor in the journal schema. Shadow tables are exactly
+that: the authorizer ALLOWS the write, and `DEFENSIVE` is the only thing refusing it.
+
+    DELETE FROM "docs__fts_data";   ->  Exec("table docs__fts_data may not be modified")
+
+Not an authorizer deny - asserted explicitly, because a confinement rejection masquerading as this one
+is how the original test came to be misnamed. On a raw connection, which ships `DEFENSIVE` OFF, the
+same DELETE SUCCEEDS and the next MATCH reports
+
+    fts5: corruption found reading blob 137438953473 from table "docs__fts"
+
+So the harm is demonstrated rather than asserted, and it is tenant-reachable corruption.
+
+The existing test was RENAMED, not deleted. A passing confinement test is worth keeping; only its name
+was wrong.
+
+### TRUSTED_SCHEMA was worse than the shape it was filed under
+
+The reported pair reproduces: a creator view over a pragma virtual table is ACCEPTED at creation (the
+setting gates USE, not creation) and fails on read with `unsafe use of virtual table`.
+
+Probing further found the sharper case. The two-argument pragma vtable takes a SCHEMA, so a creator
+view can name the journal schema. With `TRUSTED_SCHEMA=true`, reading that creator-authored view
+returns the journal catalog on the very connection that answers the creator's own direct attempt with
+an authorizer deny. The authorizer offers no protection: the route presents as a `Pragma` action on
+the engine allowlist and never as one whose database is the journal schema, so neither the
+journal-immutability arm nor the backstop arm sees it. `TRUSTED_SCHEMA=false` is the sole guard.
+
+### Mutations
+
+    DEFENSIVE -> false            1 of 17 fails
+    TRUSTED_SCHEMA -> true        2 of 17 fail
+    both relaxed                  3 of 17 fail   (legs independently pinned)
+
+I reproduced the first myself: exactly one failure, and its message shows the migration APPLIED -
+`a creator write to an FTS5 shadow table must be refused: true`. The RENAMED test correctly still
+passes under it, which is the whole point.
+
+### A claim of mine that this made false
+
+F124's commit stated in the DQS file that both settings were "BOTH still unpinned". True when written,
+false the moment these landed. Corrected in the same change rather than left to rot - the coexisting
+corrected and uncorrected framings are the defect this session has spent most of its time clearing.
+
+### Gates
+
+    fmt 0, clippy 0, workspace 83 targets / 2297 passed / 0 failed / 0 ignored,
+    node 4 / 52, doc 0, 0 skip banners
+
+Exactly +3 passed against 82 / 2294, targets unchanged - three new tests and one rename, which adds
+none.
+
+### Incidental, filed separately and NOT verified by me
+
+While probing FTS5 the agent reports the engine's own FTS5 path failing independently of these
+settings: the engine-authored initial-population INSERT denied even under the journal mode, the sync
+trigger failing the same way, and MATCH denied in both modes. If that reproduces it is a broken
+feature rather than a hardening question.
