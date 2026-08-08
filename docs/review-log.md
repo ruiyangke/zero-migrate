@@ -6792,3 +6792,57 @@ too. Filed rather than taken.
 One pre-existing defect found and not fixed: the doc block at `apply/drift.rs:316-354` is attached to
 `fn canonical_extension_type` but describes `snapshot_schema`, and line 316 carries a stray `///`
 mid-sentence. Wrong-subject documentation is a different failure from a broken link.
+
+## F113 - I fixed one kind of stale-on-rename state and left its neighbour in the same arm
+
+`6426017` taught `Op::RenameColumn` to rewrite `ConstraintSnapshot::cascade_columns` from the old
+column name to the new one, because otherwise `rename qty -> amount; drop amount` leaves a phantom
+CHECK. That reasoning applies verbatim to indexes, and the same arm does not do it.
+
+`Op::DropColumn` cascades indexes by reading `IndexSnapshot::columns`. PostgreSQL renames a column in
+place and the index follows automatically, because `pg_index` references the attribute number and not
+the name. So live introspection reports the index over the NEW name, PostgreSQL drops the index when
+that column is dropped, and the fold - still recording the OLD name - matches nothing and keeps a
+phantom.
+
+Reproduced against live PostgreSQL 18.4, 5 of 6 failing before the fix:
+
+    drop_of_a_renamed_column_cascades_its_index        missing_objects: ["rename_idx index rename_idx_a_key"]
+    rename_column_carries_its_index_key_columns        columns  expected "a"      actual "b"
+    rename_column_carries_one_key_of_a_multi_column_index   columns expected "note,a"  actual "note,b"
+    rename_column_carries_an_index_include_column      include  expected "a"      actual "b"
+    rename_column_leaves_the_index_name_alone          columns  expected "a"      actual "a_renamed"
+    rename_of_an_unrelated_column_leaves_the_index_untouched   ok   (control)
+
+Three fields needed the rewrite, not one: `columns`, `elements` (the `Column` variant), and `include`.
+`elements` is compared by `index_elements_canonically_eq`, so fixing `columns` alone leaves the same
+tests red - the second field is not decoration.
+
+The index NAME is measured, not assumed: an index created as `t_a_idx` over `a` is still `t_a_idx`
+after `a` becomes `b`. PostgreSQL respells the column in `pg_get_indexdef` and leaves the name alone,
+so the fold must too. `rename_column_leaves_the_index_name_alone` pins that by naming the index after
+the old column, which is the case a careless rewrite would corrupt.
+
+### The rule, and it is the third time this session
+
+`F106` said editing a site is not surveying its class, and that having fixed one instance actively
+suppresses the search for the others. This is that, with me as the author of the suppression: my own
+commit added a rename rewrite to this arm and did not ask what else in the arm carries a column name.
+
+The brief for this fix therefore asked for a SWEEP of the arm rather than the one field. It found four
+more, all real drift and none fixed here:
+
+    ConstraintSnapshot::definition, UNIQUE       `UNIQUE (a)` vs live `UNIQUE (b)`
+    ConstraintSnapshot::definition, FOREIGN KEY  `FOREIGN KEY (a) ...` vs `(b)`
+    IndexSnapshot::predicate, partial index      `("a" > 0)` vs `(b > 0)`
+    IndexElementSnapshot::Expr, expression key   `expr:("a" + 1)` vs `expr:(b + 1)`
+
+All four are RENDERED SQL TEXT rather than structured name lists, so rewriting them is text surgery on
+deparsed SQL - the thing `F110` established you should not do. They are recorded in the arm's comment
+and filed, not silently left.
+
+A fifth, CHECK `definition`, goes stale too and reports nothing, because the differ excludes CHECK
+bodies from comparison. Invisible rather than wrong.
+
+Gates: 77 targets / 2257 passed / 0 failed, exactly one new target and its six tests above the 2251
+baseline, 0 skip banners, 192s.
