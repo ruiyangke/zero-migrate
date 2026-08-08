@@ -7048,3 +7048,66 @@ Gates: 79 targets / 2270 passed / 0 failed, exactly seven tests above the 2263 b
 target count unchanged because both files were extended rather than added, 0 skip banners, 183s.
 `cargo test -p zero-migrate-node --no-default-features` 4 targets / 52 passed - that crate is in no
 other gate, and adding a snapshot field has broken it before.
+
+## F117 - A grammar where the trap is unreachable, and a guard that proved it did not need to fire
+
+After `rename a -> b` the fold kept the OLD column name in three constraint definitions while live
+PostgreSQL reported the new one. All three are compared by the differ, so all three were real drift:
+
+    UNIQUE       fold `UNIQUE (a)`             live `UNIQUE (b)`
+    PRIMARY KEY  fold `PRIMARY KEY (a)`        live `PRIMARY KEY (b)`
+    FOREIGN KEY  fold `FOREIGN KEY (a) ...`    live `FOREIGN KEY (b) ...`
+
+PRIMARY KEY is now confirmed by MEASUREMENT rather than by reading
+`constraint_definition_is_comparable`: the test fails on it, so the exclusion really is only `EXCLUDE`
+and `CHECK`.
+
+### Why text is safe here and nowhere else
+
+This log has twice concluded that rewriting a column name inside rendered SQL is a trap, because
+`CHECK ((status <> 'qty'::text))` survives dropping `qty` and an index whose predicate merely spells
+`'a'` survives dropping `a`. A name-shaped token need not be a reference.
+
+The UNIQUE / PRIMARY KEY / FOREIGN KEY leading group is a different grammar. A string literal is NOT
+LEGAL in a local column list, so the trap is not avoided by care - it is structurally unreachable.
+That is the entire licence for this change, and it does not extend one inch further. The comment on
+the index predicate now says so explicitly, so the next reader does not generalise from this to
+expressions.
+
+Two details that would have traded one drift for another:
+
+  - Re-render through `constraintdef_cols` rather than swapping the substring, because quoting is
+    CONDITIONAL. `a -> order` must produce `UNIQUE ("order")`; a naive swap gives `UNIQUE (order)`.
+  - Splice over the leading group ONLY. The FK tail - `REFERENCES`, `ON UPDATE`, `ON DELETE`,
+    `DEFERRABLE INITIALLY DEFERRED`, a trailing ` NOT VALID` - stays byte-identical, pinned live and
+    in a unit test.
+
+### The guard, and what its silence is worth
+
+Before splicing, the unchanged parse is re-rendered and required to equal the original group byte for
+byte; on mismatch the definition is left alone. Stale reports drift, corrupt is accepted silently, so
+the failure mode is chosen deliberately.
+
+It never fired. The reject branch was instrumented and the whole suite run with `--nocapture`: zero
+hits across 80 targets and 2276 tests, instrumentation removed before the final gates.
+
+That silence is worth stating carefully. It does NOT prove the parser is total - it proves the parser
+round-trips every constraint this corpus produces. The guard costs three lines and converts an unknown
+unknown into a no-op, which is the right trade for a parser nobody has proved total. Unit tests pin it
+rejecting `"a""b"`, `"a,b"` and `"a)b"`, so the branch is exercised even though production never
+reaches it.
+
+### The cross-table gap, measured rather than assumed
+
+Renaming a parent column leaves every OTHER table's FK definition stale, because this arm never leaves
+its own table. Measured:
+
+    xfk_child  FOREIGN KEY (parent_id) REFERENCES <schema>.xfk_parent(id)    <- fold
+               FOREIGN KEY (parent_id) REFERENCES <schema>.xfk_parent(uid)   <- live
+
+Reproduced and NOT fixed here. The table-rename analogue `rewrite_incoming_fk_targets` already exists;
+the column-rename one does not. It is a second commit behind its own RED, which is how it was scoped
+before the measurement rather than after.
+
+Gates: 80 targets / 2278 passed / 0 failed, exactly one new target and eight new tests above 2270,
+0 skip banners, 178s.
