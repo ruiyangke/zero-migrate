@@ -7714,3 +7714,83 @@ While probing FTS5 the agent reports the engine's own FTS5 path failing independ
 settings: the engine-authored initial-population INSERT denied even under the journal mode, the sync
 trigger failing the same way, and MATCH denied in both modes. If that reproduces it is a broken
 feature rather than a hardening question.
+
+## F126 - Making a denial name itself, and two mechanisms that individually pin nothing
+
+Three independent sources asked for the same thing: the hardened SQLite authorizer refuses with
+
+    Exec("authorization denied")
+
+and nothing else. No action, no table, no pragma, no mode. Both opinions on the FTS authorizer question
+proposed this diagnostic unprompted, and the downstream consumer raised it twice on its own terms,
+noting correctly that it is not really about the pragma - once that one is allowed the next denial is
+exactly as opaque.
+
+Built ahead of any widening, because it widens nothing and helps anyone hitting any denial today.
+
+The denied action, database, accessor and mode are recorded when the matrix returns `Deny`, and
+appended when the error maps out. Real output:
+
+    sqlite migration statement failed: not authorized
+      [denied: PRAGMA writable_schema=ON on <unqualified>, mode=CreatorUp]
+
+### Two judgement calls worth recording
+
+An FTS-specific hint was REJECTED. At that callback a creator's own `PRAGMA data_version` and FTS5's
+internal one produce byte-identical contexts, so naming FTS would be a guess printed as a fact - right
+in one case and actively misleading in the other, on a mechanism that fires for every denial in the
+system. If that pointer is wanted it belongs at the layer that knows it is FTS.
+
+The database renders as `<unqualified>` rather than `main` when SQLite supplies no name. The matrix
+TREATS an absent name as the app file, but the callback never said `main`, and printing it would put a
+fact in the message SQLite did not supply.
+
+### The mutation that mattered, and it took three attempts to find
+
+The load-bearing assertion is the NEGATIVE one: an unrelated failure must never carry a stale denial.
+The slot is cleared twice - on scope open and again on `Drop`. Mutating each:
+
+    remove the clear on open      19 pass   INERT
+    remove the clear in Drop      19 pass   INERT
+    remove BOTH                   1 fails
+
+with exactly the right message:
+
+    a stale denial leaked onto an unrelated failure: sqlite migration statement failed:
+      not authorized by the app [denied: PRAGMA writable_schema=ON on <unqualified>, mode=CreatorUp]
+
+So the two clears are redundant with each other and NEITHER IS INDIVIDUALLY PINNED. The test pins the
+PROPERTY - cleared per statement - which is the right thing to pin, since pinning each mechanism would
+pin the implementation. But a cleanup could delete one on the grounds it is redundant, correctly, and
+a later cleanup delete the other on the same grounds, and no test would notice until both were gone.
+Recording it here so the second deletion is not made in innocence.
+
+This is the third time in two days a mechanism that reads as load-bearing turned out not to be, after
+the rename arm's kind gate (F122) and the DEFENSIVE name (F125). The pattern is the same each time: the
+obvious mutation is inert because something else already covers the case, and finding that out requires
+mutating the thing rather than reasoning about it.
+
+### The gate my own brief omitted
+
+I gave the agent fmt, clippy, test and node, and left `cargo doc` out. It followed the list. The doc
+gate then failed on a link the change introduced:
+
+    error: unresolved link to `authorize`
+      --> crates/zero-migrate/src/apply/backend/sqlite/authorizer.rs:472:58
+
+`authorize` is the `cfg(test)` wrapper, and rustdoc never compiles `cfg(test)` - the same class F118
+handled by demoting three links to plain text with a reason. Demoted with its reason and the gate
+returns 0.
+
+Two things worth keeping from that. A gate omitted from a brief is a gate that will not run, and the
+verification I do myself is the only thing that caught it. And this failure is only VISIBLE because of
+`e2a74a9`: that link is on a private item, which the doc gate did not read at all until the flag landed
+this morning. The widening paid for itself within hours, on a defect introduced after it.
+
+### Gates
+
+    fmt 0, clippy 0 (CI's command), workspace 83 targets / 2301 passed / 0 failed / 0 ignored,
+    node 4 / 52, doc 0, 0 skip banners
+
+Exactly +4 against 83 / 2297 - two unit tests and two integration tests, no new target. Confinement
+composition unchanged: the same 17 tests by name, all still passing, plus the 2 new ones.
