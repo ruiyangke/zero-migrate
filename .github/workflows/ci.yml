@@ -131,13 +131,13 @@ jobs:
       - name: embedded-recorder.js matches tsup build (no committed drift)
         run: git diff --exit-code -- packages/zero-migrate/dist/embedded-recorder.js
       - name: zero-migrate check (tsc x2)
-        run: pnpm --filter zero-migrate check
+        run: pnpm --filter zero-migrate --fail-if-no-match check
       - name: zero-migrate test
-        run: pnpm --filter zero-migrate test
+        run: pnpm --filter zero-migrate --fail-if-no-match test
       - name: zero-migrate-cli typecheck
-        run: pnpm --filter zero-migrate-cli typecheck
+        run: pnpm --filter zero-migrate-cli --fail-if-no-match typecheck
       - name: zero-migrate-cli test:docs
-        run: pnpm --filter zero-migrate-cli test:docs
+        run: pnpm --filter zero-migrate-cli --fail-if-no-match test:docs
 
   # ---------------------------------------------------------------------------
   # napi: build the shipped release `.node` addon, run the addon's own JS gates
@@ -169,9 +169,9 @@ jobs:
       - name: pnpm install
         run: pnpm install --frozen-lockfile
       - name: build zero-migrate authoring package
-        run: pnpm --filter zero-migrate build
+        run: pnpm --filter zero-migrate --fail-if-no-match build
       - name: build release addon
-        run: pnpm --filter zero-migrate-node build
+        run: pnpm --filter zero-migrate-node --fail-if-no-match build
       # `index.d.ts` is napi codegen output, but it is COMMITTED and shipped in the
       # package `files` - so a consumer's types come from the checked-in copy, not
       # from the build. Nothing compared the two until this step, and the file had
@@ -194,9 +194,9 @@ jobs:
       # generation). Four short node processes against the addon this job just
       # built, so they add ~2s of wall clock and no extra build.
       - name: addon JS gates (real .node, canned host driver)
-        run: pnpm --filter zero-migrate-node test
+        run: pnpm --filter zero-migrate-node --fail-if-no-match test
       - name: typecheck generated schema artifact
-        run: pnpm --filter zero-migrate-node test:codegen
+        run: pnpm --filter zero-migrate-node --fail-if-no-match test:codegen
 
   # ---------------------------------------------------------------------------
   # host: the CLI host e2e suite (test:host), which drives the REAL napi addon
@@ -259,8 +259,8 @@ jobs:
       # The host tests load the addon resolved through the zero-migrate-node
       # workspace package; build it first.
       - name: build release addon
-        run: pnpm --filter zero-migrate-node build
+        run: pnpm --filter zero-migrate-node --fail-if-no-match build
       - name: pnpm -w build
         run: pnpm -w build
       - name: zero-migrate-cli test:host (live PG + MySQL)
-        run: pnpm --filter zero-migrate-cli test:host
+        run: pnpm --filter zero-migrate-cli --fail-if-no-match test:host
