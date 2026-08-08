@@ -7553,3 +7553,77 @@ emitter, naming OTHER columns by definition, with no reader anywhere that could 
 Three carriers have now been found, each while investigating the previous one, and each time I assumed
 the set was closed. The right question after finding one is not "is this reachable" but "what else has
 this shape", and I have asked it late every time.
+
+## F124 - Pinning the one line that was holding down a severity I got wrong
+
+F123 recorded that I filed a stale-identifier bug at the wrong severity because I measured against a
+stock SQLite rather than the connection this engine opens. The thing that made my claim wrong is
+`apply/backend/sqlite/actor.rs`, steps 5 and 6 of the hardened open sequence, which turn off SQLite's
+double-quoted-string misfeature for DDL and DML.
+
+Nothing pinned either setting. `grep -rn 'DQS_DDL|DQS_DML|SQLITE_DBCONFIG_DQS'` returned nothing
+outside `actor.rs`, so deleting both lines left every gate green while silently converting a loud DDL
+rejection into a table that accepts no rows.
+
+### A premise corrected on the way in
+
+I had assumed the settings might be redundant with a compile-time default. They are not: the bundled
+SQLite ships DQS ON, and a raw `rusqlite::Connection` reads back `DQS_DDL = true` and `DQS_DML = true`.
+So the two lines are the whole guard, and the mutation worth proving is DELETION, not just a flip.
+
+### What the test pins
+
+Three tests through `SqliteBackend`'s own hardened open, not a bare connection - a test that builds its
+own handle pins nothing about the engine.
+
+The rejection assertions are deliberately over-specified, because the failure mode this repo keeps
+producing is a test passing for the wrong reason. Each rejection must: be an `Err`; NOT be an
+authorizer deny (a rejection from confinement rather than name resolution would otherwise satisfy it);
+be the expected error variant rather than a dead actor or a failed open; contain the identifier
+`ghost`; and contain `no such column`. Actual text:
+
+    no such column: "ghost" - should this be a string literal in single-quotes?
+    in CREATE TABLE x (a TEXT CHECK ("ghost" IS NULL)); at offset 30
+
+A bare `is_err` would pass on a syntax error, a missing table, or a closed connection. All five
+assertions together make that impossible.
+
+Each leg carries a POSITIVE CONTROL on a raw DQS-on connection, and the controls are what make the
+tests mean anything: with DQS on, the same DDL is ACCEPTED and the resulting table then rejects every
+row with `CHECK constraint failed: ghost`; the same INSERT is ACCEPTED and stores the string `ghost` as
+data. So the tests demonstrate the harm the setting prevents, not merely that an error occurs.
+
+The second test goes through the real creator path and additionally asserts nothing journalled and no
+table survived - a rejected `up` that still recorded a version would be worse than the bug.
+
+### Mutations
+
+    DQS_DDL -> true     2 of 3 fail
+    DQS_DML -> true     1 of 3 fails   (so the legs are independently pinned)
+    both lines deleted  3 of 3 fail
+
+I reproduced the deletion case myself rather than accepting the report: all three tests ran and failed,
+and `actor.rs` restored to the identical md5 afterwards. The second mutation's failure message is the
+one worth quoting, because it shows the migration APPLIED:
+
+    a creator up carrying a stale CHECK identifier must not apply: true
+
+### A test that does not pin what its name says
+
+Measured while deciding whether `DEFENSIVE` and `TRUSTED_SCHEMA` belonged in the same file: with
+`DEFENSIVE` turned off, the full workspace stays green - including
+`sqlite_confinement::confine_direct_sqlite_master_write_still_blocked_by_defensive`, whose name and
+comment claim to pin it. Its direct `sqlite_master` write is blocked by `writable_schema` being off by
+default, so DEFENSIVE's actual contribution there is unproven. Filed separately; this is the same
+defect as the T8 pin in F120, found the same way, by mutating the thing the test claims to depend on.
+
+Both settings are left unpinned and OUT of this file deliberately. They are confinement properties -
+what a hostile creator can reach - whose failure means sandbox escape rather than wrong data. Merging
+them would make this file's name and its assertion messages lie about what broke.
+
+### Gates
+
+    fmt 0, clippy 0 (CI's command, no --exclude), workspace 83 targets / 2294 passed /
+    0 failed / 0 ignored, node 4 / 52, doc 0, 0 skip banners
+
+Exactly +1 target and +3 passed against 82 / 2291.
