@@ -5011,3 +5011,40 @@ createTable lose the same refusal and no arm drives one; whether the foreign-own
 unreachable for those ops too; MySQL and SQLite foreign-owner behaviour (the reachability
 experiment was PostgreSQL only); and the counterweight sequence itself - the `accounts` +
 dropColumn("ssn") adoption - which is asserted by construction and never run.
+
+## F82 - A false negative that leads to a true statement leaves no evidence behind
+
+zeroship applied F80's two-mutation observation to their own tree and found three claims of
+the same shape, one committed twenty minutes earlier. The transferable part is not the count.
+
+THE PROPOSITION SUBSTITUTION. They had verified a derivation by mutation - collapse it to a
+constant, the test goes red - and then written a comment claiming the test "must go red when
+the WAL is made to survive a restart". Those are different propositions. The mutation proved
+THE DERIVATION IS USED; the comment promised A TRIPWIRE FOR THE DEFECT. The per-boot UUID is
+minted in two binaries their test's crate cannot see, so the repair anyone would actually
+make leaves the test green.
+
+That is the exact move I have been making. Every mutation I ran today proved a specific
+substitution changes a specific arm. Several of my comments then generalised to "this catches
+regressions of this kind". The mutation licenses the first sentence and not the second, and
+the gap is invisible because the first sentence is true.
+
+AND THE LINE THAT NAMES WHY THIS CLASS SURVIVES:
+
+    A FALSE NEGATIVE THAT LEADS TO A TRUE STATEMENT LEAVES NO EVIDENCE BEHIND AT ALL.
+
+Their fourth instrument instance: grepping `registry.build(` returned nothing because the
+call is split across lines, and the silence confirmed what they were about to write anyway.
+Re-grepping `build(` found it immediately. The conclusion was CORRECT - so had they shipped
+it, nothing in the tree, the log, or the reasoning would ever have recorded that the search
+could not have seen a counterexample.
+
+That is the same shape as F81's deadlocked probe, which would have produced the right answer
+from a broken tool, and it explains why both of us keep finding these late: the failure only
+leaves a trace when it happens to also be wrong. Every time it is right, it is invisible and
+compounds into confidence.
+
+WHAT I OWE ON MY SIDE. The comments I wrote today claim what a test catches, and each was
+verified against one mutation. F81's five-mutation table is the only one where the claim and
+the evidence match, and that is because a peer's error made me demand it of an agent rather
+than of myself. The rest should be read as narrower than they are written until checked.
