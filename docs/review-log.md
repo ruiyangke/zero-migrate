@@ -6673,3 +6673,56 @@ restoring it.
 Gates: 76 targets / 2251 passed / 0 failed, exactly one new target and its seven tests above the
 2244 baseline, 0 skip banners, 180s. The tracked IR schema golden is unmoved; the two Debug goldens
 gained one line each per constraint block and nothing else.
+
+## F111 - A forward reference that came true, and a dead exemption that reads as a live one
+
+`tests/fold_roundtrip_sqlite.rs` blanks CHECK `definition` on both sides before comparing, justified
+as "parity with the PG oracle; the corpus has none". Two claims, and checking them settled a third
+thing I had filed.
+
+**The PG oracle exists.** I had filed that it did not. That was true when filed and is now stale by
+one day: `tests/fold_roundtrip_pg.rs` was added in `9d0b011`, whose message is "add the fold
+round-trip oracle two comments already promised" - an explicit acknowledgement that the SQLite
+comment was a FORWARD REFERENCE. The SQLite oracle dates to `5bda861`; the comment out-ran its peer
+by six weeks and then the peer arrived.
+
+That is a failure mode worth naming on its own. A comment describing a thing that does not exist yet
+is indistinguishable from one describing a thing that never will, and it ages into a false citation
+without anyone editing it. The repair is not to ban forward references; it is to write them as
+intentions rather than as facts.
+
+**"Parity" was wrong about mechanism.** The PG oracle compares with `diff_snapshots(...).is_clean()`
+and inherits its CHECK exemption from the differ's `constraint_definition_is_comparable`. The SQLite
+oracle compares snapshots directly, and `ConstraintSnapshot::PartialEq` DOES compare `definition`.
+The two exemptions are independent; this one had to be applied by hand and duplicates nothing.
+
+**"The corpus has none" is true and far too weak.** The loop is structurally unreachable, not merely
+unexercised:
+
+    fold side    fold_ops under SqlDialect::Sqlite returns FoldError::Unsupported
+                 "createTable table-level CHECK is PostgreSQL-only"   fold.rs:2911
+                 "addConstraint(check) is PostgreSQL-only"            fold.rs:3233
+    live side    snapshot_schema_sqlite pushes only PRIMARY KEY, UNIQUE, FOREIGN KEY
+
+A corpus that authored a CHECK would panic at the fold, never reaching the blanking. "The corpus
+happens not to" invites someone to add one; "the fold refuses and introspection cannot produce one"
+tells them what would actually have to change.
+
+### The reason does not transfer, which is the part that matters
+
+CHECK bodies get exempted anywhere because PostgreSQL re-deparses: the fold writes
+`CHECK (("qty" >= 0))` and `pg_get_constraintdef` reads it back unquoted. Measured on SQLite: a table
+created with `CONSTRAINT "parts_qty_check" CHECK (("qty" >= 0))` stores its `CREATE TABLE` text
+verbatim in `sqlite_master` and reads back BYTE-IDENTICAL, quoted stays quoted and unquoted stays
+unquoted.
+
+So the SQLite oracle inherited a PostgreSQL-shaped workaround for a divergence SQLite does not have.
+If SQLite CHECK folding ever lands, the right end state is probably to DELETE this blanking rather
+than keep it - the text would round-trip clean without any exemption.
+
+The code is left in place and the comment now says it is dead, why both halves prevent it, and that
+blanking `definition` alone would not be enough after lifting only the fold refusal: a fold-emitted
+CHECK with no live counterpart is a MISSING constraint, which blanking a field cannot reconcile.
+
+Gates unchanged, as a comments-only change requires: 76 targets / 2251 passed / 0 failed, 0 skip
+banners, 107s.
