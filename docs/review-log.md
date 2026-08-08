@@ -6846,3 +6846,69 @@ bodies from comparison. Invisible rather than wrong.
 
 Gates: 77 targets / 2257 passed / 0 failed, exactly one new target and its six tests above the 2251
 baseline, 0 skip banners, 192s.
+
+## F114 - gen-types dropped a constraint PostgreSQL kept, because it read every dialect leg
+
+`crates/zero-migrate/src/render/gen_types.rs` replays a history to build the authoring artifact. On
+`dropColumn` it discards any constraint or index that references the dropped column:
+
+    state.constraints.retain(|c| !constraint_uses_local_column(c, table, column, dialect));
+    state.indexes.retain(|i| !index_uses_column(i, table, column, dialect));
+
+A `true` verdict DROPS. The predicate walked the whole serialised expression, so for an
+`Expr::Dialectal` it matched a column appearing in ANY leg - while the renderer installs only the
+SELECTED leg. That is a false positive in the direction that destroys information.
+
+I refused to reuse this predicate when fixing `F110`, and recorded then that whether its existing
+callers were already harmed was UNVERIFIED. They were.
+
+Measured through the real gate, PostgreSQL target, on a history whose CHECK and partial index name
+`a` in the pg leg and `b` only in the sqlite leg:
+
+    CREATE TABLE "public"."legs" (... CONSTRAINT "legs_leg_ck" CHECK (("a" > 0)))
+    CREATE INDEX "legs_partial_idx" ON "public"."legs" ("a") WHERE ("a" > 0)
+    ALTER TABLE "public"."legs" DROP COLUMN "b"
+
+Neither PostgreSQL object names `b`. Live PostgreSQL 18.4 keeps both after the drop. gen-types emitted
+the table with NEITHER - a generated artifact that disagrees with the database it describes.
+
+The fix threads the target dialect into the walk so it descends only the selected leg, matching
+`render::dml::expr_column_refs`, which `render::fold` already uses for the same decision. Two replays
+of the same history disagreed; now they do not.
+
+### The asymmetry that had to be preserved
+
+The RENAME walks still union every leg, deliberately. `render_expr` serialises the whole dialectal
+node into the generated artifact, so a column renamed in one leg must be renamed in ALL of them or the
+inactive leg keeps a dangling name. Cascade reads the selected leg; rename rewrites every leg. Both
+sites now say so.
+
+That is the part a mechanical "make it dialect-aware" sweep would have broken, and it is why the
+helper was threaded rather than globally switched.
+
+### Suspect two: not a bug, and worth recording as such
+
+`rename_constraint_local_column`'s empty `IrConstraintKind::Check { .. } => {}` arm looked like the
+same defect. It is not. That function rewrites column NAME LISTS; `Check` has no name list, and its
+`expr` is rewritten thirty lines later by the `for_each_expr_mut` pass. Demonstrated: after
+`renameColumn a -> z`, the emitted artifact carries `{"node":"colRef","name":"z"}`. Adding a rename
+there would be a second pass over the same nodes.
+
+The arm now carries a comment saying why it is empty, so the next reader does not re-open it. A
+correct-looking absence needs a reason attached or it gets re-investigated forever.
+
+### What I decided rather than the agent
+
+Sharing one walker made the Exclusion arm leg-aware too, which was NOT demonstrated. I kept it. The
+correctness argument is identical, and the union is the UNSAFE direction here - it discards objects
+the database kept. Forking the walker to preserve an unjustified behaviour would be the worse trade.
+Recorded as undemonstrated for EXCLUDE specifically.
+
+Gates: 78 targets / 2261 passed / 0 failed, exactly one new target and four new tests above the 2257
+baseline, 0 skip banners, 176s. `cargo doc --document-private-items` exit 0.
+
+### Not measured
+
+Whether any real project ships a `dialect()` expression inside a CHECK or partial index today. The
+mechanism is proven; the incidence is not. A defect that needs an uncommon authoring shape is still a
+defect, but I am not claiming anyone has hit it.
