@@ -5821,3 +5821,56 @@ altered out of band while keeping its name and kind is now undetected. Swapping
 the differ silent. Recovering it needs the treatment foreign keys already get - parse the
 catalog text back to the closed AST and compare structurally - which is `#111`'s neighbourhood
 and not this change.
+
+## F96 - The fix was right, the gate that failed it was not measuring the fix
+
+`#114`. `detachPartition` and `dropPartition` emit opposite DDL and folded identically:
+
+    declarative.rs:7384  detach -> "ALTER TABLE {parent} DETACH PARTITION {child}"   child SURVIVES
+    declarative.rs:7401  drop   -> "DROP TABLE {child}"                              child DESTROYED
+
+Both arms did `partitions.remove(name)` and nothing else, so offline replay lost the detached
+relation that PostgreSQL keeps as an ordinary table.
+
+The fold now retains it. A table that was ATTACHED is restored from the snapshot it had before
+the attach; a partition that was CREATED is reconstructed from the parent, because that is where
+the server gets it from. Clone index names route through the existing name helpers
+(`implicit_primary_key_name`, `derived_constraint_name`, `non_unique_index_name`) rather than
+`format!`, so the offline name is byte-identical to the one the lower would produce, and an
+overlong generated name is REJECTED rather than silently hash-capped - the fold does not model
+PostgreSQL's native truncation and says so where the helper is defined.
+
+### The reconstruction was inference until I measured it
+
+The created-partition branch blanks column comments, constraint comments and identity. I carried
+that as a reasoned guess for hours before noticing I could just ask the server (PostgreSQL 18.4):
+
+    created child, comments on parent:  table NULL, column NULL, constraint NULL   nothing inherited
+    attidentity while attached:         'a'
+    attidentity after DETACH:           empty                                      identity dropped
+
+All three blanks are correct, and now for a recorded reason rather than a plausible one. The
+same probe found `#116`: the server REFUSES to attach a child carrying an identity column
+(`table "c_attach" being attached contains an identity column "id"`) while the fold accepts it -
+the same fold/server disagreement as this ticket, in the accepting direction.
+
+### The part worth writing down
+
+The full workspace gate came back exit 1 with ten `sqlite_confinement` failures, in a suite with
+no connection to partition folding. The reflex is to bisect the diff. Three controls first:
+
+    HEAD, no env vars      14 passed  exit 0
+    HEAD, gate env vars    14 passed  exit 0   (10.58s - the env was doing real work)
+    my tree, gate env vars 14 passed  exit 0
+
+The suite was fine in every configuration. It had failed only while another repository ran its
+own `cargo test` at load average 23, and that log ENDED MID-LINE with no `failures:` block - the
+process died, it did not report failures. Re-run clean: 75 targets, 2241 passed, 0 failed.
+
+A gate that fails is a measurement of the gate as much as of the change. Control the environment
+and the load, not just the tree, before reading a red as evidence about a diff.
+
+Related: the first run of the new case reported `10 passed` in 0.01s. A live-database suite
+cannot touch PostgreSQL in 0.01s. `ZERO_MIGRATE_TEST_PG_URL` was unset and the `#41` banner had
+printed LIVE-DATABASE COVERAGE SKIPPED directly above the greens. Wall-clock was the tell; the
+count was identical either way, which is exactly what `#41` exists to expose.
