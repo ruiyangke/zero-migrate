@@ -6541,3 +6541,58 @@ structural change. Worth knowing before treating any comment in that crate as fr
 
 Gates unchanged, as a comments-only change requires: 75 targets / 2244 passed / 0 failed, 0 skip
 banners, 168s wall clock.
+
+## F109 - "Was removed" and "never worked that way" are different sentences, and only one was true
+
+`LiveSchema::for_sqlite_descriptors` in `render/lower.rs` carried a doc block that contradicted
+itself inside one paragraph. It said the SQLite rename path "is engine/test-only today; it is NOT
+the production peer of the PG deploy path", and four sentences later that "the descriptor set IS the
+authoritative source, so the dev/CLI deploy path threads it here".
+
+Corrected and uncorrected framings coexisting is the failure this log has recorded twice before. The
+reader cannot tell which sentence is current, and the confident one wins.
+
+Measured: the only call site in the workspace is `lower.rs:13443`, inside `mod tests` at `:9652`
+under `#[cfg(test)]` at `:9651`.
+
+### Why the history had to be run before the words were chosen
+
+An earlier note recorded two commits containing a now-deleted call line, which would make this a
+survivor-of-removal and make "was removed" the honest phrasing. It half was, and the interesting
+part is the half that was not.
+
+    8a212fb   deletes crates/zero-migrate/src/apply/ir_apply.rs, 572 lines
+    8a212fb^  ir_apply.rs:391 holds the call, and that file contains ZERO cfg(test)
+
+So the removed caller genuinely sat outside test cfg. "Was removed" survives. But the enclosing
+function, `apply_bundle_ir_sqlite`, had no non-test caller at that revision either - at `8a212fb^`
+the only hits are its definition, a `lib.rs` re-export, doc mentions and `tests/`. Its own module doc
+there opened by saying the SQLite rename path is structurally test-only.
+
+A caller was removed. A DEPLOY caller never existed. Writing only the first would have implied the
+second, and a reader would have concluded the deploy path regressed rather than never existing.
+
+### The rule
+
+Checking `git log -S` tells you whether a string was ever present. It does not tell you whether the
+thing that contained it was reachable. A call site in a historical diff is not a production caller
+until the enclosing module IN THAT REVISION is known, and then only if something reached the
+enclosing function. Two levels, not one - the same trap that made an earlier sweep report a caller
+that was inside `#[cfg(test)]` all along.
+
+The comment now states what the constructor is FOR - giving whatever caller eventually supplies
+PRE-rename column facts one shared way to build them - rather than implying something already calls
+it. Everything true in the block survived: why a `registerModel`-derived set fails closed on a
+rename, why the SDK `Value` is not recoverable from `sqlite_master`, and that it routes through the
+same `desired_snapshot_for_dialect` the differ uses.
+
+### The bound on the claim
+
+The comment says "the only call site in the workspace", scoped deliberately. `for_sqlite_descriptors`
+is `pub` on a `pub` type, so a consumer outside this repository could call it and nothing here could
+see that. Unfalsifiable from inside, so the sentence does not pretend otherwise.
+
+Left open rather than decided: a `pub` production-namespace constructor with zero non-test callers is
+invisible to dead-code analysis precisely because it is `pub`. Making it `pub(crate)`, gating it, or
+wiring the pre-deploy catalog read the comment now describes are all real options and none of them is
+a comment fix. Gates unchanged: 75 targets / 2244 passed / 0 failed, 0 skip banners, 104s.
