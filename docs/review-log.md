@@ -6726,3 +6726,69 @@ CHECK with no live counterpart is a MISSING constraint, which blanking a field c
 
 Gates unchanged, as a comments-only change requires: 76 targets / 2251 passed / 0 failed, 0 skip
 banners, 107s.
+
+## F112 - The gate could not see 27 broken links, and two of my proposed fixes were wrong
+
+The doc gate is `cargo doc --workspace --no-deps` with `-D rustdoc::broken_intra_doc_links`. Without
+`--document-private-items`, rustdoc does not process docs on private items, so a broken link there is
+invisible. Measured: 0 broken links as the gate runs, 27 the moment private items are documented, and
+all 27 sit on private or `pub(crate)` items.
+
+Among them was the `Op::vendor_capabilities` link that commit `1f39b5a`'s message claimed to fix. It
+was still broken, for this exact reason: it sits on a private fn, so the gate never saw the fix fail.
+A gate that cannot see a class of defect will certify a fix to that class.
+
+### What rustdoc can and cannot link, measured rather than assumed
+
+The implementing agent probed this with a standalone crate instead of inferring it:
+
+    pub mod a { fn priv_fn() {}  pub(crate) fn crate_fn() {} }
+    pub mod b { /// [`crate::a::priv_fn`] and [`crate::a::crate_fn`]
+                pub fn user() {} }
+
+    priv_fn   -> "no item named `priv_fn` in module `a`"   BROKEN under every flag combination
+    crate_fn  -> resolves, warns private_intra_doc_links only
+
+So `pub(crate)` is linkable and bare-private is not, in ANY configuration. That turned "one unfixable
+link" into three: the `cfg(test)` test fn, plus two cross-module private fns. Those became plain text
+with a stated reason rather than links nobody can follow.
+
+### Two of my proposed targets were wrong, and the agent refused them
+
+I supplied a target list. Two were defects, and both were caught by checking rather than applying:
+
+  - `session.rs:243` I proposed `apply_non_transactional`. FALSE. `restore_session` is called from
+    `apply_with_lock_backend` at `executor.rs:679`, which `apply_non_transactional` never reaches.
+    The original bare word `apply` was right and only needed qualifying.
+  - `executor.rs:1137` I proposed `postgres::session::apply_transactional`. That fn is
+    `#[cfg(pg_seam)]` at `session.rs:377` and PostgreSQL-only, so naming it inside a generic
+    `<B: MigrationBackend>` fn is wrong for SQLite and MySQL and would break a `--no-default-features`
+    doc build. It now names `MigrationBackend::apply_one`, which is what actually dispatches.
+
+Both verified by me afterwards. The instruction that produced this was "a link you cannot resolve with
+certainty: leave it and report it, do not guess a target" - the same discipline that F108 was about,
+applied to the fix rather than to the original citation. A list from the person who filed the ticket
+is not evidence.
+
+### Result
+
+    broken_intra_doc_links under --document-private-items    27 -> 0
+    broken_intra_doc_links in the gate's own configuration     0 -> 0
+    private_intra_doc_links                                   61 -> 61
+    redundant_explicit_links                                  44 -> 44
+
+The two warn-only lints are untouched and remain unenforced; that is #113 and a separate decision,
+because enabling them is a policy change rather than a correction.
+
+Gates unchanged: 76 targets / 2251 passed / 0 failed, 0 skip banners, 174s.
+
+### Left open deliberately
+
+Enabling `--document-private-items` in CI is NOT part of this. The links are fixed, so the gate could
+now adopt it without landing red - but that is a decision about what the gate should enforce, and it
+travels with the question of whether the 61 public-doc-links-to-private-item warnings should be denied
+too. Filed rather than taken.
+
+One pre-existing defect found and not fixed: the doc block at `apply/drift.rs:316-354` is attached to
+`fn canonical_extension_type` but describes `snapshot_schema`, and line 316 carries a stray `///`
+mid-sentence. Wrong-subject documentation is a different failure from a broken link.
