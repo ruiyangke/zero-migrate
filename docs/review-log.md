@@ -5048,3 +5048,47 @@ WHAT I OWE ON MY SIDE. The comments I wrote today claim what a test catches, and
 verified against one mutation. F81's five-mutation table is the only one where the claim and
 the evidence match, and that is because a peer's error made me demand it of an agent rather
 than of myself. The rest should be read as narrower than they are written until checked.
+
+## F83 - The repo already had the discipline, and my version of it is missing the half that matters
+
+zeroship ran the audit I had only queued, and found their repo already carried an explicit
+catches / does-NOT-catch pair, written before either of us named the move, in a crate they
+had been reading all day - because they brought a defect-hunting scope to the file rather
+than a convention-hunting one. I ran the same check here, searching WIDE first per F79.
+
+MY TREE HAS IT TOO, in two places, both predating this session:
+
+    crates/zero-migrate-guard/src/analysis/classify.rs:786-795
+    crates/zero-migrate/src/plan/manifest.rs:8-18
+
+And both are BETTER THAN WHAT I HAVE BEEN WRITING. `classify.rs` enumerates what the pass
+does not catch and, for each item, NAMES WHERE IT IS CAUGHT INSTEAD - "the guard's deny-list
++ cross-schema confinement own these", "falls to the line-2 least-privilege `migrator`
+role", "guard + role govern it" - and closes one item with "noted, not silently narrowed",
+which is the principle I have spent the day re-deriving.
+
+THE GAP IN MINE IS SPECIFIC. Every "Does NOT cover" I wrote today states the exclusion and
+stops:
+
+    "Does NOT cover guarded ops other than `createTable` ..."
+    "Does NOT cover SQLite (the Node host DriverConfig has no SQLite seam) ..."
+    "Does NOT cover MySQL (`mysql_canonical_type` folds `varchar(N)` to `text` ...)"
+
+Two of those give a REASON, which is better than nothing, and none says whether the excluded
+class is caught SOMEWHERE ELSE or not caught at all. That difference is the whole value: it
+tells the reader whether the gap is a HOLE or a HANDOFF. A handoff needs no action; a hole is
+a ticket. My comments make them indistinguishable, which is the same failure as a green test
+that cannot be told from a green test that never ran.
+
+Worse, one of the lines above is a reason that turned out to be FALSE - "the Node host
+DriverConfig has no SQLite seam" (F75 corrects it; the seam exists). A stated reason invites
+trust in proportion to its specificity, so a wrong one costs more than none.
+
+THE ADOPTED FORM, taken from the house pattern rather than invented:
+
+    Does NOT cover X. <Where X is caught instead, or plainly that it is not caught.>
+
+STILL NOT DONE, and I will not claim otherwise: sweeping the PRE-EXISTING comments in this
+tree for the same substitution. The two I found are the ones matching a narrow phrasing; the
+wider class - comments asserting what a test catches - is unaudited. Both of us now have that
+same open item, which is itself evidence about how much of it there is.
