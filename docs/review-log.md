@@ -6472,3 +6472,72 @@ a name is absent HERE; it cannot decide whether the name describes a surface in 
 sweep that produced the original ticket had exactly the scope that excludes the evidence. Gates are
 unchanged, as a comments-only change requires: 75 targets / 2244 passed / 0 failed, 0 skip banners,
 116s wall clock.
+
+## F108 - A citation that resolves to the right topic and the wrong file is the worst kind
+
+`F107` found one comment citing `plugin-db query.rs:648-653` where this repo's own `query.rs` has
+live code at those lines. Sweeping the class turned up nine more, and one of them is a sharper case
+than the original.
+
+    citations of `sdks/db/src/types.ts`, absent here                    3
+    cross-repo `query.rs:NNN` citations that resolve here               6
+    found by shape, missed by a grep keyed on `query.rs`                1
+
+That last one, `render/declarative.rs:7138`, read "matching plugin-db's `diff.rs:15-26` reasoning".
+This repository has its own `schema/diff.rs`, and lines 15-26 here are the `## Volatile-default
+trap` section - genuinely about volatile defaults, which is what the citing comment is about. Both
+files descend from the same source, so the coordinate drifted onto content that still matches the
+topic.
+
+A reader following it arrives at real, relevant, wrong-file prose and has no reason to keep looking.
+There is no tell. A dead link announces itself; a live one that happens to be on-topic is
+indistinguishable from a correct one.
+
+### The measurement that settles the convention
+
+`schema/diff.rs:16` carried a DATED provenance record: the orchestrator "is a live `pub async fn` at
+`crates/plugin-db/src/register_model/mod.rs:341`, confirmed by that project on 2026-08-08". The date
+is what made it look safe - a snapshot claim rather than a live pointer.
+
+Measured against the consumer's tree on the day it was written:
+
+    :341   as recorded
+    :372   later the same day
+    :388   later still, and line 341 by then was a comment about validation
+
+Three positions in one day. A coordinate into a repository this one does not build cannot be kept
+true, and dating it does not help the reader who follows it. The date makes the claim CHECKABLE; the
+function name makes it FINDABLE. The line number does neither, so it is gone and the comment now
+says why.
+
+The same rot exists inside this repo: `fault.rs:71` cited `runtime.rs:41` for a function at `:34`,
+where line 41 is `thread::Builder::new()`. Intra-repo citations resolve, which is exactly why nobody
+notices when they stop being right.
+
+### What survived, and why that matters
+
+Every "mirrors plugin-db" CLAIM was true. Checking the consumer's `def_to_constraints` against the
+comments describing it, the arms match: quoted string defaults, bare numeric and boolean, min/max
+CHECK in both combined and max-only forms, literal equality, enum IN-lists over strings and numbers.
+Only the coordinates were wrong.
+
+That is the shape of the fix. The information was accurate and the pointer was not, so the repair
+removes the pointer and keeps the information. Deleting the claims would have destroyed something
+true to fix something false.
+
+Two facts the citations got wrong beyond the numbers: those functions now live in the consumer's
+`zeroship-schema` crate rather than `plugin-db`, and `plugin-db/src/query.rs` does not exist there at
+all. The bare `plugin-db` attribution on roughly sixty other references is therefore stale too, and
+was deliberately left alone - it carries no path and no line number, so it misleads nobody about
+where to look, and rewriting sixty sites to fix an attribution is a different change.
+
+### A comment that is also a build input
+
+`zero-migrate-ir/src/ir.rs`'s `MaskKind` rustdoc flows through schemars into the tracked golden
+`ir-envelope.schema.json`. Editing the comment reddened `tests/ir_envelope_schema.rs`; regenerating
+through the documented `UPDATE_SCHEMA=1` path produced a one-line `description` diff and no
+structural change. Worth knowing before treating any comment in that crate as free to reword: in
+`zero-migrate-ir`, a doc comment is an artifact input.
+
+Gates unchanged, as a comments-only change requires: 75 targets / 2244 passed / 0 failed, 0 skip
+banners, 168s wall clock.
