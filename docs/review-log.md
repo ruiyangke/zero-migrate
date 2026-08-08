@@ -6324,3 +6324,50 @@ it, and `ZERO_MIGRATE_REQUIRE_LIVE_DB` turns a deleted override into a failure r
 fallback. Repointing it at 5432 would break the documented local setup and could aim the suite at an
 unrelated Postgres. The constant was never the defect; a test treating it as guaranteed-reachable
 was.
+
+## F105 - One of two sibling arms was gated, and the ungated one could not have skipped if it tried
+
+Found while fixing `F104`, in the same suite. `packages/zero-migrate-cli/tests/host/
+gen-artifacts-dialect.test.ts` has two live-database arms. The MySQL one gates itself at `:127-131`
+and skips cleanly on an unset `ZERO_MIGRATE_MYSQL_URL`. The Postgres one, twenty lines later, did
+not:
+
+    test("genArtifacts folds the Postgres target's own dialectal leg ...", async () => {
+      const { Client } = await import("pg");
+      const admin = new Client({ connectionString: PG_URL });
+      await admin.connect();
+
+`PG_URL` comes from `pgUrl()`, which falls back to the compose DSN on 5434. So a contributor with
+nothing exported and no local database got a hard failure instead of the skip the gate contract
+promises at `live-db.ts:13-16`. Measured against the pre-fix code, no DSN exported and nothing
+listening on 5434:
+
+    exit 1   tests 2  pass 1  fail 1   Error: connect ECONNREFUSED 127.0.0.1:5434
+
+The fix routes it through `connectLivePg`, the same gate every other Postgres arm in the suite uses.
+Three configurations, measured after:
+
+    no DSN, nothing on 5434            exit 0   pass 1  skipped 1   skips, naming the coverage lost
+    live DSN, REQUIRE_LIVE_DB=1        exit 0   pass 2  skipped 0   runs for real
+    explicit DSN at a closed port      exit 1   pass 1  failed 1    still fails, does not skip
+
+### The rule this belongs to
+
+The callback took no test context. Whatever anyone intended, this arm could not have skipped: the
+capability to skip was not in scope at the call site. That is worth more than the missing `if` -
+a missing guard is an oversight, and a missing PARAMETER is a shape that made the guard unwritable
+without changing the signature first.
+
+It also says something about how the sibling made it invisible. The two arms sit in one file, share
+a purpose and read as a matched pair, and a reader checking whether this suite gates its databases
+finds the MySQL gate immediately and stops. Coverage of a rule is not established by finding one
+instance of it, and adjacency is what made the second instance easy to skip past. The third
+configuration above exists for the same reason: a fix that made the arm skip everywhere would have
+been worse than the defect, so the run and the fail arms both had to be measured, not just the skip.
+
+### Why CI never caught it
+
+`.github/workflows/ci.yml:236` exports a working DSN, so the fallback was never reached there. Same
+property as `F104` inverted: that one was green locally and red only in CI, this one is green in CI
+and red only for a contributor without a database. Both are gates measuring their environment rather
+than their subject, and neither is visible from the side that runs green.
