@@ -5528,3 +5528,64 @@ Among them, `model/op_support.rs:358` citing `[Op::vendor_capabilities]` - a lin
 So the finding is not "the gate is fake" but "the gate has a visibility boundary, and rot has
 been accumulating on the far side of it since the day it was installed." That is a smaller
 claim and a true one, and it took being wrong to reach it.
+
+## F92 - The citations that rot are the ones no tool parses
+
+`#106` is closed in 8631419. Six comments named `register_model` /
+`exec_register_model_with_pool` as though this workspace had them; every occurrence of either
+name here was a comment with nothing behind it. Same seeding as F89 and F90: the kernel was
+extracted from appbase's `zeroship-schema`, the orchestrator stayed in its `plugin-db`, and
+the sentences travelled without the code.
+
+appbase confirmed both names are live and unrenamed there, so this resolved the F89 way -
+point at the tree where the condition holds - rather than by deletion.
+
+### The measurement that makes this a rule
+
+`RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" cargo doc --workspace --no-deps` returns
+**0 both before and after this commit**. The gate never saw any of the six.
+
+Every one of them is written in BACKTICKS, not link syntax. rustdoc resolves `[Foo]`; it does
+not resolve `` `Foo` ``. So a citation written as prose is invisible to the only automated
+check this repository has for citations, permanently and by design.
+
+That generalises, and appbase put it better than I had: **the citations that rot are precisely
+the ones no compiler-adjacent tool parses, because the ones it does parse get fixed by the
+build.** A `[Foo]` that stops resolving goes red the next time CI runs, so it never survives
+long enough to mislead. A `` `Foo` `` that stops being true is a string in a comment, and
+nothing will ever look at it again.
+
+Check the list of citation defects found this week against that claim:
+
+    tests/integration.rs          backticked prose   held dead code alive (F90)
+    tests/core_id_parity.rs       backticked prose   promised a guard that could not exist (F89)
+    tests/fold_roundtrip_pg.rs    backticked prose   handed off ops to a file that does not exist
+    tests/sqlite_journal.rs       backticked prose   named a third file that never existed
+    register_model x6             backticked prose   named a module in another repository
+    appbase's four extraction-rot sites (their 6ff4a23f6, reported)
+
+Every one. Not a single one was in link syntax. The doc gate has been green through all of
+them and would have stayed green through all of them.
+
+**So `#103` cannot be a rustdoc gate.** It has to parse prose - backticked paths, bare
+`file.rs:NNN` references, module paths in `//` comments - and resolve them itself with the
+crate-relative rules already measured for that ticket. A gate built on rustdoc would inherit
+exactly the blind spot that let all six of these live.
+
+### The narrower correction inside the fix
+
+Three of the six needed their CLAIM changed, not just their pointer. They said `Vector` /
+`Fts` / `Spatial` "dispatch through Pass 2". appbase's answer: the partition is by
+`ChangeKind::AddIndex`, not by index kind - every index defers to the second pass, and the
+advisory lock is released first because holding it through `CREATE INDEX CONCURRENTLY`
+deadlocks.
+
+The original sentence was TRUE of the three kinds it named. It was still the wrong sentence,
+because it stated a special case as though it were the rule, and it would have gone silently
+false the moment a fifth index kind was added - with nobody editing it, since nothing about
+adding a kind would draw a reader to that line. **A comment that is accidentally true is a
+comment that will become false without anyone touching it.**
+
+That is a distinct failure from the citation rot around it, and worth separating: the citation
+sites were wrong about WHERE something lives, this one was wrong about WHY something happens
+while naming the right things.
