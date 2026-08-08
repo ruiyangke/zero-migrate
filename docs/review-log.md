@@ -6371,3 +6371,48 @@ been worse than the defect, so the run and the fail arms both had to be measured
 property as `F104` inverted: that one was green locally and red only in CI, this one is green in CI
 and red only for a contributor without a database. Both are gates measuring their environment rather
 than their subject, and neither is visible from the side that runs green.
+
+## F106 - I closed the third-state hole in the arm I was reading and not in its sibling nine lines down
+
+`F104` closed a hole where `assert.notEqual(run.status, 0)` passes when `status` is `null`, which is
+what `spawnSync` returns for a killed child. It closed it at ONE of the two call sites.
+
+`live-db-gate.test.ts` had the same assertion twice: at the arm `F104` was rewriting, and at the
+`ZERO_MIGRATE_REQUIRE_LIVE_DB` arm nine lines below, which the rewrite never touched. Swept the
+whole host suite by the shape rather than by the file being edited:
+
+    assert.notEqual(<status>, 0)     2 sites   :166 guarded by F104, :192 NOT
+    assert.equal(<status>, N)       40 sites   sound - equality against a number throws on null
+
+The repair is the same three lines. Mutation-tested by forcing the child to be killed
+(`timeout: 120_000` -> `timeout: 1`):
+
+    guard fired at 2 sites, 3 tests failed
+
+Without the guard both arms report green on a child that never reached a verdict.
+
+### The rule this belongs to
+
+appbase supplied the sharpening, checking my generalisation against their own tree rather than
+accepting it, and their narrowing is the useful form: **the third state is only dangerous in the arm
+that asserts FAILURE.** Asserting success fails CLOSED on it - `if (status !== 0) throw` throws for a
+null, correctly. Asserting failure fails OPEN - `notEqual(null, 0)` passes. Verified by execution,
+not by reading:
+
+    assert.notEqual(null, 0) passes            -> failure-arm fails OPEN
+    if (status !== 0) throw, status = null     -> success-arm fails CLOSED
+
+That is why the 40 `assert.equal` sites needed no change and the 2 `notEqual` sites did. A sweep by
+"audit every status assertion" would have churned 42 sites to fix 2; a sweep by direction found them
+immediately.
+
+### On finding one instance and stopping
+
+This is `F105`'s finding with me as the subject. There, one of two sibling arms was gated and the
+correctly-gated one made the other invisible. Here, one of two identical assertions was repaired and
+the repaired one made the other invisible - in the same file, in a file I had just rewritten, nine
+lines apart.
+
+Editing a site is not surveying its class. The fix went in where the reading happened to be, and
+nothing about having fixed it prompted a search for the same shape elsewhere. The search has to be
+a separate act, keyed on the SHAPE, or it does not happen.
