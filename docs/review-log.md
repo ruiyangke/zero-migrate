@@ -5320,3 +5320,71 @@ I sent today was narrower than it sounded, and none of them said so.
 NOT DONE: the remaining entries are unaudited for supersession. I found three by knowing the
 thread; a systematic pass would need to read every entry against every later one, and I have
 not done it. Nothing here covers that - it is a hole.
+
+## F89 - A stale citation and a misfiled one look identical, and only one of them has a home
+
+`#104` found six comments citing paths that do not exist. Two of them, in
+`crates/zero-migrate-ir/src/id.rs` and `crates/zero-migrate/src/db_url.rs`, promised a
+`tests/core_id_parity.rs` drift guard "while both crates coexist in-tree".
+
+I verified the negative here and stopped: no such test has ever existed in this workspace,
+which has five crates and no `core`, with exactly one definition of `uuid_to_base62` and one
+of `is_sqlite_url`. There is no second copy to diff against, so the guard could not exist.
+I filed that as a stale comment, which meant the fix was a deletion.
+
+zeroship inverted it. The comment's own precondition - both crates coexist - is FALSE where
+the comment is written and TRUE one repository over. They vendor this crate at
+`third_party/zero-migrate` beside their own `crates/core/src/typed_id.rs`, so the two copies
+genuinely coexist there, and they built the guard rather than deleting the sentence:
+`crates/migrated/tests/typed_id_parity.rs`, commit a799a7a51.
+
+**A stale citation and a misfiled one read the same from inside one repository.** Both are a
+path that does not resolve. The difference is whether the condition the comment names is
+false everywhere or only false HERE, and answering that requires looking somewhere the grep
+cannot reach. A stale one has only a delete; a misfiled one has a home. I could not have
+told them apart without the other repository answering.
+
+So `id.rs` now names where the check lives, marks their numbers as REPORTED rather than
+verified by me, and states what the guard does NOT cover - the parse/validate prefix helpers,
+uncovered on both sides. `db_url.rs` gets the honest version: its classifier has no
+cross-repository guard at all, a hole said as one rather than a pointer to a check that does
+not exist. Committed as d562554.
+
+### Their two self-caught errors, both of which are mine
+
+**They first measured the wrong copy.** Their initial run compared against a sibling checkout
+of this repository rather than the submodule their build actually uses, pinned at `ab96f0a`.
+Re-running against the pin gave the same answer, so nothing turned on it - but had it
+differed, they would have held a false negative that AGREED with the conclusion they were
+already forming. That is the population error from F87 and F88 wearing different clothes: the
+question was about the code they ship, and the instrument was pointed at code they do not.
+The rule stands unchanged - a count is a measurement OF A POPULATION - and this is the case
+where the population was a checkout rather than a set of lines.
+
+**Their new test's first draft passed the mutation it was written to catch.** The test
+asserts base62 ordering agrees between the two implementations. Its sweep used high-bit
+values (`n << 80`), which never land on the digits a planted alphabet swap alters - so the
+swap that breaks the ordering property left the ordering test green. They caught it by
+running the mutation they had already described in prose.
+
+That is proposition substitution (F84) inside the hour of a test being written, on a test
+whose stated purpose WAS the property the mutation broke. It is not a stale comment drifting
+from code over months. The gap was there in the first draft, between what the assertion
+covered and what the sentence above it claimed, and only executing the named mutation
+surfaced it. **Writing down the mutation is not running it, and the interval between the two
+is where the claim is unbacked.**
+
+### The same shape from the compiler, same day
+
+Checking `#104 OPEN 1`, I narrowed `pub fn build_create_table_with_fks` to `pub(crate)` to
+see whether the visibility was load-bearing. The compiler answered a larger question:
+
+    error: function `build_create_table_with_fks` is never used
+      --> crates/zero-migrate/src/schema/query.rs:880:15
+    (cargo clippy --workspace --all-targets -- -D warnings, exit 101)
+
+No caller anywhere. `pub` was the only thing keeping it out of dead-code analysis, and the
+only justification for `pub` was a comment citing `tests/integration.rs`, which does not
+exist. **A dead citation can hold dead code alive** - the comment suppressed the question,
+and the visibility suppressed the compiler. Reverted rather than deleted: removing a function
+is a decision, and I wanted the compiler output on the record before making it.
