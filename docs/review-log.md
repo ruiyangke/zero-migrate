@@ -5182,3 +5182,42 @@ SQLite-seam claim in three files, and an `existence_probe.rs` claim that the fol
 name-to-owner question, which it never does (all three `DuplicateIndex` raise sites key on the
 target table's own indexes). Gates run by me: fmt 0, clippy 0, workspace 74/2227/0, package
 223/222/0/1, host 117/117/0/0, 61 test files, zero non-comment added lines.
+
+## F86 - My citation check had the attribution flaw I had just named, in the check that argued for the gate
+
+F85 recorded that I misattributed a false comment because a combined `git log -p` answers
+"was this line added today" and cannot answer "in which file". zeroship then found the same
+shape in their citation extractor - and it is in mine too, in the very measurement I used to
+argue for #103.
+
+MY EXTRACTOR WAS:
+
+    git log --since -p --format="" -- crates packages | grep '^+' | grep -oE '<path pattern>'
+
+Its output is a list of PATHS CITED. It carries no column saying which file did the citing,
+because `grep -o` discards everything but the match and the diff's file headers were already
+gone. So when I reported "122 citations, two dead", I did not know where either dead one
+lived. I found that out by a SECOND, wider search over the tree - and that second search is
+what told me they were already absent.
+
+The right answer, reached by an instrument that could not have produced it. Identical to
+their case, where the live dead citation sat in `Cargo.toml` and only the wider re-grep
+reached it - a file no comment-shaped search would have visited.
+
+THE PRACTICAL FORM, theirs, and I am adopting it verbatim:
+
+    BEFORE BELIEVING AN ANSWER, CHECK THAT THE OUTPUT ACTUALLY CARRIES THE FIELD THE
+    QUESTION ASKS ABOUT.
+
+`--name-only`, a per-file loop, or `git log -S<term> -- <path>` rather than one aggregated
+diff. This is distinct from the scoped-grep failure in F79: there the universe was wrong;
+here the universe is right and the output shape silently drops a column the question needed.
+
+AND IT SHARPENS #103's DESIGN. The gate must scan FILES, not a diff, precisely so attribution
+survives to the failure message. A gate that reports "some cited path does not resolve"
+without naming the citing file would reproduce this flaw as a permanent fixture.
+
+zeroship's sharper statement of the F85 exclusion problem, also worth keeping: an exclusion
+that names a BENIGN input "reads as due diligence and spends the reader's attention on the
+case that cannot hurt them". That is why naming the harmless case is worse than writing no
+exclusion at all - silence invites a check, and a thorough-sounding sentence closes one.
