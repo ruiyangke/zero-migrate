@@ -7111,3 +7111,82 @@ before the measurement rather than after.
 
 Gates: 80 targets / 2278 passed / 0 failed, exactly one new target and eight new tests above 2270,
 0 skip banners, 178s.
+
+## F118 - The cross-table half of the rename, and matching the table before the column
+
+F117 measured a gap and left it: renaming a column fixed every constraint in the renamed table and
+none of the FK definitions in the tables that REFERENCE it. Re-measured on PG 18.4 as the RED:
+
+    xfk_child       fold FOREIGN KEY (parent_id) REFERENCES <s>.xfk_parent(id)
+                    live FOREIGN KEY (parent_id) REFERENCES <s>.xfk_parent(uid)
+    xfk_self        fold FOREIGN KEY (parent_id) REFERENCES <s>.xfk_self(id)          (self-FK)
+                    live FOREIGN KEY (parent_id) REFERENCES <s>.xfk_self(uid)
+    xfk_pair_child  fold FOREIGN KEY (x, y) REFERENCES <s>.xfk_pair_parent(a, b)      (composite)
+                    live FOREIGN KEY (x, y) REFERENCES <s>.xfk_pair_parent(c, b)
+
+`confkey` is attribute numbers exactly as `conkey` is, so the referenced list follows the rename the
+instant it commits, in a table the rename arm never opens.
+
+### The same grammar argument, and no further
+
+The referenced list sits after `REFERENCES <schema>.<table>(` and is a CLOSED IDENTIFIER LIST. A
+string literal is not legal there either, so F117's licence carries over unchanged and still does not
+reach a CHECK body or an index predicate. The two column-list rewrites now share one speller,
+`rename_definition_column_group`, parameterised by the group's opening byte: the leading local list
+passes `find('(')`, the FK tail passes the byte after the `REFERENCES` token. One round-trip guard,
+one conditional-quoting re-render, one splice.
+
+### Matching the table is what keeps stale from becoming corrupt
+
+A rewrite keyed on the column name alone would follow `rename p1.k -> uid` into an unrelated FK that
+references `p2(k)`, producing a definition naming a column its parent does not have - trading a stale
+row for a corrupt one, which is the wrong direction. So the referenced TABLE is matched first, on the
+same uniquely spelled `REFERENCES <schema_q>.<target_q>(` token `rewrite_incoming_fk_targets` already
+uses for the table-rename case; that token cannot collide with the local list, which precedes
+`REFERENCES`. A live test pins it: two parents with a same-named column, one child referencing each,
+rename in one parent, the other FK byte-identical. The walk deliberately includes the renamed table's
+own entry, which is where a self-FK's tail lives.
+
+### The guard, instrumented again
+
+Five rejects across the whole suite, all five from the guard's own unit test (`"a""b"`, `"a,b"`,
+`"a)b"`, `"a""b", c`, and the shape case). Zero from any production fold path, including every live-PG
+target - the same silence F117 measured, now also covering the FK tail. Instrumentation removed before
+the gates.
+
+### Not reachable from the IR
+
+`ON DELETE SET NULL (col_subset)` would repeat a LOCAL column name in the FK tail, after the group
+this rewrite touches. No renderer emits it (`fk_definition_for_dialect` writes only the bare action),
+so no folded definition can carry one; if one is ever introduced it needs its own rewrite, and the
+`REFERENCES ...(` anchor here would not touch it.
+
+Gates: 80 targets / 2284 passed / 0 failed / 0 ignored (+6 on F117's 2278: four live-PG tests, two
+unit tests), zero-migrate-node 4 targets / 52 passed, 0 skip banners, 194s. Four test schemas created
+and dropped, zero left behind.
+
+### The leg this does not reach, and a comment that says it does
+
+Both FK rewrites - the table-rename precedent and the column-rename walk added here - key on
+`REFERENCES {schema_q}.{target_q}(`, a SCHEMA-QUALIFIED token. `fk_definition_for_dialect` does not
+emit a qualified target on SQLite: it branches on the dialect and renders the bare table name. So on
+SQLite the token never matches and BOTH rewrites are inert.
+
+That is a pre-existing property, not something this change introduced, and closing it needs a live
+SQLite rename oracle that does not exist here. What this change did surface is that
+`rewrite_incoming_fk_targets`'s own doc asserts the opposite:
+
+    /// SQLite >=3.25 likewise auto-updates FK references on table rename (the engine
+    /// never sets `legacy_alter_table`), so the rewrite is correct on both legs.
+
+The first clause is about SQLITE's behaviour and is fine. The conclusion - "correct on both legs" - is
+about THIS FUNCTION, and it is false: the function cannot match a SQLite-rendered definition, so on
+that leg it is not correct, it is absent. A true statement about the database is used to license a
+false statement about the code.
+
+The new function makes no such claim; it says "measured on PG 18.4" and stops. Honest by omission is
+not the same as documented, so the gap is filed rather than left to the next reader to rediscover.
+
+This is the session's recurring shape once more: the sentence was not checked against the thing it
+described. It is the same defect as a citation that resolves to the wrong file, and it survives
+because the surrounding paragraph is correct.
