@@ -6416,3 +6416,59 @@ lines apart.
 Editing a site is not surveying its class. The fix went in where the reading happened to be, and
 nothing about having fixed it prompted a search for the same shape elsewhere. The search has to be
 a separate act, keyed on the SHAPE, or it does not happen.
+
+## F107 - The justification named a real op, and its supporting citation pointed into this repo
+
+Filed on the premise that `db.registerModel` at `schema/query.rs:704-711` named something that does
+not exist. The premise was wrong. appbase corrected it and I verified the correction by reading
+their tree: the op is defined there, its pipeline directory exists, its JS surface is fenced from
+creator code, and on PostgreSQL it does no DDL at all - the arm is a bare `Ok(())`.
+
+So the check at `query.rs:732` stays. A defense-in-depth check does not need a proven path to be
+worth keeping; that is the category definition. Only the justification was wrong, and it was wrong in
+a specific way: "a hand-built wire payload ... skips the SDK entirely, so the runtime re-validates"
+reads as a TRACED attack path. Nobody has traced it, in either repository. It now says so, and says
+neither that the route is reachable nor that it is ruled out.
+
+Surveyed all 24 camelCase citations before touching any, and they split three ways:
+
+    shape claims          17   name the descriptor JSON this crate parses; nothing to verify
+    byte-identity claims   4   about the shared codec's output form, not about who runs DDL
+    route claims           3   the defects
+
+Two route claims beyond the filed one: `diff.rs:733` said "the engine/registerModel also write a
+`COMMENT ON COLUMN`" in a paragraph about PostgreSQL, contradicting the no-op arm; it is now
+producer-agnostic, because the read side recovers the body from `pg_description` without caring who
+wrote it. `diff.rs:2138` asserted foreign behaviour ("re-running registerModel does not amend
+existing CHECK constraints") as load-bearing for a scope decision; it now says what THIS engine does
+and marks the consumer's behaviour as untraced.
+
+### The citation that pointed home
+
+The supporting citation was worse than the claim. `declarative.rs:1798` read "mirrors plugin-db
+`query.rs:648-653`" - and this repository has its own `schema/query.rs` whose lines 648-653 are live
+code, the reserved-field-name hint text, unrelated to prefixes. A reader following that citation
+lands somewhere plausible and WRONG, which is worse than landing nowhere: a dead path announces
+itself, a live one does not.
+
+That is why cross-repo references here name the surface and locate it in the consuming product, with
+no path and no line number. The repo had already settled that convention at `diff.rs:361` and
+`query.rs:823`. Line numbers into another repository rot silently, and a `crates/...` path from the
+consumer shares this repo's own prefix.
+
+Measured after, over the whole workspace, the same family the fix did not cover:
+
+    citations of `sdks/db/src/types.ts`, which does not exist here      3
+    cross-repo `query.rs:NNN` line citations that resolve HERE          6
+
+All six line numbers land inside this crate's 5840-line `schema/query.rs` on unrelated live code.
+Filed rather than folded in: it is a different defect from the one this commit closes, and bundling
+it would have made neither reviewable.
+
+### What this cost to establish
+
+The finding could not have been settled from inside this repository. An absence check here can prove
+a name is absent HERE; it cannot decide whether the name describes a surface in the consumer. The
+sweep that produced the original ticket had exactly the scope that excludes the evidence. Gates are
+unchanged, as a comments-only change requires: 75 targets / 2244 passed / 0 failed, 0 skip banners,
+116s wall clock.
