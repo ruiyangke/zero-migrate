@@ -6000,3 +6000,74 @@ the second opinion here was a fact - codex supplied `session.rs:490-499` - not a
 One correction from the same source: `diff_snapshots` does not take op streams. `drift.rs:1560` is
 `diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot)`; only `fold_ops` green-lights a
 stream. Earlier notes on this ticket said both. The substance held, the attribution did not.
+
+## F99 - The seam was honest at the top of the file and wrong two screens down
+
+`#117`. `crates/zero-migrate/src/fault.rs` is a crash-injection registry. `arm` and `disarm_all`
+each ended their doc with the bare sentence "Test-only.", which asserts a COMPILE-TIME absence. The
+truth is a RUNTIME default:
+
+    grep -c 'cfg(' crates/zero-migrate/src/fault.rs   ->  0
+    crates/zero-migrate/src/lib.rs:79-80              ->  #[doc(hidden)] pub mod fault;
+    cargo build -p zero-migrate --release             ->  exit 0
+
+`doc(hidden)` removes an item from rustdoc, not from the build. And the trip points are not
+scaffolding: `fault::trip` is called at eight ungated sites across all three backends, and a fired
+fault rolls back the open transaction and aborts the migration step.
+
+### My framing was wrong in three places, and the corrections narrowed the defect
+
+`compio` is a dev-dependency only and no crate here ships a binary, so the "compio runtime in
+production" premise was empty. The shipping consumer runs every apply on a freshly spawned thread
+(`zero-migrate-node/src/runtime.rs:34-51`), so the `thread_local!` registry an external caller could
+arm is never the one the apply reads. The addon exports no `fault` symbol at all. The seam is closed
+twice over for the consumer that actually ships.
+
+So this was never a vulnerability, and the ticket said so before it said anything else.
+
+### Not gated, for a reason that is not cost
+
+`cfg(test)` is impossible rather than expensive: the arming suites are Cargo integration tests, which
+link the library built WITHOUT its `cfg(test)`, so the gate would delete the symbol they need. A
+cargo feature IS possible without touching the eight call sites - a feature-off shim where `trip`
+returns `Ok(())` leaves them textually unchanged - which makes gating cheaper than first recorded.
+
+It was still declined, on the objection the reviewer that proposed it raised against itself:
+cfg-gating the six arming tests while CI runs plain `cargo test -p zero-migrate` makes
+`sqlite_backfill_fault_injected_crash_then_resume_exactly_once` stop running silently. A gate that
+skips is not a gate, and `#41` exists in this log because that already happened here once. If gating
+ever lands it goes in with the target-count floor, which is the mitigation for exactly that.
+
+### A comment cannot be made to fail compilation, so the invariant got a test
+
+The whole safety argument rests on one `thread::spawn` in a different crate. A comment records that;
+it does not defend it. If someone later drives `block_on` on the JS thread the property evaporates
+and no comment notices.
+
+`armed_fault_does_not_cross_thread_boundary` arms on one thread and applies on another, asserting the
+fault does not fire. That assertion is worthless alone - a no-op `arm` would satisfy it - so
+`armed_fault_fires_when_armed_on_the_applying_thread` runs the same helper through the same spawned
+thread, differing in exactly one variable, and asserts the fault DOES fire. The control passing in
+the same binary is what makes the negative result mean anything.
+
+### The module header was the same defect, and I had cleared it
+
+Worth recording because I got this wrong twice. Reviewing the file earlier I read `:13-16` and called
+it accurate, because it correctly describes the atomic-load fast path. It also said "**This is inert
+in production.**", "(the only state outside the crash-fuzz test)" and "Faults are armed only by the
+in-process crash-fuzz test" - three claims about who currently calls `arm`, stated as properties of
+the code.
+
+That is the same defect as the sentence I was fixing, in the same file, and after correcting `arm` it
+directly contradicted it two screens below. Corrected and uncorrected framings sitting together is
+worse than either alone, which is what `#98`/`#100` were about. The header now says inert until
+something arms it, names it as a runtime default, and points at `arm` for which consumer can reach
+the seam.
+
+### One defect found by pricing the fix, not by looking for it
+
+`ARMED_THREADS` was incremented on a thread's first arm and decremented only by `disarm_all` or by a
+fault actually firing. A thread that armed, never fired, and exited leaked its claim, after which
+`trip`'s single-atomic-load fast path never short-circuited again for any thread. A `Drop` guard on
+the registry newtype releases it. Not a correctness bug and not reachable in production, which never
+arms - but it contradicted the header's own performance claim, which is how it surfaced.
