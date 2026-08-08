@@ -7419,3 +7419,68 @@ files under `crates/zero-migrate/tests/`, and `cargo fmt --all` and `clippy --al
 untracked files there: six formatting diffs and one `redundant clone`, none in the edit under test.
 Moving them out returned both gates to 0. A scratch file in a test directory is not inert; it joins
 the build.
+
+## F122 - The mutation I specified could not fail, and finding out why is the result
+
+F121 established that the fold's stale CHECK `definition` is harmless because no consumer reads it:
+the differ exempts CHECK bodies and the existence guard's refusal prints a freshly introspected value.
+Nothing pinned that. If someone later wired the guard to a folded snapshot, the staleness would become
+user-visible and no test would notice.
+
+The probe that established it was not a test. Its refusal branch printed on BOTH arms:
+
+    Ok(()) => eprintln!("SCRATCH guarded re-add: APPLIED (no refusal)"),
+    Err(message) => eprintln!("SCRATCH guarded re-add refusal: {message}"),
+
+so it reported success whether or not the refusal happened - the same shape as a skip and a pass
+printing the same thing, which this repo has now fixed three times.
+
+### The specified mutation was inert, and the reason matters more than the test
+
+To prove the adopted test bites, I specified the obvious mutation: widen the rename arm's gate from
+`matches!(kind, "UNIQUE" | "PRIMARY KEY" | "FOREIGN KEY")` to include `"CHECK"`, and expect the
+staleness assertion to fail.
+
+It passed. So did removing the round-trip guard as well.
+
+The reason is structural. `rename_definition_column_group` splits the leading parenthesized group on
+commas; for `CHECK (("qty_on_hand" > 0))` that yields a single token `("qty_on_hand" > 0`, which
+equals no column name, so the `!columns.iter().any(|c| c == from)` bail returns `None` before the kind
+gate is ever consulted. The speller is INCAPABLE of touching a CHECK body. The kind gate is a second
+lock on a door already welded shut.
+
+That is worth recording for its own sake: the gate reads like the thing preventing CHECK rewriting and
+it is not. Anyone removing it as redundant would be right about today and wrong the moment the speller
+learns to parse expressions.
+
+The mutation that does bite is the one HEAD's own commit message names as forbidden - substituting the
+quoted column name inside the CHECK body. Under it the assertion fails with the message it should:
+
+    the fold's CHECK body must stay stale after `rename qty_on_hand -> amount_on_hand`, naming
+    qty_on_hand and not amount_on_hand; it read `CHECK (("amount_on_hand" > 0))`. A rename arm that
+    rewrites a CHECK body is rewriting an EXPRESSION as if it were a column list - regenerate the
+    clause from the closed AST instead
+
+### Five assertions, each mutation-tested separately
+
+The module header claims TWO consumers make the staleness harmless, and the four assertions I
+specified covered only one. A fifth was added for the differ's exemption, and it bites: flipping
+`constraint_definition_is_comparable` to exempt only `EXCLUDE` fails the test, printing the real
+`AlteredObject { field: "definition", expected: "CHECK ((\"qty_on_hand\" > 0))", actual:
+"CHECK ((amount_on_hand > 0))" }`. I reproduced that one myself rather than taking it on report:
+exit 101, `0 passed; 1 failed`, with `drift.rs` restored byte-identical afterwards.
+
+The live body naming the NEW column is asserted as a WITNESS, not as decoration. Without it, a run
+where both bodies happened to spell the same column would let the refusal assertion pass while proving
+nothing.
+
+The column is named `qty_on_hand` rather than `qty` because one assertion demands the old name is
+absent from the ENTIRE refusal message, and that message carries a base58 migration version where a
+bare three-letter token could collide by chance. An underscore cannot appear in that alphabet.
+
+### Gates
+
+    fmt 0, clippy 0, workspace 82 targets / 2291 passed / 0 failed / 0 ignored,
+    node 4 targets / 52 passed, doc 0, 0 skip banners
+
+Exactly +1 target and +1 passed against 81 / 2290, accounted for by the new binary.
