@@ -5744,3 +5744,80 @@ fail any one while satisfying the other two.
 
 **An empty result is only evidence if you know the input was non-empty.** That is the same
 requirement at every level - the test, the measurement, and the shell command underneath both.
+
+## F95 - Two opinions agreed on the answer and disagreed on the implementation, and the disagreement was the whole value
+
+`#110`. The new PG oracle case `standalone_constraint_lifecycle` came up red on a CHECK
+constraint:
+
+    expected: CHECK (("quantity" > 0))
+    actual:   CHECK ((quantity > 0))
+
+The fold renders every column through `quote_ident_for_dialect`; PostgreSQL deparses
+`pg_get_constraintdef` from the parsed tree. Every CHECK constraint that exists reported drift,
+on every comparison.
+
+### The part I would have got wrong alone
+
+Both opinions reached the same conclusion - stop comparing CHECK bodies - and both rejected
+reproducing PostgreSQL's deparse for the same reason, which one of them measured on 18.4:
+
+    CHECK (code = 'x')      ->  CHECK ((code = 'x'::text))     cast injected
+    CHECK ("MixedCase" > 0) ->  CHECK (("MixedCase" > 0))      re-quoted, not unquoted
+    CHECK (code IN ('a'))   ->  CHECK ((code = ANY (ARRAY[...])))
+    CHECK (TRUE)            ->  CHECK (true)
+
+So the target moves with the type of the column and the PG major version. Fine. I implemented
+the agreed answer by widening the one predicate `constraint_definition_is_comparable`, which
+looked elegant because `apply/drift.rs` consults it from TWO sites - once deciding whether to
+KEEP the live catalog text, once deciding whether to COMPARE it.
+
+That elegance was the defect. The second opinion caught it: **not comparing a field is not a
+reason to stop recording it.** The existence guard's fail-closed refusal prints the live
+definition, and `existence_probe.rs:873` falls back to the literal string `<present>` when it
+is empty. Every CHECK guard refusal would have degraded from naming the installed predicate to
+saying `<present>` - a regression in the one message whose entire job is to tell an operator
+what is actually in their database, introduced by a fix for a false positive nobody was seeing.
+
+Split into `constraint_definition_is_comparable` (excludes EXCLUDE and CHECK) and
+`constraint_definition_is_retained` (excludes EXCLUDE only).
+
+**A SINGLE PREDICATE SERVING TWO QUESTIONS IS A BUG WAITING FOR THE QUESTIONS TO DIVERGE.** It
+had already happened here and nobody had noticed, because until CHECK was excluded the two
+answers were identical for every kind.
+
+### What the reachability check was worth
+
+I filed this believing `fold_ops` reached production at `engine.rs:391` and four addon sites.
+The four addon sites are all beneath `#[cfg(test)] mod tests` at `lower.rs:1373`, and
+`engine.rs:391` builds a `LiveSchema` for lowering that is never diffed. `diff_snapshots` has
+zero non-test callers in any crate's `src/`.
+
+So the severity I asserted was wrong, and I asserted it from a grep that found the call sites
+without reading what encloses them. **A CALL SITE IS NOT A CALLER UNTIL YOU KNOW WHAT MODULE IT
+IS IN.** It stays worth fixing - `diff_snapshots` and `fold_ops` are public exports, so an
+embedder reaches it even though this repo does not - but "users are hitting this" and "a public
+contract is broken" are different claims and I made the louder one first.
+
+### The obligations, applied
+
+Three plants, because three separate things could have been vacuous:
+
+- The differ unit test fails on the pre-fix predicate and passes after. The three sibling tests
+  that prove the differ still catches a RENAMED, RE-KINDED, or UNIQUE-body-changed constraint
+  pass on BOTH sides - they are teeth, not artifacts of the change.
+- The live retention assertion fails when the retention split is reverted, naming the exact
+  constraint that lost its text.
+- The unit tests exist at all because the live oracle sits behind `skip_if_no_pg!`. On a
+  checkout with no database it reports a pass without running, so it could not have guarded
+  this predicate. **A GATE THAT SKIPS IS NOT A GATE, AND A SKIPPING GATE REPORTS THE SAME WORD
+  AS A PASSING ONE.**
+
+### Recorded, not fixed
+
+The loss is real and is written into the code rather than a ticket: a CHECK whose body is
+altered out of band while keeping its name and kind is now undetected. Swapping
+`CHECK (quantity > 0)` for `CHECK (quantity > -2147483648)` leaves the invariant vacuous and
+the differ silent. Recovering it needs the treatment foreign keys already get - parse the
+catalog text back to the closed AST and compare structurally - which is `#111`'s neighbourhood
+and not this change.
