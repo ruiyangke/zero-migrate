@@ -5652,3 +5652,95 @@ ticket whose entire subject was recorded claims that stopped being true.
 **Queue notes and ticket text are a RECORD, not a MEASUREMENT.** They were true when written
 and nothing re-checks them. The same rule that sends me back to a file before quoting a
 baseline applies to my own prose, and it applies hardest inside a change about stale prose.
+
+## F94 - Three ways a deliberately-failing test can be about nothing
+
+`#107` and `#82` closed together: the round-trip oracle landed red at 9d0b011 and the fold fix
+greened it at b5da9a3. The interesting part is not the defect. It is that the test written to
+catch it nearly failed to catch anything, three separate ways, and each way is invisible from
+the outside because THE OUTCOME IT ASSERTS IS REAL.
+
+A test that must fail carries a burden a passing test does not. A green test that is vacuous
+gets caught eventually - someone breaks the code and nothing goes red. **A red test that is
+vacuous is never caught, because the red is what you were expecting.** You read it, nod, and
+move on.
+
+### The three obligations
+
+**1. THE INPUT ARRIVED.** Assert the scenario occurred before asserting anything about the
+outcome. Both my red cases now query the live catalog first and fail with "SCENARIO did not
+occur" if PostgreSQL never produced the collided name.
+
+zeroship's case is the cleanest statement of why: testing whether zstd eagerly allocates a
+frame's declared decompression window, they built a fixture with the encoder and measured no
+RSS growth across eight decoders. The frame was FOURTEEN BYTES - zstd shrinks the window
+descriptor for small content, so the fixture never declared a large window at all. The
+measurement was correct and about nothing, and it pointed at the answer they already expected,
+which is the worst direction to be wrong in.
+
+**2. THE MECHANISM RAN - AND ASSERT SOMETHING ONLY ITS EXECUTION CAN PRODUCE.** This is mine,
+and the near-miss was total. `render/lower.rs:4896` lowers `alterPrimaryKey` to
+
+    let up = format!("-- zero-migrate: alter primary key on {eff_schema}.{table}");
+
+and `lower.rs:2111` flattens the plan step to that migration. The nearest existing live-PG
+test applies with `session.batch(&migration.up)`. Had I copied it - and it is the house
+pattern, and it is CORRECT for every op that lowers to real DDL, which is nearly all of them -
+the ALTER would have executed a SQL COMMENT, the database would have been unchanged, the
+snapshots would have agreed, and MY DELIBERATELY-FAILING TEST WOULD HAVE PASSED.
+
+I caught it only because I was reading `lower.rs` for an unrelated reason: whether
+`alterPrimaryKey` can carry an existence guard. The comment-lowering was three lines away.
+That is not a repeatable defence, which is why it is written down here.
+
+zeroship then sharpened the obligation into a form that survives a harness rewrite. Their
+first attempt at this very check asserted that a hostile-archive refusal was NOT the ordering
+error - and it passed against a `{}` manifest, because "invalid manifest" is also not the
+ordering error. **A negative assertion is satisfied by every earlier failure, of which there
+are unboundedly many, and by exactly one thing you actually want.** They fixed it by asserting
+positively on "blob hash mismatch", which only a second entry that was really read and hashed
+can produce.
+
+**3. THE FAILURE IS THE NAMED ONE.** Both my tests assert `diff_snapshots(...).is_clean()`, so
+they redden on ANY drift - a failed apply, an unrelated divergence, a harness bug leaving the
+wrong schema in scope. All print "not clean". So when the red arrived I read it and confirmed
+it named `old_pkey1` and `t4_pkey1`. A red that does not mention the object is a different bug
+wearing the test's name.
+
+### The rejected fix that would have looked diligent
+
+One agent proposed covering `IndexSnapshot`'s `only` facet. `apply/drift.rs:1135` hardcodes
+`only: false` because it is never recovered from the catalog, so a case authoring `only: true`
+could never match - a test that can only fail. zeroship's line is the one to keep: **a test
+that can only fail is as useless as one that can only pass, and harder to delete because it
+looks vigilant.** A permanently-red test reads as an open finding someone else owns, and
+accrues respect rather than suspicion.
+
+The same shape appeared twice more. `opclass` and `nulls_not_distinct` are excluded from index
+equality outright, so tests for them would assert nothing. And `is_clean()` is therefore
+STRICTLY NARROWER than "the snapshots agree" - a header claiming this oracle proves
+`fold_ops == snapshot_schema` would have been false, and false as a docstring, where nothing
+contradicts it. The header names what it does not compare.
+
+### And two process failures of my own
+
+I committed the oracle at 9d0b011 having run the test, the ASCII scan and the scope check -
+but not fmt or clippy. Clippy then failed on that exact file. **Run the full gate set before
+committing, not the subset that seems relevant to the change.** A new test file is still Rust.
+
+And a dispatch of the fix exited 127 with NO LOG FILE AT ALL, because my prompt PROSE contained
+the backticked phrase `ADD PRIMARY KEY USING INDEX <candidate>`. Inside a double-quoted shell
+string backticks are command substitution, and `<candidate>` within them is an input redirect
+from a nonexistent file. I had used backticks inside double quotes all session harmlessly; the
+bug was latent in every prompt and fired on the first whose prose contained an angle bracket.
+**A latent parse hazard is a common event with a rare trigger, which is why "it has worked so
+far" is not evidence.**
+
+### The rule underneath all three
+
+A control proves the INSTRUMENT can move. A precondition assertion proves the INPUT arrived. A
+positive assertion proves the MECHANISM ran. They are three different questions and a test can
+fail any one while satisfying the other two.
+
+**An empty result is only evidence if you know the input was non-empty.** That is the same
+requirement at every level - the test, the measurement, and the shell command underneath both.
