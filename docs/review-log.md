@@ -6912,3 +6912,64 @@ baseline, 0 skip banners, 176s. `cargo doc --document-private-items` exit 0.
 Whether any real project ships a `dialect()` expression inside a CHECK or partial index today. The
 mechanism is proven; the incidence is not. A defect that needs an uncommon authoring shape is still a
 defect, but I am not claiming anyone has hit it.
+
+## F115 - The rename arm learned three fields; the drop arm was still reading one
+
+`fe70a7b` taught `Op::RenameColumn` to rewrite three index fields, because all three carry column
+names: `columns`, the `Column` variant of `elements`, and `include`. `Op::DropColumn` cascaded indexes
+by reading `columns` alone. One arm knew about three fields and its neighbour knew about one.
+
+Found by reconciling two independent design reviews on a DIFFERENT question. One raised it; the other
+did not. Reading only the review that answered the question I asked would have missed it.
+
+### The inference was right, and the trap measurement is why it is safe to act on
+
+I filed this as NOT reproduced: the mechanism was read from the code and PostgreSQL's behaviour was
+inferred from the key-column case. Measured on PG 18.4, all four shapes created and then dropped:
+
+    CREATE INDEX i_key  ON t_key  (a)                    DROP COLUMN a -> gone
+    CREATE INDEX i_pred ON t_pred (b) WHERE (a > 0)      DROP COLUMN a -> gone
+    CREATE INDEX i_expr ON t_expr ((a + 1))              DROP COLUMN a -> gone
+    CREATE INDEX i_incl ON t_incl (b) INCLUDE (a)        DROP COLUMN a -> gone
+
+So the inference held for all three. The more important measurement is the one that decides what may
+be fixed:
+
+    CREATE INDEX i_lit  ON t_lit  (note) WHERE (note <> 'a')   DROP COLUMN a -> SURVIVES
+    CREATE INDEX i_lit2 ON t_lit2 ((note || 'a'))              DROP COLUMN a -> SURVIVES
+
+A name-shaped token inside rendered index SQL is not a reference, exactly as
+`CHECK ((status <> 'qty'::text))` showed for constraints. A cascade driven by matching text in
+`predicate` or an `Expr` element would drop indexes PostgreSQL KEPT - trading a phantom that reports
+drift for a deletion that does not.
+
+### What shipped and what did not
+
+Fixed: `columns`, the `Column` variant of `elements`, and `include`. All three are structured name
+lists, so an exact compare is exact - no parsing, no heuristic. The same three fields the rename arm
+already rewrites, so the two arms now agree about what an index depends on.
+
+Left, and recorded in the code rather than only in a ticket: `predicate` and the `Expr` variant of
+`elements`. Both cascade in PostgreSQL, so the fold still keeps a phantom for those two shapes. That
+is a known gap with a measured reason, which is a different thing from an unexamined one.
+
+An expression-only index makes the old behaviour starker: `plain_columns` collects only `Column`
+elements, so such an index has an EMPTY `columns` list and the previous cascade could never fire for
+it under any circumstances.
+
+### The safe route for the remaining two, described and not taken
+
+It already exists in this repository. `gen_types.rs`'s `index_uses_column` cascades correctly on all
+four sites - key `Column`, key `Expr` through the closed AST, `include`, and `where` - because that
+replay retains the original `IrIndex` with its `Expr`. The fold's equivalent is to compute
+`render::dml::expr_column_refs` over the predicate and each expression element at snapshot time and
+store the union as provenance, mirroring `ConstraintSnapshot::cascade_columns`.
+
+Two details make it its own change rather than an addendum: the field must be excluded from
+`IndexSnapshot`'s hand-written equality, since live introspection cannot cheaply recover it; and
+`expr_column_refs` selects a dialect leg, so the provenance must be computed with the fold's dialect
+rather than unioned - which is exactly what `F114` established and what
+`gen_types_drop_column_dialect_legs.rs` now pins.
+
+Gates: 79 targets / 2263 passed / 0 failed, exactly one new target and its two tests above 2261, 0
+skip banners, 178s.
