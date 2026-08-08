@@ -7340,3 +7340,82 @@ than a link repair.
 
 That CI's runner reproduces these counts. Measured locally on the pinned 1.97.1 toolchain, which is
 the pin CI consumes through `nix develop`, so the toolchain matches even though the host does not.
+
+## F121 - The stale CHECK body is inert, and finding out why found a carrier that is not
+
+Two questions were open about a CHECK body the fold leaves STALE after `Op::RenameColumn`. The rename
+arm rewrites UNIQUE, PRIMARY KEY and FOREIGN KEY definitions, whose leading group is a column list a
+string literal cannot appear in, and deliberately leaves a CHECK body alone rather than substituting a
+name inside an arbitrary expression.
+
+### The first question was mine and the answer refuted it
+
+I filed this claiming the staleness was invisible to drift AND user-visible through the existence
+guard's fail-closed refusal, which prints `definition`. The second half is FALSE. All four production
+call sites of `render::existence_probe::decide` pass a freshly introspected snapshot:
+
+    apply/backend/postgres/session.rs:430   snapshot_schema(conn, probe.schema())
+    apply/backend/postgres/session.rs:766   snapshot_schema(conn, probe.schema())
+    apply/backend/sqlite/mod.rs:563         snapshot_schema_sqlite()
+    zero-migrate-node/src/lower.rs:1038     base_snapshot = backend.snapshot_schema(cfg)
+
+Proven live in one run: the fold held `CHECK (("qty" > 0))` while the user-visible refusal printed
+`CHECK ((amount > 0))`.
+
+So the field doc's justification - the guard prints it - is true of the LIVE producer and does not
+justify maintaining the fold's copy. That sentence has been corrected rather than deleted, because the
+justification is real, just about the other side.
+
+### The second question was the residual, and closing it corrected four of my premises
+
+Three per-dialect emitters write a constraint `definition` verbatim into `CREATE TABLE` DDL, and a
+folded snapshot can become the `live` side of a later lowering. Whether a folded CHECK body could
+reach emitted DDL was left open.
+
+It cannot, and the block is nameable at each site. But four things I stated when framing the question
+were wrong:
+
+  - There are SIX emission sites, not three. The `inline_checks` emissions sit in the same three
+    functions a few dozen lines earlier.
+  - "The emitters read the DESIRED snapshot" is false for SQLite. `build_sqlite_constraint_rebuild`
+    and `sqlite_rename_rebuild` both clone the LIVE table snapshot into `desired` and render a whole
+    `CREATE TABLE` off it. Removing the guard by hand confirms the emitter carries an injected CHECK
+    verbatim, so the SQLite block is upstream, not at the emitter.
+  - `engine.rs refresh_historical_live` is not the plausible route. It is SQLite-only and its
+    artifact's SQL is discarded.
+  - I cited `render/lower.rs:539` for the fold-to-`live` assignment. That line is in
+    `LiveSchema::advance_logical_columns`. The assignment is in the NODE crate's `lower.rs` at the
+    same line number, which is how I came to cite the wrong file with a right-looking number.
+
+The actual block on PostgreSQL and MySQL is that those emitters only ever receive a freshly built
+desired snapshot. On SQLite it is that the fold REFUSES to put a CHECK constraint into a snapshot at
+all (`fold.rs:3106`, `fold.rs:3573`, `render/lower.rs:6452`), and SQLite catalog introspection
+synthesizes only PRIMARY KEY, UNIQUE and FOREIGN KEY.
+
+### What closing it found
+
+`ColumnSnapshot::inline_checks` is fold-produced CHECK text on the same rename path, is NOT
+dialect-gated (four writers in `fold.rs`), and IS emitted into rebuild DDL. The rename arm does not
+rewrite it either. Filed as its own ticket.
+
+The failure mode is worse than an error. Real SQLite ACCEPTS the resulting DDL, because an unknown
+double-quoted identifier resolves as a STRING LITERAL, so the clause becomes a constant-false CHECK
+and the rebuild's own `INSERT ... SELECT` copy fails MID-REBUILD.
+
+That is this session's string-surgery trap inverted. The trap that has shaped four commits is that a
+literal spelling a column name is not a reference. Here a reference that stops resolving silently
+BECOMES a literal. Same ambiguity, opposite direction, and the second direction fails silently where
+the first fails loudly.
+
+It is not reachable today, and both blocks are accidents rather than guards: the node crate never
+populates `LiveSchema::sqlite_schemas`, so a SQLite rename fails closed first, and a SQLite catalog
+snapshot carries `inline_checks` empty. Whoever populates `sqlite_schemas` - which the refusal message
+describes as missing data rather than as a prohibition - unblocks it.
+
+### An instrument note
+
+The gates went red on this change for reasons unrelated to it. An investigation left two scratch test
+files under `crates/zero-migrate/tests/`, and `cargo fmt --all` and `clippy --all-targets` both cover
+untracked files there: six formatting diffs and one `redundant clone`, none in the edit under test.
+Moving them out returned both gates to 0. A scratch file in a test directory is not inert; it joins
+the build.
