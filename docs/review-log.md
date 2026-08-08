@@ -6191,3 +6191,45 @@ written, beside a correct implementation of what it mis-cites.
 That is a third outcome for a stale reference, and it exposes a limit in settling these with
 `git log -S`: the search finds when a string first appeared, not what appeared alongside it. Only
 diffing the introducing commit shows the implementation landed under another name.
+
+## F102 - Correcting a citation is not the same as correcting what it was cited for
+
+`#120`, second half. Three comments said the external trust boundary is "pinned by
+`tests/trybuild_*`". That path has never existed on any ref. The obvious repair is to repoint them
+at the real pin, and the obvious repair would have left every one of them still wrong, because the
+sentence around the citation was making a different false claim.
+
+Each said, in substance, that an integration test cannot construct a privileged config BECAUSE the
+capability token is unobtainable. That is not why. The token is public, has a `Default`, and has a
+`for_test` reachable under an additive feature, so any dependent crate can mint one three ways. What
+actually keeps an integration test out of a Trusted config is `pub(crate)` plus `#[cfg(test)]` on
+the constructor. What keeps an external crate from forging a privileged guard is the unforgeable
+`EffectivePolicy`.
+
+So the citations were repointed AND the reasons rewritten. Fixing only the pointer would have
+produced three comments that resolve, read as freshly checked, and still name the wrong mechanism -
+which is worse than leaving them broken, because a broken pointer at least invites suspicion.
+
+### The token now documents that it is inert
+
+`OperatorCapability`'s own doc claimed an external crate "cannot construct one". Corrected to say
+what is true: the private field blocks only the struct-literal form, three public routes mint it,
+nothing reads it, and privilege comes from the `EffectivePolicy` argument. It ends with the
+instruction that matters for whoever finds it next - do not hang a real check on holding one.
+
+That last line is the whole reason this was not simply deleted. An inert token that looks like a
+lock is a place a future maintainer will attach a genuine privilege decision, and any caller can
+walk through it. Saying so in the type's own docs is cheaper than the deletion argument and does not
+throw away the signpost showing where the design once intended a boundary.
+
+### One clause here was mine
+
+`guard_vendor_lower_tests.rs` named `mint_shadow_operator_capability` as the production mint. No such
+function exists. I wrote that clause into F97's commit while correcting the feature-gate claim
+beside it - carried across from the original text, unchecked, in the commit that was fixing the same
+class of defect. It is gone now.
+
+The check that found it, from appbase: after correcting a citation, ask what the surrounding
+paragraph asserts, and whether the correction made it more credible without making it more true. A
+corrected paragraph carries more authority than an untouched one, because a reader assumes someone
+just looked.
