@@ -6071,3 +6071,66 @@ fault actually firing. A thread that armed, never fired, and exited leaked its c
 `trip`'s single-atomic-load fast path never short-circuited again for any thread. A `Drop` guard on
 the registry newtype releases it. Not a correctness bug and not reachable in production, which never
 arms - but it contradicted the header's own performance claim, which is how it surfaced.
+
+## F100 - Deleting the false claim would have moved it
+
+`#118`. Two crash-injection points in `crates/zero-migrate/src/fault.rs` each carried a paragraph of
+deploy-recovery design and a closing sentence naming the test that trips them:
+
+    "Tripped by the deploy-recovery crash-fuzz test only."
+    "Tripped by the no-false-abort / fail-safe-auto-recovery characterization test only."
+
+Both had exactly one reference repo-wide - their own definition. No test armed them, and nothing
+tripped them either, so "write the tests" would also have meant adding production trip sites.
+
+### The ticket was pointed at the symptom
+
+Filed as two lying constants. The reviewers split on where the analysis was safe to keep, and
+reading the disagreement is what found the actual defect. `apply/journal.rs` describes the whole
+deploy-recovery protocol in the present tense, as shipping behaviour:
+
+    "the control loop drives the SHARED abort (`build_abort_steps`)"
+    "the NEXT same-app deploy ... reconciles it FIRST"
+    "On deploy SUCCESS the loop promotes its rows to `committed`"
+
+None of it runs. `build_abort_steps` was deleted in `153110e` and the comment still cites it.
+`DeployRecoveryScope` is never constructed - its only grep hit is inside a doc comment - so no
+marker is ever written, nothing can be promoted, and nothing can be recovered. The three marker
+functions have no callers outside the trait declaration and its forwarding impl. The one entry that
+could pass a scope hardcodes `None`.
+
+And `engine.rs` already said so plainly, in a line that has been sitting there the whole time:
+"Rolling these back is the CALLER's job, and this engine ships no driver for it." The crate
+contradicted itself across two files, and the smaller, louder falsehood was the one that got filed.
+
+Deleting the two constants and stopping would have removed the claim a reader trips over and left
+the design document that produced it - tidier, and no more true.
+
+### What the primitives are and are not
+
+The durable half is real and implemented: the table, the scoped write, the promotion, the reconcile
+append, the resume query. Only the driver is absent, and it was never here - the control loop this
+crate was extracted from lived on the other side of the seam. So the honest description is not
+"broken" or "removed" but "this crate ships the primitives and no driver", which is now what the
+module says, pointing at the open decision rather than pre-empting it.
+
+### The one paragraph worth keeping
+
+Both reviewers, independently, named the same cost of deletion: the marker-polarity argument.
+
+The marker is born `in_progress` and promoted to `committed` on success, so a promotion failure
+leaves it in the RECOVERABLE state and the next deploy safely auto-aborts a rename that has not cut
+over. The tempting inverse - born `open`, stamped `reached_success` - was built here and torn out,
+because its stamp-failure direction leaves the marker PROTECTED and a later deploy silently reverts
+a live contract it cannot distinguish from a crash.
+
+That reasoning is load-bearing for anyone who later implements the driver, and it is invisible in
+the happy path: both polarities look identical until a stamp fails. It survives the deletion,
+reframed as guidance rather than as a description of running code.
+
+### The general shape
+
+A cleanup that corrects a citation should ask what the surrounding paragraph asserts, and whether
+fixing the name made the paragraph more credible without making it more true. Every individual
+identifier in the journal block either resolves or would after a rename pass. A sweep that checks
+citations one at a time reports it clean.
