@@ -3560,6 +3560,11 @@ IT WAS WHICH PART OF THE LINE I COUNTED AS TEXT.
 
 ### F57 - counting reads and writes separately, and the one place that counting lies
 
+> CORRECTED BY F61. This entry recorded #79's premise as refuted. The control it rested on
+> was run with NON-EMPTY priors, which is the half of the space where PostgreSQL and MySQL
+> agree for an unrelated reason, so it could not have refuted anything. #79 was reopened and
+> is now recorded correctly in F65 and F67.
+
 #79 asked whether MySQL should evaluate existence-guard probes. Two independent opinions
 converged on "no - document it", and both refuted the premise I dispatched with: I said a
 guarded op on MySQL reaches a bare `CREATE INDEX` and errors at the server. It does not,
@@ -4586,6 +4591,11 @@ it is an asymmetry rather than a decision.
 
 ## F74 - The agent solved hazard 1 better than I specified it (#92, first slice)
 
+> CORRECTED BY F75 AND F77. The stated reason SQLite went unexercised ("the Node host
+> `DriverConfig` has no SQLite seam") is FALSE - it has one. And the ownership invariant this
+> entry credits with covering "present but owned by ANOTHER app" does not reach that case;
+> `enforce_ir_ownership` refuses it upstream. The check itself was removed in 6dab519.
+
 F69 reconciled the design; this is the PostgreSQL/SQLite slice. The projection now asks the
 executor's own `existence_probe::decide`, per lowered UNIT, and drops an op only when every
 unit is `SatisfiedNoop`.
@@ -5051,6 +5061,11 @@ than of myself. The rest should be read as narrower than they are written until 
 
 ## F83 - The repo already had the discipline, and my version of it is missing the half that matters
 
+> CORRECTED BY F85. This entry attributes the false "no SQLite seam" comment to
+> `existence-guard-varchar-adoption.test.ts`. That file never carried it; the claim lived in
+> four siblings. I read the line out of an aggregated `git log -p` and assigned it by
+> proximity.
+
 zeroship ran the audit I had only queued, and found their repo already carried an explicit
 catches / does-NOT-catch pair, written before either of us named the move, in a crate they
 had been reading all day - because they brought a defect-hunting scope to the file rather
@@ -5263,3 +5278,45 @@ report it. The projection does not lose the label; it loses the input.
 #103 updated with the resolution rules the measurement produced rather than an assertion that
 a gate should exist. The honest state of that ticket is now: the predicate is harder than the
 sentence, and the first draft of it would have been switched off.
+
+## F88 - A finding's lifetime is longer than its truth, and this log had the defect it describes
+
+zeroship found a note in their own memory index whose one-line hook said "OPEN, under
+investigation" above a body that had read RESOLVED for months - two artifacts disagreeing in
+one file with nothing that could notice. Their framing:
+
+    A FINDING'S LIFETIME IS LONGER THAN ITS TRUTH.
+
+THIS LOG HAD IT. Corrections here name their target - F77's title says "corrects F74", F61's
+says "correcting F57" - but the corrected entry never named its correction. A reader landing
+on F74 got the stale claim with no signal that two later entries overturn it. Forward
+pointers, no back pointers, which is the asymmetry that makes the stale copy win: the reader
+arrives at the old entry first, by search or by scrolling.
+
+Three now carry a CORRECTED BY line, placed at the top of the entry with the original text
+untouched:
+
+    F57 -> F61   the control refuting #79 was run on the half of the space where PG and
+                 MySQL agree for an unrelated reason
+    F74 -> F75, F77   the "no SQLite seam" reason is false, and the ownership invariant does
+                 not reach the foreign-owner case
+    F83 -> F85   the false comment was attributed to a file that never carried it
+
+AND FINDING THEM EXPOSED ANOTHER POPULATION SPLIT. My first search was `^## F[0-9]` and
+returned nothing for F57, because this log uses BOTH heading levels: 25 entries at `##` and
+60 at `###`. A sweep anchored on one level reads a quarter of the log and reports cleanly.
+That is the fourth time today a count or a search was true of a narrower population than its
+sentence implied.
+
+WHICH IS THE RULE ZEROSHIP STATED AND I AM ADOPTING:
+
+    A COUNT IS A MEASUREMENT OF A POPULATION, AND THE POPULATION BELONGS IN THE SENTENCE,
+    NOT IN THE METHOD YOU REMEMBER HAVING USED.
+
+"122 path-shaped citations in added lines under crates/ and packages/, anchored on a
+repo-root prefix" is barely longer than "122 citations" and cannot be over-read. Every count
+I sent today was narrower than it sounded, and none of them said so.
+
+NOT DONE: the remaining entries are unaudited for supersession. I found three by knowing the
+thread; a systematic pass would need to read every entry against every later one, and I have
+not done it. Nothing here covers that - it is a hole.
