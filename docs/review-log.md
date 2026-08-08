@@ -5129,3 +5129,56 @@ sweep fixes instances; only a gate fixes a class.
 Does NOT cover line numbers in `file.rs:123` citations, which go stale constantly and cannot
 be checked this way. Nothing else covers those either - that is a hole, not a handoff, and
 #103 says so rather than implying a gate that does not exist.
+
+## F85 - My NUL gate has the blind spot zeroship found in theirs, and I misattributed the false comment
+
+Two corrections and one measured defect in a gate I shipped today.
+
+MY NUL GATE IS TOO NARROW, AND ITS does-not-cover LINE NAMES THE WRONG EXCLUSION. zeroship
+reported that their equivalent gate missed invalid UTF-8, which blinds grep identically and
+has no NUL to find - and that a planted control could never have shown them, because they
+planted the thing they were already looking for. MEASURED HERE:
+
+    file with 0xFF and no NUL:  readFileSync(...).indexOf(0) === -1   (gate PASSES it)
+                                grep -c GATETARGET -> exit 1, no output
+    clean control:              grep -c GATETARGET -> exit 0, "1"
+
+So a tracked file carrying invalid UTF-8 passes my gate and blinds a search over it exactly
+as a NUL does. `packages/zero-migrate/tests/tracked-file-bytes.test.ts:59` says it "does NOT
+check file ENCODING (a valid UTF-8 file with unusual codepoints passes)" - which names the
+HARMLESS case and omits the harmful one. The exclusion is written about the input that does
+not matter.
+
+The generalisation, which is theirs: PROVE IT ON A PLANTED INPUT, AND THEN ASK WHAT OTHER
+INPUT PRODUCES THE SAME SYMPTOM. The first check is on the instrument, the second on the
+frame. A planted control confirms the gate catches what you already suspected and is silent
+about the rest of the class, so it cannot be the last question.
+
+AND I MISATTRIBUTED THE FALSE COMMENT. I briefed an agent that the "no SQLite seam" claim
+lived in `existence-guard-varchar-adoption.test.ts`. It does not, and never did - `git log
+-S"SQLite seam"` scoped to that file returns nothing. The claim lived in four siblings
+(`existence-guard-index-scope`, `unguarded-index-name-collision`, `e2e-id-lifecycle`, and
+`existence-guard-fold-projection`, which had already dropped it). I had read the line out of
+an AGGREGATED `git log -p` across many files and assigned it to a file by proximity. The
+agent caught it by reading that file's own history instead of the combined diff.
+
+Same instrument family as the scoped grep in F79, one level subtler: not a wrong search
+universe, but a correct search whose OUTPUT LOSES the attribution the question depended on. A
+combined diff answers "was this line added today" and cannot answer "to which file", and I
+read the second off the first.
+
+CITATIONS ALSO LIVE OUTSIDE COMMENTS. zeroship's second dead citation was in `Cargo.toml` -
+a dependency justified by a module extracted to another repo. My #103 scopes the gate to
+comments and that is too narrow; manifests, CI config and docs carry citations too. Widened
+in the ticket.
+
+AND A COST OF THAT GATE, WORTH DECIDING BEFORE BUILDING: the honest way to write "X no longer
+exists" is WITHOUT WRITING X, or every correction adds a violation and the gate teaches people
+to describe deletions vaguely. Their first fix tripped exactly that.
+
+WHAT SHIPPED (ef8ae5d): 26 sites across 23 files now resolve to a checked handoff or a checked
+absence, seven were already in the house form, and two false handoffs were corrected - the
+SQLite-seam claim in three files, and an `existence_probe.rs` claim that the fold answers the
+name-to-owner question, which it never does (all three `DuplicateIndex` raise sites key on the
+target table's own indexes). Gates run by me: fmt 0, clippy 0, workspace 74/2227/0, package
+223/222/0/1, host 117/117/0/0, 61 test files, zero non-comment added lines.
