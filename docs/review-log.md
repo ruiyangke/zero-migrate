@@ -7484,3 +7484,72 @@ bare three-letter token could collide by chance. An underscore cannot appear in 
     node 4 targets / 52 passed, doc 0, 0 skip banners
 
 Exactly +1 target and +1 passed against 81 / 2290, accounted for by the new binary.
+
+## F123 - I measured against the wrong binary and committed the result as fact
+
+F121 found that `ColumnSnapshot::inline_checks` carries fold-produced CHECK text naming its own column,
+that a rename does not rewrite it, and that the stale text reaches emitted SQLite rebuild DDL. All of
+that holds.
+
+The SEVERITY I attached to it does not, and I put it in a doc comment and a ticket:
+
+    SQLite resolves an unknown double-quoted identifier as a STRING LITERAL rather than
+    rejecting it, so the clause becomes a constant-false CHECK that the database ACCEPTS:
+    the rebuild's own `INSERT ... SELECT` copy then fails, mid-rebuild.
+
+That is true of a stock SQLite. It is not true of the one this engine opens.
+`apply/backend/sqlite/actor.rs:617-620` turns the double-quoted-string misfeature OFF for both DDL and
+DML as steps 5 and 6 of the hardened open sequence. Driven through the engine's own `SqliteBackend`
+the corrupt DDL is REJECTED:
+
+    Err("no such column: \"code\" - should this be a string literal in single-quotes? ... at offset 51")
+
+on the rebuild's FIRST statement, before any value copy, inside the transaction, naming the column and
+the offset. Close to the best failure this class of bug can have, rather than the worst.
+
+The measurement behind my claim came from a DQS-enabled SQLite, which is not the connection any
+migration runs through. I have spent the day cataloguing instruments that answer a different question
+from the one asked, and then shipped one: the probe measured SQLite, and the question was about this
+engine's SQLite.
+
+The tell was available and I did not look for it. A repo that hardens its database connections has an
+open sequence, and reading it takes one grep. I read the emitters and the fold and never the thing
+that would run the output.
+
+### Two more premises of mine were wrong, both structural
+
+The staleness is not made in the fold's `Op::RenameColumn` arm. The SQLite rename rebuild clones the
+LIVE table snapshot and rewrites only `ColumnSnapshot::name`, so a fix in the fold arm would not have
+touched it. I filed the ticket pointing at the wrong site.
+
+And "the node crate never populates `sqlite_schemas`", which I gave as one of two blocks, is wrong for
+the Rust engine - `engine.rs` populates it from `fold_to_field_defs` in two places. The real blocks
+are the DQS setting, the catalog leg carrying `stored_create_sql` and routing to the replay arm, and
+the fold-sourced snapshot feeding a historical replay whose artifact is discarded.
+
+So of the two blocks I described as accidents holding back a serious bug, one does not exist and the
+other is a designed security setting.
+
+### The repair I proposed does not work either
+
+I wrote that these bodies "come from known generators, so nothing has to be parsed" and that
+regeneration from facets was therefore the sound fix. That is true for ONE of the four writers. The
+uuid, SQLite enum and domain writers all overwrite `data_type` / `ddl_type_override` and discard the
+name of the type that produced the check. On the SQLite leg a uuid column is byte-identical to ULID
+and TypeID in the snapshot. Regeneration there would be inference, not regeneration.
+
+### What actually came out of it
+
+The load-bearing guard is `DQS_DDL=false`, and NOTHING PINS IT - verified by grep, no reference
+outside `actor.rs`. Deleting both config lines leaves every gate green while silently converting a
+loud DDL rejection into a table that accepts no rows. That is now the highest-priority item of the
+three this produced, and it protects more than the bug that found it.
+
+A fourth carrier of the same shape exists: `GeneratedColumnSnapshot::expr`, reached FIRST by the same
+emitter, naming OTHER columns by definition, with no reader anywhere that could notice it went stale.
+
+### The correction that generalises
+
+Three carriers have now been found, each while investigating the previous one, and each time I assumed
+the set was closed. The right question after finding one is not "is this reachable" but "what else has
+this shape", and I have asked it late every time.
