@@ -6233,3 +6233,37 @@ The check that found it, from appbase: after correcting a citation, ask what the
 paragraph asserts, and whether the correction made it more credible without making it more true. A
 corrected paragraph carries more authority than an untouched one, because a reader assumes someone
 just looked.
+
+## F103 - The negative test was borrowing its meaning from the test next to it
+
+Follow-up to `F99`. `cd7db11` shipped a cross-thread test asserting an armed fault does not fire on
+another thread, plus a positive control asserting the same-thread arm does fire. The control was
+measured and real. The negative test was not self-sufficient, and appbase's correction of its own
+prediction is what exposed it.
+
+Its assertions were `out.complete`, `out.batches == 5`, `out.rows_updated == 500`. Every one is
+about the BACKFILL. None is about the ARMING. Gut `arm` to a no-op and all three stay true, because
+a backfill with no fault armed completes exactly that way. Measured, same mutation both times:
+
+    before   1 passed, 2 failed   armed_fault_does_not_cross_thread_boundary SURVIVED
+    after    0 passed, 3 failed   it fails too
+
+One line closed it: assert `armed_thread_count() == 1` immediately after arming, before the spawn.
+
+### The rule this belongs to
+
+An assertion of absence cannot distinguish "the code ran and found nothing" from "the code did not
+run". The repair is not a cleverer absence check - it is a companion assertion of PRESENCE, in the
+same test, about the thing whose absence is being claimed. `armed_thread_count() == 1` says the
+instrument was reached; the rest then says what it found.
+
+Presence assertions about the wrong subject do not count, which is the part that made this hard to
+see. The three original assertions look exactly like the companion the rule asks for. They are
+detailed, they are specific, and they are about the backfill rather than the fault.
+
+### On having a separate control
+
+The positive control in the next test remains worth keeping - it pins that arming and tripping work
+end to end. But a negative test that only means something when read alongside its neighbour is one
+deletion away from meaning nothing, and nothing in the file said the two were load-bearing for each
+other. Now the negative test stands on its own.
