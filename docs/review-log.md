@@ -4941,3 +4941,73 @@ pre-justified.
 
 That is the second time today the lesson has been that adopting a rule does not prevent the
 failure the rule describes. Recording it is not the same as being protected by it.
+
+## F81 - The instrument that would have given the right answer while broken (#102)
+
+The check I shipped in ea8d3ff is removed. The reasoning is in the commit; what belongs here
+is how the answer was obtained, because the first instrument nearly supplied it by accident.
+
+THE QUESTION was whether the explicit-foreign-owner branch is reachable at the projection at
+all - Opus said no, INFERRED. The agent's first probe was an `eprintln!` inside
+`guard_skip_preserves_ownership`. IT DEADLOCKED THE ADDON: the adopt arm hung for 600s with
+"Promise resolution is still pending", while the same binary without the env var passed in
+350ms.
+
+Reading "no trace lines appeared" off that run would have produced THE CORRECT ANSWER FROM A
+BROKEN TOOL. Unreachable is what no-trace-lines means, and unreachable is the truth - so the
+conclusion would have been right, the reasoning would have been worthless, and nothing in the
+output would have said so. It was replaced with a file sink and re-run with a positive
+control:
+
+    registry names THIS app (control) -> trace WRITTEN, op=CreateTable{ existence_guard: Some }
+    registry names ANOTHER app        -> trace NEVER CREATED, refused upstream with
+                                         "ownership violation: op 0 targets table \"notes\"
+                                          owned by app_guard_fold_other"
+
+That is the F80 lesson arriving from the other direction. F80 was a green TEST that could not
+see; this is a green ANSWER that could not see. Both are cases where the output is
+indistinguishable from the output you would get if the instrument worked, and the only
+defence is a control that must produce something.
+
+FIVE MUTATIONS, ONE ARTIFACT, and the table is the point:
+
+    refuse if dropping would CHANGE the registry (ea8d3ff)   parity only turns red
+    refuse if it would NOT change it (inverted)              both ADOPT arms red, parity GREEN
+    refuse only on explicit foreign owner (narrowed)         NOTHING turns red
+    no check at all (what ships)                             nothing turns red
+    enforce_ir_ownership -> Ok(()) (loader gate off)         foreign-owner arm only
+
+Row three is why the helper was deleted rather than narrowed: narrowing is INDISTINGUISHABLE
+FROM DELETION on every input the suite can construct, which is what "unreachable" means when
+you stop reasoning about it and measure. Row two is why the test's comment does not claim it
+catches changes to the ownership check - the parity arm catches exactly one form, and saying
+otherwise would have been the zeroship mutation error verbatim.
+
+THE COORDINATOR CHECK THAT CHANGED THE TEST. I sent the agent F80's detector mid-run: of a
+green test, ask what production would have to do for the assertion to be reachable. Applied
+to a PARITY test the answer is sharp - a parity assertion passes just as happily when both
+halves take the SAME branch. So it added a branch witness that drives the one shape both
+paths refuse and requires the refusals to come from DIFFERENT layers:
+
+    non-empty priors -> "failed to project pending schema ...: fold: table `notes` already exists"
+    empty priors     -> "migration mig_7n42... failed to apply: relation \"notes\" already exists"
+
+The empty-priors half is refused by PostgreSQL itself at execution and never builds a
+projection. The fork at verbs.rs:263 is now an assertion rather than a comment. That is the
+first time today one of these lessons changed work in flight instead of describing work
+already done.
+
+ONE DEVIATION, FLAGGED BY THE AGENT AND ACCEPTED: the brief said keep a foreign-owner arm
+only if the branch is reachable. It is not, and the arm was kept anyway - repurposed to pin
+the LOADER, asserting the full "ownership violation ... owned by app_guard_fold_other"
+instead of a bare /ownership/. Mutation five proves it is load-bearing there. The loose regex
+is also what let the retired arm look green while testing the wrong layer.
+
+Gates run by me: fmt 0, clippy 0, workspace 74 targets / 2227 passed / 0 failed (unmoved),
+package 223/222/0/1 (unmoved), host 115 -> 117, 61 test files, no ZM_MUT residue, helper gone.
+
+NOT MEASURED, and the list is the honest cost of the removal: guarded ops other than
+createTable lose the same refusal and no arm drives one; whether the foreign-owner branch is
+unreachable for those ops too; MySQL and SQLite foreign-owner behaviour (the reachability
+experiment was PostgreSQL only); and the counterweight sequence itself - the `accounts` +
+dropColumn("ssn") adoption - which is asserted by construction and never run.
