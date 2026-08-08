@@ -7190,3 +7190,84 @@ not the same as documented, so the gap is filed rather than left to the next rea
 This is the session's recurring shape once more: the sentence was not checked against the thing it
 described. It is the same defect as a citation that resolves to the wrong file, and it survives
 because the surrounding paragraph is correct.
+
+## F119 - The measurement refused the fix I briefed, and the refusal was the finding
+
+`Op::DropColumn` never cascaded an `EXCLUDE` constraint. Both producers in `render/fold.rs` wrote
+`definition: String::new()` with `cascade_columns: None`, and the cascade falls back to parsing the
+leading parenthesized group of `definition` when the provenance is absent. That parse finds nothing
+in an empty string, so the constraint never matched and survived as a phantom the live catalog does
+not have. Unlike a `CHECK`, which now fails loudly when it reaches that path with no provenance,
+`EXCLUDE` fell through silently.
+
+I briefed this as the fourth instance of a pattern that had just worked three times: compute the
+referenced columns from the closed `Expr` the way `IndexSnapshot::expr_cascade_columns` does, covering
+expression elements and the `WHERE` predicate. The brief said to reproduce against live PostgreSQL
+first and to treat a non-cascading shape as a good result. That instruction is the only reason the
+change is correct, because the measurement contradicted the design.
+
+Measured on PostgreSQL 18.4:
+
+    EXCLUDE USING gist (a WITH =)                  DROP COLUMN a   -> constraint GONE
+    EXCLUDE USING gist (a WITH =, b WITH =)        DROP COLUMN a   -> constraint GONE (whole)
+    EXCLUDE USING gist (((a + 1)) WITH =)          DROP COLUMN a   -> ERROR, refused
+    EXCLUDE USING gist (b WITH =) WHERE (a > 0)    DROP COLUMN a   -> ERROR, refused
+
+    ERROR:  cannot drop column a of table t3 because other objects depend on it
+    DETAIL:  constraint t3_excl on table t3 depends on column a of table t3
+
+An expression index and a partial index are silently cascaded by that same statement. An `EXCLUDE`
+reaching a column only through `indexprs` or `indpred` carries a NORMAL dependency instead of an auto
+one, so PostgreSQL refuses the drop rather than cascading it. The engine emits a plain
+`ALTER TABLE ... DROP COLUMN` and never `CASCADE`, so the refusal is the real behaviour: the statement
+aborts and the constraint is still there.
+
+Had the briefed design shipped, the fold would have dropped a constraint PostgreSQL did not drop and
+could not have dropped, because the migration aborted. That is worse than the phantom it was meant to
+fix - a phantom is a disagreement, an invented deletion is a lie about a migration that never ran.
+
+The catalog states the same rule independently. `pg_constraint.conkey` holds attnum `0` for an
+expression element, which resolves to no name, and the predicate is not in `conkey` at all:
+
+     conname  | conkey | local_columns | def
+     k1_plain | {1}    | {a}           | EXCLUDE USING gist (a WITH =)
+     k1_expr  | {0}    | {}            | EXCLUDE USING gist (((a + 1)) WITH =)
+     k1_pred  | {2}    | {b}           | EXCLUDE USING gist (b WITH =) WHERE ((a > 0))
+
+So `drift.rs:1351` already computed "plain column elements only" on the live side from `conkey`, and
+the fold only had to mirror it. The two sides agree by construction rather than by coincidence, which
+is the property the previous three cascade fixes were also built on.
+
+A column reached through BOTH a plain element and an expression still cascades, because the plain
+element's auto dependency is enough. Matching on plain elements alone gets that right without a
+special case.
+
+### What this says about the pattern
+
+Three consecutive fixes had established that a rendered-SQL dependency needs structural provenance
+computed from the closed AST. The fourth case had the same shape, the same field, the same producer,
+and the opposite answer. The generalisation was sound about the mechanism and wrong about the
+behaviour, and nothing short of running it against the database would have separated those.
+
+Reproduced RED myself before accepting it, with an env-gated early return inside
+`exclusion_cascade_columns` rather than by reverting the call sites, so the function stayed used and
+the signature intact: 4 failed, 2 passed. The two that passed are the guard (an exclusion whose
+predicate only SPELLS the dropped name in a string literal) and the control (dropping an unrelated
+column), and their passing in the same binary is what makes the four failures mean anything. Each
+failure was the phantom itself:
+
+    missing_objects: ["excl_added constraint excl_added_a_excl"]
+
+### Gates
+
+    fmt 0, clippy 0, workspace 81 targets / 2290 passed / 0 failed / 0 ignored,
+    doc 0, zero-migrate-node 4 targets / 52 passed, 0 skip banners
+
+Exactly +1 target and +6 passed against the 80 / 2284 baseline, fully accounted for by the new file.
+
+### Not verified
+
+Only PostgreSQL 18.4 was measured. Whether older majors classify the expression and predicate
+dependency the same way is untested. The fix is conservative in the direction that matters: it never
+cascades more than `conkey` names. SQLite and MySQL refuse `Capability::ExclusionConstraint` before
+the snapshot, so neither leg exercises this.
