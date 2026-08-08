@@ -5936,3 +5936,67 @@ the exact cases it was built for is worse than no gate: it converts "unchecked" 
 clean". `#103` therefore stays narrow - path resolution, where the citation is machine-readable -
 and this class ships as a stated hole. 31 of the 36 prose claims remain unread. They are not
 clean; they are unexamined, and recorded that way.
+
+## F98 - Two independent opinions agreed on the fix, and the fix was wrong
+
+`#116`. PostgreSQL 18.4 refuses to attach a child carrying an identity column:
+
+    ALTER TABLE p ATTACH PARTITION c_attach FOR VALUES FROM (100) TO (200);
+    ERROR:  table "c_attach" being attached contains an identity column "id"
+    DETAIL:  The new partition may not contain an identity column.
+
+`fold.rs`'s AttachPartition arm accepts it. One Opus agent and one read-only codex job both
+recommended rejecting it in the fold. Both were told the premise might be wrong and both were
+required to name a case where their own recommendation makes things worse. Both named the same one,
+independently. Neither weighed it against what the status quo costs, and that is where the decision
+turned.
+
+### The blocker they both found
+
+    fold.rs:2150                 `| Op::PgRaw { .. } => {}`      raw SQL folds to nothing
+    guard/mod.rs:3070            permits `A::AtDropIdentity`
+    zero-migrate-ir ir.rs:1201   `drop_identity_from` is a FIELD on `AlterPrimaryKeyAction`
+    engine.rs:391                `fold_ops(...)?` fails the DEPLOY
+
+There is no standalone drop-identity op, so `ALTER TABLE c ALTER COLUMN id DROP IDENTITY` through
+`pgRaw` is the only way to clear identity from a column that is not part of a primary-key change.
+That history applies cleanly on PostgreSQL. A fold-side identity check would reject it - and reject
+it at deploy time, not render time.
+
+### The fact that decided it
+
+    session.rs:490-499
+    if let Err(e) = conn.batch(&m.up).await {
+        // Roll back; report the failure. No journal row was written.
+        ...
+        return Err(ApplyError::MigrationFailed { version, source: e.into() });
+    }
+
+The server's refusal is already clean: the transaction rolls back, no journal row is written, and
+the operator gets PostgreSQL's own error naming the table and the column. So the check's entire
+benefit is learning at fold time instead of apply time about a failure that is already safe and
+precisely diagnosed. Its cost is breaking correct migrations with no in-band alternative.
+
+That is the wrong trade. A check that rejects a working migration is worse than the gap it closes.
+
+### What landed instead
+
+A stated hole in the arm, naming all six statically-decidable ATTACH preconditions the fold does not
+model, and recording that one of them - row-level bound satisfaction - is data-dependent and can
+never be decided offline, so the server stays the enforcing layer no matter how much the fold learns.
+
+The part that had to be written down is the asymmetry. `cbba291` made the detach arms STRIP identity,
+because that is what the server does on DETACH. So the fold now asserts on the way out an invariant
+it declines to enforce on the way in. Left unexplained that reads as an oversight, and the next
+reader closes it - straight into the pgRaw regression.
+
+### On agreement
+
+Two independent opinions reaching the same recommendation is not evidence that the recommendation is
+right. Both were correct on every fact and wrong on the balance, because both scoped the question to
+"is the gap real" rather than "what does closing it cost against what leaving it costs". The value of
+the second opinion here was a fact - codex supplied `session.rs:490-499` - not a verdict.
+
+One correction from the same source: `diff_snapshots` does not take op streams. `drift.rs:1560` is
+`diff_snapshots(expected: &SchemaSnapshot, actual: &SchemaSnapshot)`; only `fold_ops` green-lights a
+stream. Earlier notes on this ticket said both. The substance held, the attribution did not.
