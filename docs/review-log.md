@@ -5874,3 +5874,65 @@ Related: the first run of the new case reported `10 passed` in 0.01s. A live-dat
 cannot touch PostgreSQL in 0.01s. `ZERO_MIGRATE_TEST_PG_URL` was unset and the `#41` banner had
 printed LIVE-DATABASE COVERAGE SKIPPED directly above the greens. Wall-clock was the tell; the
 count was identical either way, which is exactly what `#41` exists to expose.
+
+## F97 - I reported a fifth of a class as the whole class, and the part I skipped held the worse defect
+
+`#115`. Three comments in `crates/zero-migrate/src/guard_vendor_lower_tests.rs` said the
+`OperatorCapability::for_test` seam is `#[cfg(test)]`-gated. The real gate is
+`#[cfg(feature = "test-support")]` at `crates/zero-migrate-ir/src/capability.rs:58` - a
+DIFFERENT crate.
+
+That made the claim self-refuting rather than merely wrong: a downstream crate cannot see
+another crate's `#[cfg(test)]` items at all, so if the comment were true, the file carrying it
+could not compile. A comment describing a mechanism under which its own test would not build is
+sharper than a broken link, because the code standing next to it is the disproof.
+
+### Filing one line number when the string appeared three times
+
+The ticket originally named line 778. A sweep for the STRING found :35-36 and :809 as well.
+`:809` is a `//` comment, not `///`, so the doc-comment-shaped grep that found the other two was
+structurally blind to it. Grep the claim, not the file you happened to be reading.
+
+### The larger error, which came from outside
+
+Having found three, I reported the population as settled: six comments name `cfg(` in this
+workspace, three true, three false, "not a sample - that is the whole class." appbase pointed out
+that this scopes by SPELLING. Re-measured:
+
+    comments naming `cfg(`                                   6
+    comments making a gating claim WITHOUT writing `cfg(`   36
+      test-only 10, gated on 11, gated behind 5, only under 8
+
+So "the whole class" was 6 of 42. A comment reading "Test-only." asserts exactly what
+`#[cfg(test)]` asserts and is invisible to any `cfg(`-anchored search, in either comment shape.
+
+The first of those 36 I opened was worse than everything the narrow sweep had produced.
+`crates/zero-migrate/src/fault.rs` documents `pub fn arm` - a one-shot crash injector - as
+"Test-only.". The file contains no `cfg(` at all, `lib.rs:79-80` declares it
+`#[doc(hidden)] pub mod fault;`, and `cargo build -p zero-migrate --release` exits 0.
+`#[doc(hidden)]` hides an item from rustdoc; it does not remove it from the build. Filed as
+`#117`, unfixed, because the two repairs (gate it, or delete the false sentence) have different
+blast radii and that is a decision, not an edit.
+
+### What the fix says now, and why it names a crate
+
+The corrected comments name `zero-migrate-ir`'s `test-support` feature and add that this crate
+enables it as a dev-dependency only. The crate name is the load-bearing part: the whole defect
+was a reader assuming the gate was local. Verified rather than assumed before writing it -
+`crates/zero-migrate/Cargo.toml:70` takes the ir crate under `[dependencies]` WITHOUT the
+feature, `:139` takes it under `[dev-dependencies]` WITH it, and the workspace sets
+`resolver = "3"`, so dev-dependency features do not unify into a normal build.
+
+The definition site had been right the whole time (`capability.rs:56`, three lines above its own
+attribute). All three wrong comments were usage sites in another crate. A claim degrades with
+distance from the thing it describes.
+
+### No gate for this
+
+The cheap version - assert every feature named in a comment exists somewhere in the workspace -
+passes all three of these defects, because `test-support` IS a real feature of a real crate. The
+wrong part is the crate attribution, and that exists only in English. A gate that green-lights
+the exact cases it was built for is worse than no gate: it converts "unchecked" into "checked and
+clean". `#103` therefore stays narrow - path resolution, where the citation is machine-readable -
+and this class ships as a stated hole. 31 of the 36 prose claims remain unread. They are not
+clean; they are unexamined, and recorded that way.
