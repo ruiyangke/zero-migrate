@@ -8985,6 +8985,86 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F170 - DESIGN, not shipped: where the column-drop dependency gate belongs, and the rule it must use
+
+#129 and #167 want one fix. This records the design and, more importantly, the correction that came
+out of asking for it.
+
+### One instrument, and saying so
+
+The standing rule is one Opus agent plus one read-only codex job, reconciled. The subagent budget is
+exhausted (200/200), so this had the codex half ONLY. Treat what follows as single-sourced against my
+own reading rather than as two independent instruments agreeing. The one novel claim that changes the
+rule I verified myself, below; the placement argument I have NOT independently corroborated.
+
+### The correction that matters, VERIFIED BY ME
+
+My measured rule from F168 was "an EXCLUDE whose EXPRESSION reads the column blocks the drop". Codex
+argued that is incomplete, because PostgreSQL's `pg_depend` distinguishes NORMAL dependencies, which
+block a RESTRICT drop, from AUTO/INTERNAL ones, which are removed automatically - and an object with
+BOTH can still be dropped automatically.
+
+MEASURED BY ME against PostgreSQL 18.4:
+
+    CREATE TABLE t (note text, other text,
+      EXCLUDE USING btree (note WITH =, lower(note) WITH =));
+    ALTER TABLE t DROP COLUMN note;
+    ALTER TABLE
+
+It succeeds. Reading back, the surviving column set is `{other}` and the surviving constraint set is
+EMPTY - PostgreSQL dropped the whole exclusion. So a constraint that names the column BOTH plainly
+and inside an expression does NOT block; the automatic dependency wins.
+
+That kills the naive rule. "Refuse if any EXCLUDE expression reads the column" would refuse this
+migration, which PostgreSQL accepts - a false positive, and the failure mode that has already
+reversed several proposed fixes here. The rule has to be: refuse only when the dependency is the
+BLOCKING kind AND no automatic path to the same dependent exists.
+
+The `pg_depend` NORMAL-versus-AUTO principle also explains every split I measured in F168 without
+needing a case list, which is a better foundation than the enumeration I had.
+
+### Placement, from codex, NOT independently verified by me
+
+- NOT the fold's `DropColumn` arm as the primary site. Two reasons, and the second is one I had
+  already found independently: the engine applies an artifact and THEN folds, so a new `FoldError`
+  can report failure after a successful journaled apply. Codex adds a second: by the time that arm
+  runs the fold no longer RETAINS the expression - `exclusion_cascade_columns` keeps plain columns
+  only, folded views discard their query, and generated snapshots hold rendered SQL rather than
+  provenance. So a fold-only fix needs new retained provenance, not just a new check.
+- NOT an ordinary per-migration precondition on the contract step. Preconditions run immediately
+  before their own migration, so a C2 precondition fires after the expand and backfill have landed -
+  it would replace the server error without saving anything.
+- Instead: register a typed column-drop intent at the three sites that produce one (direct IR drop,
+  declarative live-only drop, and the PostgreSQL rename registering its eventual C2 target BEFORE
+  authoring the expand), run the declared-state analysis during validation, and add a whole-plan
+  backend preflight against the live catalog inside the plan lock.
+
+Two-layer, because neither layer is sufficient alone: the declared analysis cannot see a view or a
+generated column that exists only in a database it never introspected, and a "no declared blocker
+found" result proves only that the op history did not prove one. PostgreSQL stays the final
+race-safe authority; the early check exists so the RENAME case fails before the expand rather than
+a deployment later.
+
+### SQLite wants a different rule, not this one
+
+Codex reports that native SQLite refuses a drop for more shapes than PostgreSQL - indexes, partial
+predicates, generated expressions, triggers and views - while this repo routes constrained SQLite
+drops to a rebuild that deliberately skips indexes and triggers referencing the dropped column, and
+does not reconstruct views at all. So SQLite needs a rebuild-closure policy rather than PostgreSQL's
+blocking-dependency list. I have NOT verified any of this; it is recorded so nobody assumes the
+PostgreSQL rule ports.
+
+### Not built here
+
+This is a design entry. Nothing shipped. What is settled: CASCADE is out (F167), the rule keys on
+blocking-versus-automatic dependencies rather than on shape names, and the gate is two-layer with
+the early half mandatory for the online rename. What is open: whether to build it at all now, given
+that for an isolated direct drop PostgreSQL's own error is already clear and well-timed - the strong
+case is the rename, which fails a deployment too late.
+
+Codex did not rerun PostgreSQL or MySQL, did not run the tests, and did not verify the catalog joins
+that would name the three blocker classes. Those are the first things to do before implementing.
+
 ## F169 - REJECTED as filed: a red workspace clippy cannot report every crate, because the crates form one chain
 
 #128 says "a red workspace clippy reports only the first failing crate, so it cannot be used to
