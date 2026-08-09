@@ -8985,6 +8985,55 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F168 - MEASUREMENT: which dependents make PostgreSQL refuse a bare DROP COLUMN, and which it silently drops
+
+F167 left one question open that I had explicitly not checked: whether views and EXCLUDE constraints
+sit in the same dependency class as a generated column, which would widen any plan-time refusal
+beyond generated columns. MEASURED BY ME against the live container (PostgreSQL 18.4). Every scratch
+schema dropped afterwards and the count verified back to 0.
+
+The answer is a clean split, and it is NOT the split the ticket vocabulary suggests.
+
+### REFUSES the drop - the dependent must be dealt with explicitly
+
+    generated column reading it
+      ERROR:  cannot drop column qty ... DETAIL: column total ... depends on column qty
+    view reading it
+      ERROR:  cannot drop column a ... DETAIL: view zm_dep.v depends on column a of table zm_dep.t
+    EXCLUDE constraint whose EXPRESSION reads it
+      CREATE TABLE t (lo timestamptz, hi timestamptz, note text,
+        EXCLUDE USING gist (tstzrange(lo, hi) WITH &&));
+      ALTER TABLE t DROP COLUMN lo;
+      ERROR:  cannot drop column lo ... DETAIL: constraint t_tstzrange_excl ... depends on column lo
+
+### ALLOWS the drop - PostgreSQL silently drops the dependent with it
+
+    EXCLUDE constraint over a PLAIN COLUMN     EXCLUDE USING gist (r WITH &&)  -> DROP r: ALTER TABLE
+    partial index whose PREDICATE reads it     INDEX (b) WHERE (a > 0)         -> DROP a: ALTER TABLE
+    index whose EXPRESSION KEY reads it        INDEX ((c + 1))                 -> DROP c: ALTER TABLE
+
+Control, one variable: dropping `note`, a column the EXCLUDE expression does NOT read, succeeds. So
+the refusals above are about the dependency, not about the table being exotic.
+
+### What this settles
+
+#129 is filed as "the fold projects a dropped column that PostgreSQL refuses to drop when an EXCLUDE
+expression covers it". CONFIRMED - but the qualifier is load-bearing and easy to lose. An EXCLUDE
+over a plain column does NOT refuse; PostgreSQL drops the constraint with the column. A fix that
+keys on "the table has an EXCLUDE constraint" would refuse migrations that apply cleanly today,
+which is the rule that has already reversed three proposed fixes in this review.
+
+#167's plan-time refusal, when built, covers three shapes rather than one: generated column, view,
+and expression-carrying EXCLUDE. Both tickets updated with these measurements so neither gets
+rediscovered.
+
+The index results are the reason #126's cascade fix was right: PostgreSQL drops a partial index and
+an expression-key index along with the column, so a fold that kept them would diverge from live. The
+constraint results are the reason the same treatment would be WRONG for an expression EXCLUDE -
+there, live refuses rather than dropping, so the fold must not project the drop as if it succeeded.
+
+MEASURED, not fixed. Nothing changed in this entry.
+
 ## F167 - the contract-step drop has no CASCADE on purpose, and now says so
 
 #167 came out of the #133 probing as "the PostgreSQL expand-contract rename drops a column without
