@@ -8063,3 +8063,100 @@ than the seven alone.
 43 added / 43 removed across 22 files, one line replaced per site. Non-ASCII checked at the
 CHARACTER level: the set on added lines equals the set on removed lines, so nothing new was
 introduced - the em dashes and arrows are pre-existing and remain #11's job.
+
+## F130 - a pinned primary key must say what it means about the author's
+
+Closes #140. Found by the convention sweep that also produced #137, #138, #139 and #141-#143.
+
+### The defect
+
+`crates/zero-migrate-policy/src/document.rs` declared
+
+    #[derive(Deserialize, Default)]
+    enum WireAuthorPk { #[default] Allow, Forbid }
+
+with `#[serde(default)] author_primary_key: WireAuthorPk` on `WireInject`, while the domain type it
+maps to, `AuthorPkPolicy`, derives no `Default` at all. So a TOML `[[inject]]` block that simply
+omitted the field silently resolved to the permissive reading, on a real serde path, with no
+diagnostic.
+
+### Why `Allow` under a pin is not a policy reading
+
+This is the part that decided the remedy. At `crates/zero-migrate/src/model/table_shape.rs:341-343`
+
+    if let Some(pk) = &inject.primary_key { *primary_key = Some(pk.clone()); }
+
+the pinned key overwrites the author's key UNCONDITIONALLY. The `AuthorPrimaryKeyForbidden` check at
+:320-331 only fires when the inject also pins. So under a pin, `Allow` has no behaviour of its own -
+it does exactly one thing, suppress the rejection. A default that resolves silence into "suppress
+the diagnostic and discard the input" is a muted error, not a posture.
+
+Two facts settled that this is a real difference rather than enforcement-style trivia:
+
+  - `crates/zero-migrate-policy/src/compose.rs:1419` and `:1455` HARD FAIL with "primary key pinned
+    with divergent author_primary_key policy" when two injects both pin. The system already
+    declares the two values materially different.
+  - `crates/zero-migrate-policy/src/seal.rs:439-442` encodes the variant into the canonical seal
+    bytes.
+
+### What was rejected, and why the safest-looking option was the worst
+
+Making the field unconditionally required breaks 42 blocks across 39 documents, 36 of which pin no
+primary key and for which the field is meaningless - ceremony that trains an operator to paste a
+value they have not thought about, which is the original defect in human form.
+
+Re-pointing the default to `Forbid` reads as the conservative fix and is the worst of the three: by
+the seal encoding above it would change the sealed digest of every document that omits the key,
+with no byte changing in the document. That is the same silent semantic flip, aimed the other way.
+
+Warning-only is not available: `PolicyDoc` can carry warnings, but the charter-to-`EffectivePolicy`
+path discards them.
+
+### The shape that was taken, and it is the in-house one
+
+    primary_key PRESENT + author_primary_key ABSENT  -> load error
+    primary_key ABSENT  + author_primary_key ABSENT  -> Allow, genuinely inert there
+    explicit allow / explicit forbid                  -> unchanged
+
+`LoadError::InjectPinsPrimaryKeyWithoutAuthorPolicy` sits directly after `GrantScopeUnbounded`,
+which already rejects "a Grant-kind rule that would acquire the permissive extreme by omission".
+Same idiom, same voice. `WireInject` and `WireAuthorPk` are private, so `Option<WireAuthorPk>` is
+not a public break; `InjectSpec.author_primary_key` stays a resolved value.
+
+Costs exactly the 6 blocks that pin and omit. Each got an explicit `allow`, preserving the value it
+silently resolved to - changing them to `forbid` would have quietly altered what those tests assert.
+
+### The break I accepted
+
+`LoadError` is NOT `#[non_exhaustive]`, so the new variant breaks any downstream exhaustive `match`.
+Nothing in the workspace matches exhaustively on it, and the one known consumer vendors this source
+rather than depending on the crate. At 0.1.0 the alternative - reusing a generic parse error - buys
+source compatibility with a worse diagnostic for a rule an operator has to fix by hand. Taken
+deliberately.
+
+### RED, reproduced by me rather than accepted
+
+Mutated ONLY the refusal arm back to the old permissive resolution - one match arm, every export
+intact, no file reverted - and the new test failed:
+
+    panicked at crates/zero-migrate/src/model/table_shape.rs:1065:78:
+    a charter that pins a primary key and omits author_primary_key must not silently discard the
+    author-declared primary key: MigrationIr { ... primary_key: Some(["id"]) ... }
+    RED_EXIT=101
+
+The payload is the defect: the author declared `["code"]` and resolution returned `["id"]` with no
+error. File restored byte-identical afterwards.
+
+The test earns its RED. It derives the silent charter from the existing forbid charter by removing
+one line, so it differs from its neighbour by exactly one variable, and it then ASSERTS the charter
+is actually silent before proceeding - without that guard a `replace()` that failed to match would
+leave the test green and asserting nothing. It accepts either closure, refusal at load or refusal at
+resolve, so it pins the defect and not the implementation.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2311 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+2311 is exactly +4 on the 2307 baseline, matching the four tests added, so all four run rather than
+sitting filtered. Non-ASCII compared at the CHARACTER level: added and removed sets are both empty.
