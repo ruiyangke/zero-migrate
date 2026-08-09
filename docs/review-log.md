@@ -8985,6 +8985,94 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F144 - a read verb that waited for a deploy, and the answer that is not a guess
+
+Closes #155. The largest defect the #152 reconciliation turned up, and it needed no timeout.
+
+### The finding
+
+`status` and `plan` took the BLOCKING project advisory lock (ops/status.rs:899-902,
+verbs.rs:377-380 and :471-474, reaching postgres/session.rs:59). `zero-migrate status --strict` is
+the documented CI gate, so a health check run during a peer's deploy waited for that deploy to
+finish, with no output.
+
+PostgreSQL-only. mysql/session.rs:53 bounds the same lock at `GET_LOCK(name, 10)` and its own doc
+says it "Mirrors the 'serialize concurrent deploys' intent of the PG advisory lock";
+sqlite/mod.rs:456-479 is a bounded try-lock spin. PG was the outlier that waited forever, so this
+aligns it with its siblings rather than inventing a semantic.
+
+### The question that decided the shape, and why the obvious answer was wrong
+
+Does status need the lock for a consistent read? Two independent reviews converged on a subtler
+answer than either option in the ticket.
+
+NOT to avoid a torn read: status.rs:1082-1121 already has a `REPEATABLE READ READ ONLY` path.
+It needs it because a TRANSIENT PARTIAL state is genuinely committed and no isolation level hides
+it. Non-transactional apply commits an inflight marker, then the DDL, then the completed row
+(session.rs:910-972). A started-only row becomes Inflight, then Partial, then pending, and
+`statusIsDirty` is true on any pending plan - so an UNLOCKED status racing a healthy deploy reports
+`--strict` exit 1. A false alarm, which is worse than the hang.
+
+And the lock is a QUIESCENCE BARRIER, which is what neither the ticket nor the first review saw: it
+distinguishes "a deploy is running now" from "a marker left behind by an interruption". Reading
+unlocked cannot tell those apart at all.
+
+So the rule is: status needs lock OWNERSHIP, not blocking ACQUISITION. Try-lock is right because a
+failed acquisition means there is no trustworthy verdict to give, and the honest output is to say
+so. Try-lock-and-read-anyway would have been the wrong fix.
+
+### What shipped
+
+A non-blocking `try_acquire_project_lock` on `MigrationBackend`, defaulting to the blocking acquire
+(correct for the two backends already bounded). PostgreSQL overrides it: three `pg_try_advisory_lock`
+attempts 200ms apart - a fixed count, never a loop until acquired - then a holder probe and a `Busy`
+result. On busy the verb reads NOTHING and returns; `StatusReply` carries `busy` and `lockHolders`;
+the CLI prints a loud stderr line naming the holder and exits 0.
+
+Exit 0 is the deliberate part. Contention is not a dirty migration set, and every runtime error maps
+to exit 1 (cli.ts:1274-1276), so a try-lock that merely threw would have produced exactly the false
+red this was meant to avoid. A pipeline that WANTS to fail on contention opts in through `--json`,
+where `busy` is always present. docs/cli.md changed in the same commit, because it had documented
+"exits 0 only when the supplied migration set and journal are clean" and leaving that would have put
+both versions in the tree.
+
+No duration is reported for a holder. PostgreSQL records no acquisition time for an advisory lock,
+so every available timestamp would age the holder's session or its current statement instead - the
+brief for this work supplied SQL selecting `session_age` while instructing that no duration be
+reported, and the instruction was the correct half.
+
+### The pinning test was strengthened, not relaxed
+
+`status_ir_brackets_the_reads_inside_one_project_lock` pinned lock-before-catalog,
+lock-before-journal, unlock-after-read. It finds the lock by SUBSTRING, and `pg_try_advisory_lock`
+does not contain `pg_advisory_lock`, so the switch made it panic - correctly.
+
+It was renamed to `..._inside_one_non_blocking_project_lock` with all three orderings intact over the
+same log and the same reads, plus two NEGATIVE assertions: `SELECT pg_advisory_lock` must be absent,
+so a regression to blocking fails here rather than passing on a shared substring, and
+`pg_stat_activity` must be absent when uncontended, so the probe cannot run when there is nothing to
+probe. A new sibling covers the half ordering assertions structurally cannot reach - that a FAILED
+acquisition skips the reads - by asserting five forbidden SQL shapes never ran.
+
+### Verified rather than accepted
+
+The RED was reproduced independently by gating the try-lock behind an env var that restores the
+blocking acquire, keeping every export intact rather than reverting a file:
+`plan_status_reports_a_busy_project_lock_instead_of_waiting_for_a_peer` failed with "read-only plan
+status did not answer within 15s while a peer held the project lock", exit 101, while the
+uncontended test in the same binary still passed - the control that makes the failure mean something.
+
+fmt 0, clippy 0, doc 0; 85 targets / 2337 passed / 0 failed / 0 ignored across the four engine
+crates (84/2335 before, +1 target and +2 tests), node crate 4 targets / 53 passed (+1), 0
+live-database skip banners. The rebuilt addon is gitignored and untracked, so no stale binary can
+diverge from it.
+
+### Left open, and it is a real gap rather than a rounding error
+
+#158 - MySQL still blocks up to 10s on contention and then ERRORS, which maps to exit 1. The hang is
+gone there (it never existed), but the false strict failure this entry is about survives on that
+dialect. Closing it needs a `GET_LOCK(name, 0)` leg and a `performance_schema.metadata_locks` probe.
+
 ## F143 - a comment whose own parenthetical refutes its conclusion
 
 Closes #154. Comments only, no behaviour change.

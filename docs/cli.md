@@ -349,11 +349,50 @@ zero-migrate status --env production --strict
 ```
 
 Strict status exits 1 when anything is pending, drifted, or checksum-mismatched.
-It exits 0 only when the supplied migration set and journal are clean. `--json`
-does not change this exit-code rule.
+It exits 0 when the supplied migration set and journal are clean, and also when a
+peer's deploy held the project lock (see below). `--json` does not change this
+exit-code rule.
 
 Status is available for PostgreSQL and MySQL. The dialect always comes from the
 URL.
+
+### When a deploy is already running
+
+`apply` holds a project lock for the whole length of its run. `status` and `plan`
+try for that lock without waiting: they make a few attempts a fraction of a second
+apart, and if it is still held they report the contention and stop, having read
+nothing.
+
+```
+$ zero-migrate status --env production --strict
+zero-migrate: another deploy holds the project lock; status read nothing and did not wait for it
+zero-migrate:   held by pid 4242 (zero-migrate, active): CREATE INDEX CONCURRENTLY ix_widgets_name ...
+$ echo $?
+0
+```
+
+They read nothing on purpose. A status read is a sequence of catalog, journal, and
+contract queries with no transaction around them, and a non-transactional apply
+commits its inflight marker before the DDL and its completed row after it, so a
+reader that went ahead without the lock would see a running deploy's own halfway
+state and report it as drift.
+
+The exit code is 0 because contention is not a dirty migration set: a strict gate
+that failed here would fail on every pipeline that overlaps a deploy. A pipeline
+that *wants* to fail on contention opts in through `--json`, where `busy` is
+always present and `lockHolders` names the holding sessions:
+
+```bash
+zero-migrate status --env production --strict --json > status.json || exit 1
+jq -e '.busy | not' status.json    # fail this build if a deploy was running
+```
+
+No duration is reported for a holder. PostgreSQL records no acquisition time for
+an advisory lock, so every timestamp available would age the holder's session or
+its current statement rather than the lock itself.
+
+`apply` and `squash` still wait for the lock: they are the writers the lock exists
+to serialize, and a writer that gave up would leave the deploy undone.
 
 ## `resolve`
 
