@@ -8160,3 +8160,82 @@ resolve, so it pins the defect and not the implementation.
 
 2311 is exactly +4 on the 2307 baseline, matching the four tests added, so all four run rather than
 sitting filtered. Non-ASCII compared at the CHARACTER level: added and removed sets are both empty.
+
+## F131 - a stated restriction without a pin is refused too
+
+Closes #141. The mirror of F130: that one refused SILENCE under a pin, this refuses a STATED
+RESTRICTION without one. They share a resolve site and an error-variant neighbourhood, and they ship
+as separate commits because the verification for each is easier to read alone.
+
+### The defect
+
+`crates/zero-migrate/src/model/table_shape.rs:320` gates the whole author-PK check on the inject
+also pinning a key:
+
+    if inject.primary_key.is_some() { ... AuthorPkPolicy::Forbid -> AuthorPrimaryKeyForbidden ... }
+
+So an operator who writes `author_primary_key = "forbid"` and pins nothing gets no enforcement at
+all. The restriction is accepted at load, carried through composition, encoded into the canonical
+seal bytes (`crates/zero-migrate-policy/src/seal.rs:439-442`), and never consulted.
+
+### Partly by design, which is why the doc was also wrong
+
+The gating is deliberate: `crates/zero-migrate-policy/src/rule.rs:93` scopes the field to "a PINNED
+injected PK", and only a pin supplies the key the author's is being refused in favour of. What was
+wrong is that the `Forbid` variant's own doc at :97-98 stated the restriction UNCONDITIONALLY - and
+that is the text an operator reads before writing the rule. Corrected in the same commit. A defect
+that is only reachable because the documentation invited it is not fixed by rejecting the input
+alone.
+
+### What was NOT done
+
+Enforcement was not widened to the unpinned case. `table_shape.rs:320` is untouched. Widening would
+change behaviour for every document relying on the documented scoping; refusing an inert rule is
+cheaper and honest. `author_primary_key = "allow"` without a pin stays legal - it states the reading
+an unpinned rule already has.
+
+### Blast radius, counted twice
+
+Independently re-counted rather than trusted. Full census of 57 `[[inject]]` blocks repo-wide:
+
+    pin primary_key:     19
+    author_pk = forbid:  11
+    forbid WITHOUT pin:   0   <- the rejected combination
+    allow without pin:    1
+    silent + pin:         1   <- F130's own negative fixture, not a live block
+    silent, no pin:      37
+
+Zero blocks in the rejected state, so the refusal costs nothing today and no fixture needed editing.
+
+### RED, reproduced by me
+
+Mutated ONLY the refusal arm back to admitting - the variant stayed declared so every export was
+intact, no file reverted:
+
+    test unpinned_inject_without_author_policy_accepts_as_allow ... ok
+    test unpinned_allow_of_the_author_primary_key_accepts_as_allow ... ok
+    test unpinned_forbid_of_the_author_primary_key_rejects ... FAILED
+    RED_EXIT=101
+
+The two positive controls PASSING while only the rejection test fails is the whole point: it
+separates "refused the right thing" from "refused everything unpinned", which no single failing test
+can distinguish. File restored byte-identical.
+
+Worth recording that the first RED attempt was discarded for failing at COMPILE on an unknown
+variant. A test that cannot build proves nothing about behaviour; the variant was declared first and
+only the resolve arm left unfixed, so the RED is the defect rather than the absence of a name.
+
+### An agent diagnosis that was wrong, and checking it mattered
+
+The implementation reported 20 live-database skip banners and concluded the environment had no
+Postgres. It did: `zero-migrate-postgres-1` was up 20 hours, healthy, and answered `select
+version()`. The banners came from its own test command not exporting `ZERO_MIGRATE_TEST_PG_URL`.
+Accepting that diagnosis would have meant disbelieving a real signal for the rest of the session.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2313 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+2313 is exactly +2 on F130's 2311, matching the two tests added. Non-ASCII compared at the character
+level: added and removed sets both empty.
