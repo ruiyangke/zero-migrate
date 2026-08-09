@@ -8583,3 +8583,70 @@ Both defects were latent - `verify` has no non-test caller and `SealedPolicy` ca
 They are worth fixing now because docs/policy.md already advertises sealing a policy that crosses a
 process or storage boundary, so the first serialisation work is also the moment the first real
 caller appears, reading a signature that offers `registry_digest()` as a same-typed argument.
+
+## F137 - two claims about names, both false, neither caught by anything
+
+Closes #144 and #146. Both are comment defects with correct behaviour underneath, and both were
+deliberately deferred from earlier commits rather than widened into them.
+
+### A knob key that does not exist
+
+Commit 72108e3 fixed ONE `sec.destructive_ops` in the type's own doc and left the rest for a scoped
+sweep. The registered keys are `safety.destructive_ops` (policy_registry.rs:183) and
+`safety.require_approval` (:200) - my ticket cited :150 for the first, which was wrong.
+
+Swept by the CLAIM rather than the reported list: `git grep -nE '(^|[^a-zA-Z_])sec\.'` returned 13
+hits, 11 in code. All 11 fixed. The two survivors are in this log, in the entry naming the bad
+spelling in order to correct it.
+
+docs/ was clean. That was the thing most worth checking, because a wrong knob key in prose is
+copy-pasteable into a charter and will not resolve, where a code comment merely misleads.
+
+Six of the eleven were test-fixture key LITERALS rather than comments, and renaming them was a
+judgement call: they assert nothing, since `KnobKey::parse` accepts any well-formed key and both
+tests register the knob in a test-local registry. They were renamed anyway because leaving a fixture
+keyed `sec.require_approval` directly beneath a doc reading "modelled on `safety.require_approval`"
+presents as a second, different knob. Verified inert first: neither local registry already held the
+real key, and both assertions compare two defs under the SAME key.
+
+### A promise that names are folded at parse time
+
+rule.rs:106-108 said "the loader folds the literals here at parse time". `resolve_predicate`
+(document.rs:846) folds only `ColumnNamePattern`; `ForbiddenColumns.names`,
+`TypeNullability.column` and `RequireIndex.columns` pass through verbatim.
+
+THE BEHAVIOUR IS CORRECT, which is why this is a comment fix. Every live comparison folds BOTH sides
+at comparison time. My ticket said there was one such site; there are THREE - compose.rs:1130,
+compose.rs:1501, and document.rs:925, the last using a local `fold_name` rather than `names_match`.
+All three fold both sides.
+
+The comment now states the invariant that actually holds everywhere - every name comparison is
+decided over the II.2.7 fold of both sides, never over the stored bytes - with where the fold
+happens as a detail beneath it. One rule, not two.
+
+Folding at parse time was rejected for two reasons, the second of which I had not considered:
+seal.rs encodes these fields via `write_str_vec`/`write_str` over the stored `String`s, so folding
+at load changes seal bytes for any document whose literal is not already folded; and the fold
+collapses the quoted/unquoted distinction into bytes, so a `String` field cannot carry the folded
+form without losing information that `ColumnNamePattern` preserves in its distinct `NameGlob` type.
+
+Two further statements of the same false claim were found and fixed: rule.rs:119 promising
+"(normalized)" column names, and document.rs:905-907 claiming the validate literals are "already
+folded" while the inject names get folded for the comparison - wrong on both halves, since the code
+folds both.
+
+### Why a benign comment was worth a commit
+
+Nothing consumes these predicates today, so the comment costs nothing now. It becomes a correctness
+bug the moment enforcement is wired: an implementor reading "folded at parse time" and writing
+`stored == catalog_name` compares an unfolded literal against a folded catalog name and silently
+fails to match on any case or quoting difference. The comment is harmless precisely because the
+feature is unfinished, which is the worst time to leave it wrong.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2318 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+Count UNCHANGED from the 2318 baseline, which is what a comment-only change must look like - a
+moved count would have meant something else happened. No new non-ASCII.
