@@ -8985,6 +8985,120 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F163 - the differ stops byte-comparing a hand-rolled renderer against PostgreSQL's deparser
+
+Closes #131. Filed as "a rename leaves an index predicate and expression key naming the old column",
+and the fix is at the COMPARISON rather than at the rename arm.
+
+### The premise, confirmed by the code's own comment
+
+`fold.rs:1805-1815`, inside the `Op::RenameColumn` arm, already said it: the rendered text in
+`IndexSnapshot::predicate` and in an `IndexElementSnapshot::Expr` key is not rewritten on a rename,
+was measured stale on PG 18.4, and the differ compares both. So the defect was documented at the
+site that causes it, with no reader able to act on it.
+
+### Two opinions, converging, and both correcting my framing
+
+REJECTED carrying the structured `Expr` on the snapshot. Both reviewers reached the same killer
+independently: `fold_ops_onto` (`fold.rs:972-999`) can start from a CATALOG-BUILT base snapshot, so
+an index that entered through the base has no source AST and could never be repaired. The fix would
+then depend on which side of a fold boundary an object was born, which is worse than uniform
+staleness. Codex added the cost side: `IndexSnapshot` is publicly exported, eight in-tree
+construction sites, and the snapshot enum derives `Eq`/`Hash` while the closed `Expr` derives only
+`Clone`/`PartialEq`.
+
+REJECTED normalizing through the PostgreSQL parser. The fold is documented pure and offline and that
+is load-bearing for `sql_preview` and gen-types. Codex supplied the concrete disqualifier:
+`pg_query::normalize` parameterizes literals, so it would make `a > 0` and `a > 100` compare EQUAL.
+Raw parsing also has no attnum binding, so it cannot resolve a rename at all.
+
+Both corrected the question I asked. The false-positive trap the fold comment names
+(`WHERE (note <> 'a')` becoming `WHERE (note <> 'b')`) reaches ONLY naive text substitution - it is a
+good argument for keeping the constraint-definition rewrite confined to a leading column list, and no
+argument at all against the options considered. And the real justification is not rename rarity: the
+comparison byte-compares a hand-rolled renderer against PostgreSQL's deparser and already fails with
+NO rename in the history.
+
+### REPRODUCED BY ME, both arms, via a temporary env gate
+
+`ZERO_MIGRATE_RED_131` forcing the old always-compare behaviour. No file reverted.
+
+    test a_rename_leaves_both_folded_index_bodies_stale_and_unreported ... FAILED
+      field: "elements",  expected: "expr:(\"qty_on_hand\" + 1)", actual: "expr:(amount_on_hand + 1)"
+      field: "predicate", expected: "(\"qty_on_hand\" > 0)",      actual: "(amount_on_hand > 0)"
+
+    test drop_column_keeps_a_partial_index_whose_predicate_only_spells_it_in_a_literal ... FAILED
+      field: "predicate", expected: "(\"note\" <> 'a')",  actual: "(note <> 'a'::text)"
+    test drop_column_keeps_an_expression_index_whose_literal_spells_it ... FAILED
+      field: "elements",  expected: "expr:(\"note\" || 'a')", actual: "expr:(note || 'a'::text)"
+
+The second pair is the point: NO rename is involved. A predicate carrying a string literal drifts on
+the `::text` the deparser adds, which is why `fold_drop_column_index_cascade_pg.rs` had been
+asserting index SURVIVAL instead of clean drift. Both assertions are now full `is_clean()`.
+
+### What shipped
+
+`index_expression_bodies_are_comparable(actual)` in `apply/drift.rs`, keyed on
+`actual.expr_cascade_columns.is_none()` - one predicate that is simultaneously the PostgreSQL signal
+and the availability signal for the replacement, so text is dropped exactly where the structural set
+exists to replace it. Exempted: two PRESENT predicate bodies, and two PRESENT `Expr` key bodies.
+KEPT: predicate presence, element count and order, `Column`-vs-`Expr` kind, every plain column name
+and sort order, and every other facet. `index_element_shapes_eq` short-circuits only the
+`Expr`-to-`Expr` body arm and delegates every other arm back to the real comparator, so there stays
+one definition of "same column element". Nothing touched `IndexSnapshot`'s `PartialEq`, its hashing,
+alias matching, or the declarative plan-side refusal.
+
+The live side now recovers the referenced-column set from `pg_depend` instead of hardcoding `None`,
+and the comment claiming that recovery "would mean re-parsing the deparsed SQL" is corrected - it is
+a catalog join, no parsing.
+
+### Three things that contradicted my brief
+
+MY BRIEF SAID the fold side "already has this exactly, as `expr_cascade_columns`". Wrong. `pg_depend`
+reports every attribute the index reads, key and INCLUDE included, while `create_index_snapshot`
+records the expression sites ALONE. The implementing agent resolved it by unioning
+`columns` + `include` + `expr_cascade_columns` on BOTH sides, which lands the two producers on the
+same set without changing what either stores.
+
+A constraint-backed index has NO column dependencies at all - `t_pkey` returns SQL NULL, because it
+depends on its `pg_constraint` rather than on the attributes. A naive set compare would have
+false-drifted every primary key. Gating on an expression-site flag excludes it structurally.
+
+MY BRIEF SAID the regression at `index_exact_name_shape_pg.rs:299-324` depends on predicate presence
+staying compared in this differ. It does not go through `diff_snapshots` at all - it runs the
+declarative differ. Presence is still compared regardless, and the new test pins it directly.
+
+### The stop clause, checked and not triggered
+
+Codex raised that index snapshot text has DDL READERS, unlike the stale CHECK body which has none, so
+an exemption could quiet a report while leaving wrong DDL reachable. The agent traced every producer
+of a non-`None` predicate or an `Expr` element that can reach `DeclarativeAuthor::create_index`: the
+four declarative desired-snapshot constructors set `predicate: None` and build only `column`
+elements; `create_index_snapshot` is the sole body producer and is called fresh from the
+`Op::CreateIndex` being lowered; the fold-derived snapshot is consumed as the LIVE side; and the one
+live-to-emitter path emits only a freshly planned FK supporting index and policy-injected indexes,
+whose `inject_index_to_ir` hardcodes no predicate. So this is a noisy report, not reachable wrong
+DDL, and the exemption is sufficient.
+
+### Stakes, stated honestly
+
+VERIFIED BY ME: `diff_snapshots` has NO production caller. Every reference outside `tests/` is the
+`lib.rs:149` re-export, a doc comment, or a call inside a `#[cfg(test)]` module
+(`mysql/mod.rs:1066`, `drift.rs:2736`), and `DriftReport::new` has zero callers anywhere. This is
+public API plus a test oracle. What the change buys is the removal of a class of guaranteed false
+positives that the suite was working around by weakening its own assertions.
+
+What the exemption concedes, and the doc comment says so: same columns, different logic - a changed
+threshold, operator or constant - is now invisible. What the set comparison keeps: a predicate
+rewritten to read a DIFFERENT column, a predicate or expression key added or removed, an expression
+key moved to another column.
+
+### Gates, run by me on the restored tree
+
+`fmt` 0, `clippy --workspace --all-targets -D warnings` 0, `doc` 0, four-crate test set 0, node crate
+0. Totals `targets=94 passed=2411` -> `targets=95 passed=2412 failed=0 ignored=0`. Zero
+`LIVE-DATABASE COVERAGE SKIPPED`. Non-ASCII on added lines: 0, and 0 in the new test file.
+
 ## F162 - the 26 authoring inputs are executed, and the corpus they claimed to produce was three weeks stale
 
 Closes #164. The ticket said 26 `.mig.js` are executed by nothing. VERIFIED BY ME BY READING, and the
