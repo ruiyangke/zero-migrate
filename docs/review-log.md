@@ -8985,6 +8985,86 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F157 - vendor authority asked of the policy, not inferred from a schema set
+
+Closes the lower half of #165. A regression, not a design rule: `git show 4f7d348:crates/zeroship-migrate/src/command/ir_apply.rs`
+lines 352-355 hold the production caller that widened the author's scope from the guard config, and
+commit 2c201e3 deleted the file. The comment claiming the CLI widens was TRUE WHEN WRITTEN and outlived
+its caller.
+
+### The measurement, and the widest charter failed it
+
+Through the real entry - `IrAuthor::new(...)` then `load_and_lower_guarded(...)` - a `setRls` was
+refused under EVERY charter, including `access.rls` at `scope = "all"`:
+
+    Lower(VendorCapabilityDenied { op: "setRls", capability: Rls })
+
+There was no policy, at any scope, under which the IR path emitted `ALTER TABLE ... ENABLE ROW LEVEL
+SECURITY`, while a shipped TypeScript DSL method records the op.
+
+### Why restoring the deleted line was the WRONG fix
+
+Two independent reviewers agreed the diagnosis and DISAGREED on the remedy, and the disagreement is
+what kept a security hole out of the tree. `VendorCapabilities::from_scope` maps ANY `Allowlist` or
+`Unconfined` scope to the FULL operator capability set, and `GuardConfig::schema_scope` derives from
+`schema.cross_schema` - it does not project `access.rls` at all. So restoring the line would let a
+charter granting cross-schema but NOT RLS authorize `setRls`.
+
+That is pinned now rather than argued:
+`cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability` asserts that under such a
+charter `schema_scope()` is `Unconfined` and `from_scope(Unconfined).grants(Rls)` is true. The test
+exists to make the rejected fix fail visibly if anyone tries it again.
+
+### What shipped
+
+Vendor authority now comes from the same `EffectivePolicy` the guard uses, through the
+`capability_knob_key` bridge - which both reviewers found independently and which had ZERO consumers
+anywhere in the workspace. It was built for this job and never wired.
+
+`SchemaScope` keeps its own job: schema confinement. The policy-derived scope reaches the second gate
+so the two stop disagreeing; `Single(project_schema)` stays the fail-closed default for bare lowering,
+and `sql_preview.rs`'s deliberate confined pin is untouched.
+
+### REPRODUCED BY ME, with the new query forced to deny behind a temporary env gate
+
+    charter_granting_access_rls_lowers_set_rls_and_emits_its_sql ... FAILED
+      a charter granting access.rls admits setRls through the production entry:
+        Lower(VendorCapabilityDenied { op: "setRls", capability: Rls })
+    charter_granting_cross_schema_but_not_access_rls_still_refuses_set_rls ... ok
+    confined_charter_still_refuses_set_rls ... ok
+    cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability ... ok
+
+### One correction the agent made to my brief, and it matters
+
+I named `policy_approval::object_for_op` as the reference construction. It resolves `createSchema` /
+`dropSchema` at the migration's DEFAULT schema, because those ops carry their target in `name` rather
+than in a `schema()` qualifier - a different schema than the statement acts on. For the `PerSchema`
+`schema.create_schema` knob that is exactly the erasure F156 just closed on the raw side, so those two
+resolve at their own name instead. `object_for_op` itself is unchanged and approval resolution stays
+byte-identical.
+
+### The breakage was eight tests, not the three I predicted
+
+All the same class: an author holding a non-granting policy while a widened `SchemaScope` supplied the
+authority. All fixed by giving the author the same granting charter, none by weakening an assertion.
+The three confined-fixture refusal tests stayed green untouched, which is the contract that had to
+survive.
+
+fmt 0, clippy 0, doc 0; 92 targets / 2393 passed / 0 failed / 0 ignored, up from 91 / 2389.
+
+### NOT CLOSED, and this is the half that remains
+
+REPORTED by the implementing agent and NOT re-measured by me: the VALIDATE gate still derives
+capability from `SchemaScope`. A charter granting `access.rls` at `scope = "all"` while confining
+`schema.cross_schema` to `include = ["app"]` composes to `Single("app")` and is refused at LOAD:
+
+    Err(Load(Validate(AuthoringError { code: "VENDOR_OP_DENIED", ... })))
+
+So a charter can still be denied a capability it explicitly granted; it just needs a narrow
+cross-schema grant. That is why the passing arm of the RED had to use `cross_schema = all`. The lower
+gate now answers correctly and the load gate does not - the same finding, one layer up, and #165 is not
+closed until it moves.
+
 ## F156 - the object-scoped grants stop being decided by a witness that is not the target
 
 Closes #161 slice 2, the opening `a922445` marked rather than closed. That commit added an assertion
