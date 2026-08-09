@@ -8239,3 +8239,56 @@ Accepting that diagnosis would have meant disbelieving a real signal for the res
 
 2313 is exactly +2 on F130's 2311, matching the two tests added. Non-ASCII compared at the character
 level: added and removed sets both empty.
+
+## F132 - a Default that outlived the struct that read it
+
+Closes #137. The `DestructiveOps` posture derived `Default` with `#[default]` on `Allow`, its
+LOOSEST variant (`rank()` at policy.rs:97-103 makes Allow rank 2), while the knob registry defaults
+the same knob to `forbid` - pinned by a test at policy_registry.rs:495-503 whose comment reads
+"OrderedEnum postures default to the tightest variant" - and the guard's three resolution fallbacks
+all return `Forbid`.
+
+### It is an orphan, and that is what decided the remedy
+
+`git show 24a8118` ("delete the PolicyProfile system") removed `DataSecurityConfig`, which carried
+`#[serde(default)] destructive_ops: DestructiveOps` - the wire shape the attribute existed to serve.
+The same commit deleted two sibling postures with the identical pattern, `IndexCreation { #[default]
+AllowBlocking }` and `TableRewrite { #[default] Allow }`. So `#[default] = loosest` was coherent in
+the old system, where Default meant "the pre-policy status quo". All three consumers went; only
+`DestructiveOps` survived, carrying an attribute nothing reads.
+
+VERIFIED: `DestructiveOps::default()` appears nowhere in crates or packages, and no serde struct has
+a field of this type.
+
+### Drop, not re-point, and the two reviews split here
+
+One said drop the derive; the other said move `#[default]` to `Forbid`. Every FACT was agreed - the
+orphan history, the absent callers, the registry default, the three sibling postures deriving no
+Default (TrustProfile policy.rs:9, SchemaScope policy.rs:38, AuthorPkPolicy rule.rs:93). The split
+was judgement.
+
+Since nothing calls it, both options are behaviourally identical TODAY, so the tiebreak is what is
+left to go wrong later. Dropping removes the surface; re-pointing keeps a trait impl whose only
+justification is that someone might call it, which is the hazard restated. The house convention is
+3 of 3 postures with no Default. If a container ever needs one, it gets added deliberately with
+`Forbid` at that point.
+
+The type is `pub` and re-exported (zero-migrate/src/lib.rs:192), so this removes a trait impl from a
+public type. Accepted: pre-1.0, and the one known consumer vendors the source and names the type
+nowhere outside its vendored copy.
+
+The doc now records WHY there is no Default, so the next reader does not rediscover the question.
+
+### A doc drift fixed in passing
+
+policy.rs:78 called the knob `sec.destructive_ops`; the registered key is `safety.destructive_ops`
+(policy_registry.rs:150). Four more `sec.` sites exist elsewhere and were deliberately left for a
+scoped sweep rather than smuggled into this commit: ir.rs:3831 and :3836,
+policy_approval.rs:21, knob.rs:169, compose_oracle.rs:1022.
+
+### No test, and no fabricated one
+
+`posture_and_obligation_defaults_are_the_tightest_value` (policy_registry.rs:492) already pins the
+registry default at :499-503. A second test would be noise. Removing an uncalled derive has no
+meaningful RED and none was invented - the compiler is the only check, and saying so is better than
+dressing it up.
