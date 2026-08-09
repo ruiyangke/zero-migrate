@@ -8713,3 +8713,79 @@ Count UNCHANGED, which is what a comment-only change must look like. No new non-
 latter with a hand-copied `cap_ident_name` body. And query.rs:2194-2196 says "cap the prefix at 54
 bytes so the total is <= 63" where the code computes 51 and a total of 60 - both numbers wrong, same
 claim family, folded into #150.
+
+## F139 - five predicates that read as controls and applied nothing
+
+Closes #142. The last of the convention-sweep findings that was a fix rather than a decision.
+
+### The finding, and the two things that made the obvious remedy wrong
+
+The `[[validate]]` rule class parses, composes and seals, and nothing evaluates a predicate against a
+table. `EffectivePolicy::validates_for` (compose.rs:716) has exactly two callers, both tests; the
+three seams that consume policy content read injects and knobs and never ask for validates. Traced
+independently twice, across the guard crate, engine, addon and CLI.
+
+My filing said "remove the class". That would have deleted something working:
+
+  - `ForbiddenColumns` IS LIVE, as a DOCUMENT-CONSISTENCY constraint rather than a table predicate -
+    inject-vs-validate contradiction detection at document.rs:921, compose.rs:1127, compose.rs:1498.
+    Five of six variants are inert; this one has teeth.
+  - The gap was already DOCUMENTED. docs/policy.md:281 said "declared and queryable, but not
+    automatically enforced yet", under a heading opening "Parsing a policy rule does not by itself
+    make it an active safety control". So another warning was not the fix - the docs said it and the
+    TYPE contradicted them, and the type is what a reader defers to.
+
+### What shipped
+
+`LoadError::ValidatePredicateNotEnforced { kind }` refuses the five never-consulted variants at load,
+beside the two inject refusals from b6f767d and 2f077a7. Same idiom: refuse the declaration that does
+nothing rather than let it read as a control. The error carries the wire kind the author wrote, which
+is the line they have to change.
+
+The guard is an EXHAUSTIVE match with `ForbiddenColumns => None`. That is the part worth keeping: a
+predicate added later cannot inherit a classification by omission, it has to state which side it is
+on. The knob drift this review already fixed happened precisely because a classification could be
+acquired silently.
+
+`rule.rs:34` and `:105` both said a matching table "must satisfy" the predicate. After this that is
+true of nothing, and both are corrected. docs/policy.md's `[[validate]]` section row said "Structural
+rule for matching tables" - the same false promise in the row DESCRIBING the class, not just the
+enforcement table.
+
+### What was deliberately not done
+
+Enforcement was not wired. Six predicates each need a seam decision - create is knowable after
+injection at table_shape.rs, but alter, rename-into and pre-existing tables are not - and shipping
+create-only enforcement produces a guardrail with a hole, which is worse than a documented absence
+because operators would then author rules believing they are covered.
+
+`Enforcement::DeclaredOnly` was not reused. It is a field on `KnobDef` and validate rules carry no
+knob; `RuleKind::key()` returns None for them. Similar name, different shape.
+
+### Blast radius, swept rather than assumed
+
+Zero `[[validate]]` blocks anywhere outside Rust test files - no fixture, operator document, doc
+example, packages/ or sdks/. The sweep covered EVERY tracked text file, not `*.toml`, because policy
+fixtures here live inside `.rs` string literals; a `*.toml`-restricted search finds none of them.
+That trap has now caught this review twice and a downstream consumer once. Cross-checked by predicate
+kind across .md, .toml, .json, .ts and .py: nothing.
+
+### RED, reproduced by me
+
+Flipped ONE arm of the guard so nothing is refused - the variant and the function stayed declared, no
+revert:
+
+    test forbidden_columns_validate_still_loads_and_still_catches_a_contradiction ... ok
+    test validate_predicates_no_seam_evaluates_reject ... FAILED
+    RED_EXIT=101
+
+The positive control PASSING while the rejection test fails is what separates "refused the five" from
+"refused the class". Killing `ForbiddenColumns` was the specific mistake to guard against, so a
+single failing test would not have been enough. Restored byte-identical.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2320 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+2320 is exactly +2 on 2318 for the two tests added. No new non-ASCII.

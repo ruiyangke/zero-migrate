@@ -158,7 +158,7 @@ columns = [
 | `[[grant]]` | Capability or resource charter |
 | `[[require]]` | Safety obligation |
 | `[[inject]]` | Operator-owned columns, indexes, or primary-key shape |
-| `[[validate]]` | Structural rule for matching tables |
+| `[[validate]]` | Column names an `[[inject]]` may not contribute |
 
 Grants become tighter as they move downward through admission. Requirements and
 injections accumulate; an untrusted draft cannot remove them.
@@ -278,7 +278,7 @@ Current coverage is:
 | Database privilege requirement | Host-enforced through database provisioning |
 | Runtime timeout/index/rewrite rules | Declared only; a value above the default is refused at load |
 | No-hard-delete obligation | Declared only; a value above the default is refused at load |
-| Generic `[[validate]]` rules | Declared and queryable, but not automatically enforced yet |
+| Generic `[[validate]]` rules | Refused at load; only `forbidden_columns` is accepted, and it constrains the policy, not a table |
 
 Do not rely on a declared-only rule as a production control.
 
@@ -287,6 +287,14 @@ means the engine does not implement the control. Such a knob may be stated at it
 default, where it advertises nothing, but a document that raises it is rejected at
 load rather than composed and sealed. A sealed policy therefore never claims one of
 these controls.
+
+`[[validate]]` is refused the same way, and for the same reason. No seam evaluates a
+predicate against a table, so `has_primary_key`, `require_index`, `table_name_forbidden`,
+`column_name_pattern` and `type_nullability` are rejected at load rather than sealed as
+controls the engine does not apply. `forbidden_columns` is the one predicate that is
+read, and what it constrains is the policy: a document that both injects a column and
+forbids it on an overlapping scope is rejected, as is a composition where the collision
+is across layers. It is never checked against a table being created or altered.
 
 Use policy together with:
 
