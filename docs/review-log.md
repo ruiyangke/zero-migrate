@@ -8650,3 +8650,66 @@ feature is unfinished, which is the worst time to leave it wrong.
 
 Count UNCHANGED from the 2318 baseline, which is what a comment-only change must look like - a
 moved count would have meant something else happened. No new non-ASCII.
+
+## F138 - two capping schemes, and the one that claimed to be the only one
+
+Closes #143. Filed as a comment defect; the comment fix was right, but investigating it first found a
+real divergence that is now #150.
+
+### The claim
+
+plan/author.rs:156-158 called `cap_ident_name` "the single source of truth for the cap discipline",
+naming two callers. True of those two. False as the statement a reader takes from it, because
+schema/query.rs caps its own names at 60 bytes with an 8-char base32 tail and never calls it.
+
+### Investigated before fixing, and the order mattered
+
+Two questions had to be answered before touching anything, because either could have made the
+comment fix the wrong change.
+
+CAN THE TWO `index_name` FUNCTIONS NAME THE SAME INDEX? No. Traced to where each name reaches a
+database rather than inferred from the spelling: `author.rs:189` has one caller, the CreateIndex arm
+at :316, whose name goes into `CREATE INDEX` / `DROP INDEX` of the same migration and never into a
+snapshot; `query.rs:2185` has four callers, all in the schema-authority kernel. For the same input
+they cannot produce equal strings - `idx_users_email` against `users_email_idx`.
+
+IS THE 60 DELIBERATE? Yes, but NOT for the reason its own doc gives. query.rs:2175-2176 says it
+leaves headroom for the suffix; the suffix is already inside the string before the length test, and
+nothing appends to what those functions return - every call site consumes the result directly. The
+60 is a frozen on-disk name contract with the out-of-repo data plane, shared by three functions,
+cited to Atlas, and pinned by tests as an inclusive threshold. Raising it to 63 renames indexes on
+databases that already exist.
+
+### What the investigation found that the ticket did not
+
+The two FUNCTIONS cannot collide, but the two DISCIPLINES meet on one object.
+`declarative::non_unique_index_name` builds `<table>_<col>_idx` through `cap_ident_name` at 63,
+while the on-disk index for the same shape is created by the data plane through `query::index_name`
+at 60. `vector_index_snapshot` and `geo_index_snapshot` name the DESIRED index the first way.
+Measured: identical at 60 bytes, divergent at 61 and 66. Collection names are bounded at 63, so the
+overflow is reachable, and above 60 the differ sees a missing index plus an unknown one - permanent
+DROP/CREATE churn, which is exactly what the old comment said could never happen.
+
+Filed as #150 rather than fixed here. Correcting either side renames live indexes, which is a
+migration-behaviour change and does not belong inside a comment cleanup.
+
+### The fix
+
+One doc block, comment-only, no code. It scopes `cap_ident_name` to the migration engine, names
+`schema::query`'s scheme and the subsystem it serves, records that the 60 is contractual rather than
+a stale 63, and states the agreement boundary: the two match at 60 bytes or fewer and diverge above,
+so a name crossing the two subsystems has to be compared rather than assumed equal.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2318 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+Count UNCHANGED, which is what a comment-only change must look like. No new non-ASCII.
+
+### Left as suggestions, not done
+
+`PG_MAX_IDENT_BYTES` is redeclared bare in apply/role.rs:150 and render/expand_contract.rs:269, the
+latter with a hand-copied `cap_ident_name` body. And query.rs:2194-2196 says "cap the prefix at 54
+bytes so the total is <= 63" where the code computes 51 and a total of 60 - both numbers wrong, same
+claim family, folded into #150.
