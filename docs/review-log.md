@@ -9032,6 +9032,32 @@ an expression-key index along with the column, so a fold that kept them would di
 constraint results are the reason the same treatment would be WRONG for an expression EXCLUDE -
 there, live refuses rather than dropping, so the fold must not project the drop as if it succeeded.
 
+### The fold side of #129, VERIFIED BY ME BY READING (not yet executed)
+
+`exclusion_cascade_columns` (`render/fold.rs:3362-3373`) collects PLAIN COLUMN elements only -
+`ColumnOrExpr::Expr { .. } => None` - and its call site says why: "PG's own `conkey` predicate, plain
+column elements only". That is ACCURATE about `conkey`. An expression-only EXCLUDE contributes no
+plain column there, so PostgreSQL's auto-cascade genuinely does not apply to it.
+
+Which means the two sides diverge like this on `DROP COLUMN lo` against
+`EXCLUDE USING gist (tstzrange(lo, hi) WITH &&)`:
+
+    fold   column removed, EXCLUDE constraint SURVIVES (its cascade set is empty, so nothing matches)
+    live   ERROR, nothing is dropped at all
+
+The fold models the "no auto-cascade" half correctly and has no way to express the other half, that
+the drop is REFUSED. PostgreSQL's refusal comes from `pg_depend` on the expression, a different
+mechanism from `conkey`, and nothing offline consults it.
+
+So #129 and #167 want the SAME fix, and it is worth building once rather than twice: a plan-time
+dependency check that refuses a column drop or rename when a generated column, a view, or an
+expression-carrying EXCLUDE reads that column. Three shapes, one gate, sited before anything runs.
+Both tickets now say so.
+
+NOT DONE: I read this rather than executing it. The fold-side reproduction - assert the folded
+snapshot keeps the EXCLUDE while live refuses the drop - is still outstanding and should come before
+the fix.
+
 MEASURED, not fixed. Nothing changed in this entry.
 
 ## F167 - the contract-step drop has no CASCADE on purpose, and now says so
