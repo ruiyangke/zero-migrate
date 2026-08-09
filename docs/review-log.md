@@ -8985,6 +8985,56 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F146 - REJECTED as filed: resolve crosses two lock brackets with a key, not a decision
+
+Closes #157 without a code change. Filed during the #155 dual opinion as a TOCTOU: `resolve` reads
+pending state in one session and writes in another, so the project lock is released between the
+check and the use.
+
+### The shape is real; the hazard is not
+
+VERIFIED, the two sessions are genuinely separate - `statusEnvelopes` opens and closes at
+index.ts:484, `resolvePending` independently at index.ts:259 - and a value really does cross the
+gap: cli.ts:1121 maps the migration name to one obligation and cli.ts:1205 passes that
+`pendingVersion` to the write half.
+
+What makes it safe is that the write side treats the crossed value as a LOOKUP KEY against freshly
+read state rather than as a conclusion. VERIFIED BY ME at engine.rs:1475-1482: after taking the
+lock it re-reads `outstanding_pending_contracts(exec_cfg)` and requires that exact version to still
+be outstanding, returning `PendingContractNotFound` otherwise. It then re-derives the whole
+operation from the newly read durable obligation - table, columns, type, owner, apply/abort
+progress, trigger - rather than from anything status told it.
+
+The key also cannot quietly change meaning. VERIFIED at expand_contract.rs:469: the obligation's
+identity seed folds schema, owner, table, both column names and the type, so a different rename
+produces a different key rather than reusing one. Pending rows are append-only and resolving one
+permanently removes that key from the outstanding set (journal.rs:1176, :1207).
+
+### The races, traced rather than assumed
+
+A peer that finishes the obligation first leaves the key absent, so the later resolver refuses. A
+partially applied cleanup resumes safely, and switching between apply and abort is refused as a
+resolution conflict. `squash` takes the same lock and only appends journal metadata, touching no
+pending rows. There is no shipped general rollback path to race with. Every supported interleaving
+ends in a correct refusal or in completing an obligation that is still valid.
+
+### Why the comparison in the ticket was the right one to make
+
+The filing asked whether this differs from `apply`, which also releases the lock between migration
+files. It does not: `apply` re-snapshots the catalog and journal and re-lowers inside each bracket
+(verbs.rs:278-282), and `resolve` re-reads and re-derives inside its write bracket. Both carry an
+identifier across brackets and neither carries a decision. That was the distinction the task was
+filed to settle, and it settles in the code's favour.
+
+### What did change, and it was not this
+
+6228cbc neither creates nor closes this gap. It improved the ALREADY-contended case: status returns
+busy without reading, and resolve rejects that before selecting a version, so the operator gets
+"a deploy is running" instead of "unknown migration". ba70ac4 did not touch cli.ts at all.
+
+No fix. One session across both halves would add serialization without improving journal or schema
+correctness.
+
 ## F145 - finishing the read-verb fix on the dialect it was not shipped for
 
 Closes #158. The gap F144 named on its way out, closed rather than left as a footnote.
