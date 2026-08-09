@@ -8985,6 +8985,103 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F151 - the index the differ deleted every deploy, because the server had renamed it
+
+Closes #160, which came out of the #150 Step 2 reconciliation rather than out of the ticket it was
+filed under. Both reviewers surfaced it independently while answering a different question, which is
+the second time this review has found the sharper bug beside the one it went looking for.
+
+### The defect, and it removes an index
+
+PostgreSQL caps an identifier at 63 bytes and truncates anything longer at CREATE with only a NOTICE.
+The FTS index name was derived as `<collection>__fts_idx` with no bound, so a collection name over 54
+bytes produced a name the server could not hold. The desired snapshot kept the authored spelling,
+live introspection read the truncated one, and the index diff keys on NAME - so every re-deploy saw
+the authored name missing and the truncated name unexpected.
+
+MEASURED BY ME on the live PostgreSQL 18.4 container, in a throwaway schema, before any code was
+written. With a 57-byte collection giving a 66-byte index name:
+
+    NOTICE:  identifier "zz_fts_ccc...ccc__fts_idx" will be truncated to "zz_fts_ccc...ccc__fts_"
+    indexname = zz_fts_ccc...ccc__fts_   len = 63
+
+    -- the CREATE the differ re-emits:
+    CREATE INDEX IF NOT EXISTS "zz_fts_ccc...ccc__fts_idx" ...
+    NOTICE:  relation "zz_fts_ccc...ccc__fts_" already exists, skipping
+    idx_count_after_second_create = 1
+
+    -- the DROP the differ emits, naming the truncated live spelling:
+    DROP INDEX "zz_fts_ccc...ccc__fts_";
+    idx_count_after_drop = 0
+
+The CREATE is a no-op and the DROP is real, so the pair nets to deleting the full-text index. And
+nothing stops it: VERIFIED BY ME at `render/declarative.rs:7515-7520`, a DROP INDEX carries
+`destructive_flags()` (destructive + requires_approval, defined at `:8596`) only when `idx.unique`,
+and an FTS GIN index is not unique. The guard cannot help either - it classifies every DROP INDEX as
+non-destructive because SQL text cannot tell whether the index is unique.
+
+### That the differ reaches it was the open question, and it was the stop condition
+
+The server behaviour above was certain; whether this engine ever produced that pair was not, and a
+fix for a path nothing takes is the defect F148 already recorded once. The brief said to measure it
+and stop if it did not hold.
+
+It held. REPRODUCED BY ME through the real path - `desired_snapshot` to `plan_declarative` to
+`apply_declarative` to `snapshot_schema` to `plan_declarative` again - with the new derivation
+short-circuited behind a temporary env gate:
+
+    re-deploying the same collection must be a no-op; the live GIN index is
+    ["zz_fts_ccc...ccc__fts_"], the authored name is "zz_fts_ccc...ccc__fts_idx" (66 bytes) and the
+    server's own spelling is "zz_fts_ccc...ccc__fts_", and the plan carried: [
+        "CREATE INDEX IF NOT EXISTS \"zz_fts_ccc...ccc__fts_idx\" ON ... USING gin (\"__fts\")",
+        "DROP INDEX \"proj_...\".\"zz_fts_ccc...ccc__fts_\"",
+    ]
+    test result: FAILED. 0 passed; 1 failed
+
+### The fix mimics the server rather than renaming anything
+
+One `fts_index_name` in `schema/query.rs`, called by both the data plane's `IndexSpec` builder and
+the declarative author's desired `IndexSnapshot`. One function rather than two capped copies is what
+makes "both sides in lockstep" hold by construction instead of by convention - capping only the
+desired side would have moved the mismatch rather than closed it, which is the trap #150 Step 1
+already recorded.
+
+It clips to PostgreSQL's own bound, so the desired name equals what the catalog already holds. It
+deliberately does NOT reuse the `cap_ident_name` or `index_name` hash-tail schemes: those replace the
+tail of an over-long name, which would rename an index that already exists on a live database under
+the server's own truncation, and neither produces a `__fts_idx` spelling at all.
+
+The clip counts bytes but stops on a character boundary. That is not a defensive flourish - a
+byte-exact `[..63]` panics mid-sequence on a multibyte name. The implementing agent measured the
+server half rather than asserting it: on PG 18.4 with a UTF8 encoding, a 64-byte name of one ASCII
+byte plus 21 three-byte characters is stored as 61 bytes and 21 characters, byte-identical to what
+the helper produces. I did not re-run that measurement myself.
+
+### Left open deliberately, and said so in the code
+
+Two collections sharing a 54-byte prefix derive the same 63-byte index name, and the second
+`CREATE INDEX IF NOT EXISTS` is skipped, leaving that collection with no full-text index. This
+derivation neither introduces nor closes that: it is exactly what the server already did with the
+untruncated names. Closing it needs a distinguishing tail, which is the rename the function exists to
+avoid, so it is a separate decision rather than a side effect. The comment says so rather than
+leaving a reader to discover it.
+
+PostgreSQL-only by construction, and checked rather than assumed: the desired-snapshot dispatch routes
+SQLite to a `__fts` vtable name that is untouched and MySQL to no FTS objects at all, so no other
+dialect reaches the changed function. Their identifier limits were not tested because there is no
+path to test.
+
+### Correction to the ticket I filed
+
+Two line numbers in my brief were off - the data-plane derivation is at `query.rs:2036` not `:2030`,
+and `destructive_flags` is at `:8596` not `:8592`. Everything load-bearing reproduced: the server
+truncation, the ungated DROP, and the name-keyed diff.
+
+fmt 0, clippy 0, doc 0; 87 targets / 2349 passed / 0 failed / 0 ignored, up from 86 / 2346 - exactly
+one new integration binary and three new tests. Zero `LIVE-DATABASE COVERAGE SKIPPED` banners, and
+the live arm does real DDL rather than skipping. Scratch schemas from my own reproduction dropped;
+none left behind.
+
 ## F150 - the diagnostics channel F148 refused to build, built where the events actually are
 
 Closes #156, the task F148 left carrying a dependency on #159. F148 declined to route these events
