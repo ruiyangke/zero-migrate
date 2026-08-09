@@ -371,6 +371,16 @@ $ echo $?
 0
 ```
 
+This is the behaviour on PostgreSQL and MySQL alike. The holder line is dialect-
+shaped, because the two engines publish different facts about a session:
+PostgreSQL names the backend pid, the `application_name`, the activity state and
+the current statement; MySQL names the connection id `KILL` takes, the account as
+`user@host`, the command, and the statement when the holder is running one. A
+deploy waiting between statements shows as `Sleep` with no statement, which is
+what a holder normally looks like. MySQL reads the holder from
+`performance_schema`, so an account without `SELECT` on it still gets the
+contention reported, just with the session unnamed.
+
 They read nothing on purpose. A status read is a sequence of catalog, journal, and
 contract queries with no transaction around them, and a non-transactional apply
 commits its inflight marker before the DDL and its completed row after it, so a
@@ -387,9 +397,9 @@ zero-migrate status --env production --strict --json > status.json || exit 1
 jq -e '.busy | not' status.json    # fail this build if a deploy was running
 ```
 
-No duration is reported for a holder. PostgreSQL records no acquisition time for
-an advisory lock, so every timestamp available would age the holder's session or
-its current statement rather than the lock itself.
+No duration is reported for a holder. Neither engine records an acquisition time
+for its advisory lock, so every timestamp available would age the holder's session
+or its current statement rather than the lock itself.
 
 `apply` and `squash` still wait for the lock: they are the writers the lock exists
 to serialize, and a writer that gave up would leave the deploy undone.

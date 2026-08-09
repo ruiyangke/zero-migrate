@@ -8985,6 +8985,77 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F145 - finishing the read-verb fix on the dialect it was not shipped for
+
+Closes #158. The gap F144 named on its way out, closed rather than left as a footnote.
+
+### What was still broken
+
+F144 gave PostgreSQL a non-waiting acquisition and a busy outcome that exits 0. MySQL kept the
+second half of the defect. It never hung - mysql/session.rs:53 bounds `GET_LOCK` at ten seconds - but
+on contention the bounded wait ERRORS, and a verb error returns 1 from the `catch` at cli.ts:1350-1353.
+So `zero-migrate status --strict` against MySQL still failed a healthy build while a peer deployed.
+Same false red, just slower to arrive.
+
+### What shipped
+
+`GET_LOCK(?, 0)` for the read verbs, the same three-attempt/200ms policy as PostgreSQL, and a holder
+probe joining `performance_schema.metadata_locks` (`OBJECT_TYPE = 'USER LEVEL LOCK'`) to
+`performance_schema.threads` on `OWNER_THREAD_ID`. `acquire_project_lock` is untouched, so `apply`
+and `squash` still block on both dialects. The retry constants moved to the shared backend module so
+the two dialects cannot drift apart, and the trait doc that claimed MySQL was already fine - it was
+not - is corrected.
+
+The wire needed no change: `StatusReply` has carried `busy` and `lockHolders` on every dialect since
+F144.
+
+### The feasibility question, measured before any code was written
+
+Whether a `GET_LOCK` holder is even visible was the open risk, and the obvious evidence was
+misleading: `wait/lock/metadata/sql/mdl` being `YES/YES` says nothing about user-level locks, which
+are not metadata locks. Measured directly instead:
+
+    SELECT GET_LOCK('zm_probe_lock', 0);   -> 1
+    SELECT OBJECT_TYPE, OBJECT_NAME, LOCK_STATUS, OWNER_THREAD_ID
+      FROM performance_schema.metadata_locks WHERE OBJECT_TYPE = 'USER LEVEL LOCK';
+    -> USER LEVEL LOCK | zm_probe_lock | GRANTED | 115724
+
+So MySQL can name its holder as well as PostgreSQL does, rather than shipping a weaker message.
+
+What the join actually returns differs by holder state, and the message says so rather than printing
+an empty field: an idle holder (the normal case, a deploy between statements) reports `Sleep` with a
+NULL statement; an active one reports its running statement. `pid` is `PROCESSLIST_ID`, the id `KILL`
+takes, deliberately not the internal `THREAD_ID`. MySQL has no `application_name`, so that field
+carries the holder's `user@host`.
+
+### One deliberate asymmetry, recorded because it is a swallowed error
+
+The MySQL holder probe is best-effort: a failure yields no holder rather than an error.
+`performance_schema` needs a `SELECT` grant a least-privilege migrator routinely lacks, and
+propagating that denial would exit 1 on a contended run - the precise bug being removed. PostgreSQL's
+probe stays fatal, because its `pg_locks`/`pg_stat_activity` rows are world-readable.
+
+The cost is real and worth naming: the call swallows EVERY error, not only a permission denial, so a
+connection fault or a future schema change also degrades silently to "holder unnamed". The CLI text
+is honest in both cases, and a warning there would currently reach nobody (#156). Revisit when a
+subscriber exists.
+
+### Verified rather than accepted
+
+The RED was reproduced by gating the try-lock behind an env var restoring the bounded wait, keeping
+every export intact rather than reverting a file: exactly the three new arms failed, with 92 other
+MySQL tests still passing as the control that the failures are those arms detecting the change.
+
+fmt 0, clippy 0, doc 0; 85 targets / 2340 passed / 0 failed / 0 ignored (85/2337 before, +3 for the
+three arms), node crate 4 targets / 53 passed unchanged, 0 live-database skip banners.
+
+### A correction to the brief that produced this
+
+The brief cited cli.ts:1274-1276 as the error-to-exit-1 mapping. That is the `--query-timeout` help
+text; the mapping is the `catch` at cli.ts:1350-1353. The claim was right and the address was wrong -
+the fourth line number in a brief of mine corrected by an implementer today, which is why the briefs
+ask to be contradicted.
+
 ## F144 - a read verb that waited for a deploy, and the answer that is not a guess
 
 Closes #155. The largest defect the #152 reconciliation turned up, and it needed no timeout.
