@@ -8985,6 +8985,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F169 - REJECTED as filed: a red workspace clippy cannot report every crate, because the crates form one chain
+
+#128 says "a red workspace clippy reports only the first failing crate, so it cannot be used to
+measure". MEASURED BY ME, and the behaviour is real but it is not a defect - it is what Cargo must do
+given this workspace's shape.
+
+### The experiment, including the one I got wrong first
+
+I appended the same trivial lint (`v.len() == 0`, `clippy::len_zero`) to two crates at once and ran
+`cargo clippy --workspace --all-targets -- -D warnings`:
+
+    error: length comparison to zero
+    error: could not compile `zero-migrate-policy` (lib) due to 1 previous error
+    error: could not compile `zero-migrate-policy` (lib test) due to 1 previous error
+
+Only `zero-migrate-policy` is reported. `zero-migrate-ir` carries an identical lint and is not
+mentioned.
+
+That looked like confirmation. It is not, and the control I should have picked first says why:
+VERIFIED BY ME BY READING the manifests, `zero-migrate-ir` DEPENDS ON `zero-migrate-policy`. So
+policy is compiled first, fails, and ir is never checked at all. Cargo cannot lint a crate whose
+dependency did not build. My two-crate experiment differed in more than one variable.
+
+### There is no un-confounded version of this experiment here
+
+`members = ["crates/*"]`, and the five crates form ONE chain:
+
+    zero-migrate-policy -> zero-migrate-ir -> zero-migrate-guard -> zero-migrate -> zero-migrate-node
+
+VERIFIED BY ME BY READING each `Cargo.toml`. `zero-migrate-policy` is the only crate with no sibling
+dependency. There are no two independent crates to fail simultaneously, so "reports only the first
+failing crate" is not a reporting choice - with a linear graph the first failure makes every later
+crate uncheckable.
+
+`--keep-going` does not change it, and correctly so: MEASURED, it reported the same single crate.
+That flag continues with units INDEPENDENT of the failure, and here there are none.
+
+### What is actually true, and what to do instead
+
+Within ONE crate clippy reports every warning it finds; the cutoff is only across crate boundaries,
+and only downstream of a failure. So the practical answer to "I want to see all of it" is to fix the
+first crate and re-run, which is the same loop any compiler imposes. Nothing to build.
+
+Worth stating because the ticket's framing invites a fix that cannot exist: no flag makes Cargo lint
+a crate it could not compile.
+
 ## F168 - MEASUREMENT: which dependents make PostgreSQL refuse a bare DROP COLUMN, and which it silently drops
 
 F167 left one question open that I had explicitly not checked: whether views and EXCLUDE constraints
