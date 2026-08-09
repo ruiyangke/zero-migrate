@@ -8985,6 +8985,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F148 - REJECTED as filed: a warnings channel with nothing correct to carry
+
+Closes #159 as filed. The commissioned fix was not built, and the reason is that all three sites it
+was meant to serve failed verification. The ticket was mine and it was wrong on every one.
+
+### What the finding claimed
+
+Three or four sites deliberately decline to return an error and name a `tracing::warn!` as the
+compensation. No subscriber is installed anywhere, so the warning reaches nobody, which makes those
+comments false statements about the shipped product. The commissioned fix was to carry them as typed
+diagnostics through the CLI's existing `WARNING:` channel.
+
+### Why it was not built
+
+TWO OF THE THREE SITES ARE NEVER COMPILED. Both `schema/diff.rs` arms sit inside `read_live_schema`,
+which is behind `#[cfg(feature = "introspect")]`, and `introspect` is NOT a declared feature of the
+crate. VERIFIED BY ME: crates/zero-migrate/build.rs:16-24 says so in its own words - the helpers name
+`compio_postgres`, "a driver out of scope for this standalone", and are "permanently-off dead code";
+the cfg is declared only to keep `unexpected_cfgs` quiet. `cargo build -p zero-migrate --features
+introspect` answers "the package does not contain this feature".
+
+The sharpest confirmation is one I would not have thought to run: grepping the built
+`libzero_migrate-*.rlib` finds both diff.rs warn strings ABSENT and the executor orphan string
+PRESENT. The comments are false in a stronger way than the ticket assumed - not "the warning reaches
+nobody" but "the code is not in the product".
+
+THE THIRD SITE IS NOT A SOLE NOTICE. `status` already reports the same condition, typed, in `--json`,
+on stdout, and it trips `--strict` through `statusIsDirty`. Confirmed live by deleting an applied
+migration's file and reading back `"unexpectedJournal": [{ "version": ..., "state": "applied" }]`.
+
+So the RED the brief demanded had no code path for two sites, and the third had no defect of the
+shape claimed. A channel with nothing correct to carry is not a fix.
+
+### What the verification found instead, and it is a real bug
+
+The apply-time orphan report is PER-BATCH and therefore wrong. VERIFIED BY ME: engine.rs:2253 passes
+`&batch` into `apply_with_lock_backend`, so the "migrations" the orphan loop compares against is the
+coalesced DDL batch that call was handed, not the operator's supplied set. Demonstrated against live
+PostgreSQL with an instrumented build: applying the second of two migrations reports the FIRST -
+still present in `--dir` and correctly applied - as an orphan.
+
+That inverts the risk on the subscriber work (#156). The concern was that warnings reach nobody. The
+sharper concern is that one of them is WRONG, so installing a subscriber turns a silent incorrect
+computation into a loud one. Re-scoped onto #159; #156 now carries the dependency.
+
+### What shipped
+
+Comments only, at the three named sites, saying what is actually true: that the warn reaches nobody,
+that the diff.rs code is absent from the built artifact, that the encryption "fails closed at the
+codec boundary" backstop is an OUT-OF-REPO contract this repository neither enforces nor tests (there
+is no crypto dependency and no codec boundary under crates/), that the mask arm has no backstop named
+at all, and that `status`'s `unexpected_journal` is the real diagnosis for orphans.
+
+No `tracing::warn!` was removed, no subscriber installed, no wire shape touched.
+
+fmt 0, clippy 0, doc 0; 86 targets / 2346 passed / 0 failed / 0 ignored, identical to the previous
+commit, which is what a comment-only change should produce.
+
+### Corrections to my own filing
+
+The site count is 46, not 45 - my grep missed one. And I recorded the encryption site as "a diagnosis
+gap, not an exposure" on the strength of its own comment; that was too generous in one direction and
+too harsh in the other. There is no exposure because the code does not run, and the backstop the
+comment cites cannot be verified here at all.
+
 ## F147 - a lock the server granted and the client was told it never got
 
 Closes the remaining item on #152. The ceiling question that task was filed for was rejected; this is
