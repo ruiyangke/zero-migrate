@@ -8985,6 +8985,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F158 - the load gate asks the same question the lower gate does
+
+Closes #165. F157 moved the LOWER gate off `SchemaScope` and onto the charter and left the VALIDATE
+gate, one layer upstream, still deriving capability from a schema set. So a charter could still be
+refused a capability it explicitly granted; it only needed a narrow `schema.cross_schema`.
+
+### The measurement, and what each of us actually ran
+
+MEASURED BY THE IMPLEMENTING AGENT, through the real entry - `GuardConfig::from_policy` +
+`IrAuthor::new` + `load_and_lower_guarded`, no `with_schema_scope`. Both charters grant `access.rls`
+at `scope = "all"`; only the `cross_schema` scope differs:
+
+    cross_schema = { include = ["app"] }   schema_scope = Single("app")
+      -> REFUSED Load(Validate(VENDOR_OP_DENIED "requires the allowRls capability, which the
+         active (Confined creator) capability set does not grant"))
+    cross_schema = "all"                   schema_scope = Unconfined
+      -> ADMITTED, emits ENABLE ROW LEVEL SECURITY
+
+That is why F157's passing arm had to use `cross_schema = all`.
+
+REPRODUCED BY ME separately, at the test level, by withholding the authority from the two load entries
+behind a temporary env gate - the narrow-schema arm is the only one that moves:
+
+    charter_granting_access_rls_within_its_own_schema_lowers_set_rls_and_emits_its_sql ... FAILED
+    charter_granting_access_rls_lowers_set_rls_and_emits_its_sql            ... ok  (wide control)
+    charter_granting_cross_schema_but_not_access_rls_still_refuses_set_rls  ... ok
+    confined_charter_still_refuses_set_rls                                  ... ok
+    the_load_gate_without_a_charter_still_refuses_set_rls                    ... ok
+    cross_schema_alone_composes_to_a_scope_that_would_grant_every_capability ... ok
+    test result: FAILED. 5 passed; 1 failed
+
+Five arms holding still while one moves is what says the change is this defect and not a widening.
+
+### What shipped
+
+`validate_vendor_op` takes a `VendorAuthority` - the composed charter plus the schema an unqualified
+op resolves in - and reads the grant through the same `policy_grants_capability` /
+`capability_object_for_op` pair the lower gate uses. `IrAuthor`'s two load entries supply it from the
+policy they already hold, at the same fallback schema `effective_schema` resolves against, and the
+resolution lowercases unquoted identifiers, so the two gates cannot answer at different objects.
+
+`SchemaScope` still answers schema confinement, and `VendorCapabilities::from_scope` is now reachable
+only from the fallback below - which is what its doc note said it was for.
+
+### The backstop stays, because on that path no charter exists to ask
+
+`load_ir_document` and `validate_ir`/`validate_ir_scoped` are public and have callers holding no
+policy at all: the node addon's `load_verify` composes none, and `sql_preview` deliberately validates
+unscoped. A policy-derived answer is not available there, so those callers pass no authority and keep
+the scope-derived gate, which grants nothing outside an operator posture. The old signatures are
+unchanged and delegate with `None`;
+`the_load_gate_without_a_charter_still_refuses_set_rls` pins it on the exact artifact the widest
+charter admits.
+
+### One arm changed which gate refuses it, and nothing changed about whether
+
+`charter_granting_cross_schema_but_not_access_rls_still_refuses_set_rls` used to reach lower and fail
+there, because validate read `Unconfined` as full authority. It now fails at load, for the charter's
+own reason. The assertion accepts either gate and still requires the refusal to name the RLS
+capability - a refusal that moved one gate EARLIER, not a weakened one. The confined-fixture refusal
+tests in `views.rs`, `pg_fail_closed_coverage.rs` and `partition_render.rs` drive
+`validate_ir_scoped` with no policy, so they exercise the fallback and stayed green untouched.
+
+fmt 0, clippy 0, doc 0; 92 targets / 2395 passed / 0 failed / 0 ignored, up from 92 / 2393.
+
 ## F157 - vendor authority asked of the policy, not inferred from a schema set
 
 Closes the lower half of #165. A regression, not a design rule: `git show 4f7d348:crates/zeroship-migrate/src/command/ir_apply.rs`
@@ -9064,6 +9129,9 @@ So a charter can still be denied a capability it explicitly granted; it just nee
 cross-schema grant. That is why the passing arm of the RED had to use `cross_schema = all`. The lower
 gate now answers correctly and the load gate does not - the same finding, one layer up, and #165 is not
 closed until it moves.
+
+Re-measured and moved in F158, which reproduced this shape verbatim against a wide-`cross_schema`
+control.
 
 ## F156 - the object-scoped grants stop being decided by a witness that is not the target
 
