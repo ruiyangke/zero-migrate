@@ -8985,6 +8985,108 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F153 - MEASUREMENT, not a fix: a sealed require_rls obligation that enforces nothing
+
+Records what was measured for #161 and stops there deliberately. The fix turns previously accepted
+deployments into denials, so it is a decision and gets two independent opinions before anyone writes
+it. Nothing in the engine changed in this commit.
+
+The finding came from the read-only architectural review, which ranked it worst. That review ran no
+builds, no tests and no database connection and says so, so it was a lead rather than a finding. This
+is the measurement that decides it.
+
+### The mismatch
+
+`policy_registry.rs:441` registers the knob PER TABLE:
+
+    bool_require(KEY_SAFETY_REQUIRE_RLS, ObjectModel::PerTable, "Every created table must end RLS-enabled.")
+
+`guard/mod.rs:2822`, the first statement of `check_ir_data_security_policy`, gates the ENTIRE check on
+a probe against one fixed object:
+
+    if !cfg.obligates_require_rls(&global_witness()) { return Ok(()); }
+
+and `global_witness()` (`guard/mod.rs:472`) is `ObjectName::schema(b"zsg")`. Its own doc justifies that
+as sound FOR GLOBAL-MODEL knobs - "every Global grant resolves the same at every object, so any witness
+decides it". The call site states the assumption in words: "the obligation is authored top-scope, so
+any covered object confirms it." A Global-model justification, applied to a PerTable knob.
+
+### Why the narrow scope is legal at load
+
+`zero-migrate-policy/src/document.rs:651-707`, `resolve_rule_scope`. The `ObjectModel::Global` arm
+rejects anything but the syntactic `All` token with `LoadError::ScopeIllegalForGlobalKnob`. The
+`PerSchema | PerTable` arm has no such gate, and the only hard error there (`GrantScopeUnbounded`) is
+restricted to `RuleClass::Grant`. A `[[require]]` rule is `RuleClass::Require`, so a narrow scope
+passes.
+
+### REPRODUCED BY ME, four arms differing in exactly one variable
+
+Same base charter and the same IR in every arm - one `createTable users` in schema `app`, no `setRls`.
+Only the require rule's scope varies.
+
+    ARM: NARROW (table scope: app.users)
+      require_rls at witness zsg: false | at app.users: true
+      LOAD+ADMIT: ACCEPTED     SEAL: minted; verify => Ok(())
+      GuardConfig::require_rls() (public global-witness probe) = false
+      >>> GUARD VERDICT: ADMITTED an unprotected CREATE TABLE app.users
+
+    ARM: NARROW (schema scope: app)                 >>> ADMITTED
+    ARM: default_scope narrows a scope-less require >>> ADMITTED
+
+    ARM: CONTROL (top scope: all)
+      obligations at global_witness zsg: [(KnobKey("safety.require_rls"), Bool(true))]
+      GuardConfig::require_rls() = true
+      >>> GUARD VERDICT: REFUSED => IrDataSecurityError { op_index: 0, source: DataSecurityPolicy {
+          rule: "DATA_SECURITY_REQUIRE_RLS",
+          statement: "table \"users\" must end this migration with row level security enabled" } }
+
+No arm was refused at load or at seal. There is no error text to quote because there is no error.
+The control is what makes the three admissions mean something: same IR, same charter, same call, and
+it refuses - so the input was real and the wiring was live.
+
+### The arm that needs no unusual authoring
+
+`default_scope = { include = ["app"] }` is the natural way to write a single-schema charter. A
+`[[require]]` for `safety.require_rls` with no scope of its own then INHERITS that narrow default -
+`effective_meet(None, Some(d))` returns `d` (`document.rs:735`) - and the obligation is silently dead.
+The author never types a scope on the security rule and never sees a diagnostic.
+
+The knob's default is still safe: a scope-less require with NO `default_scope` yields `Scope::All`
+(`document.rs:733`), which is why every existing fixture and test authors `scope = "all"` and why the
+suite is green. No test narrows `require_rls`, so nothing was ever going to catch this.
+
+`GuardConfig::require_rls()` (`guard/mod.rs:270-272`) is the same probe and is PUBLIC API.
+
+### The larger half, confirmed by call graph
+
+`check_ir_data_security_policy` has exactly ONE non-test caller in the workspace: `lower.rs:5989`,
+inside `IrAuthor::lower_guarded_with_op_spans`. The other hits are in
+`crates/zero-migrate/src/guard_vendor_lower_tests.rs`, which `lib.rs:112-113` declares
+`#[cfg(test)]` - test-only, and a call site is not a caller until you know what encloses it.
+
+The DECLARATIVE path never reaches it at all. `plan_declarative` (`engine.rs:727`) calls `diff` then
+`plan`, `DeclarativePlan.migrations` is `Vec<Migration>` - SQL text, not IR - and `plan`
+(`engine.rs:633`) only runs the text-level SQL guard. No `MigrationIr` is ever constructed.
+Corroborating: `grep -in "rls"` over `render/declarative.rs` returns ZERO hits, and `model/snapshot.rs`
+carries RLS state only as `RoleSnapshot.bypass_rls`, nothing per table.
+
+So a table created declaratively is unprotected regardless of scope. Not demonstrated by a live
+deploy; the claim needed the ABSENCE of a caller, and that is what was established.
+
+### Noted in passing, NOT measured
+
+`access.policy` and `access.rls` are `PerTable` and `schema.create_schema` is `PerSchema`
+(`policy_registry.rs:386-389`), and all three are read through `grants_global_bool` ->
+`global_witness()` (`guard/mod.rs:292`, `:344`, `:371`). The same structural mismatch is present. Not
+measured, and deliberately not widened into.
+
+### What is still open, and it is why this stops here
+
+Whether the intended semantics is "PerTable obligation, resolved per created table" - which makes the
+fix a per-object probe inside the table loop rather than a load-time refusal. The registry says
+PerTable; the guard says Global. Which one is the design is a decision, not a measurement. Nobody has
+audited whether any charter on disk actually narrows this knob.
+
 ## F152 - two legal spellings of one index, reconciled without renaming either
 
 Closes #150. Step 1 (255f6d0) corrected the comments that promised a byte-for-byte agreement the
