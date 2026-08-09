@@ -8985,6 +8985,55 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F167 - the contract-step drop has no CASCADE on purpose, and now says so
+
+#167 came out of the #133 probing as "the PostgreSQL expand-contract rename drops a column without
+CASCADE over a dependent generated column". Both halves REPRODUCED BY ME; the conclusion is that the
+missing CASCADE is correct and the code should say why.
+
+### Measured, not argued
+
+VERIFIED BY ME BY READING `render/expand_contract.rs:612`: the C2 contract step is
+`ALTER TABLE {tbl} DROP COLUMN {from}`, no CASCADE.
+
+MEASURED BY ME against the live container (PostgreSQL 18.4):
+
+    CREATE TABLE t (qty int, unit int, total int GENERATED ALWAYS AS (qty*unit) STORED);
+    ALTER TABLE t DROP COLUMN qty;
+    ERROR:  cannot drop column qty of table zm_probe_167.t because other objects depend on it
+    DETAIL:  column total of table zm_probe_167.t depends on column qty of table zm_probe_167.t
+    HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+
+So a PostgreSQL rename whose old column is read by a generated column cannot complete: the expand
+lands, the backfill lands, and C2 stops. Scratch schema dropped afterwards.
+
+### The hint is a trap, and that is the decisive measurement
+
+I took PostgreSQL's own advice to see what it costs:
+
+    ALTER TABLE t DROP COLUMN qty CASCADE;
+    NOTICE:  drop cascades to column total of table zm_probe_167.t
+
+The table is left with `unit` alone. `total` is gone - a column the operator never named, dropped
+inside a step whose `destructive: true` and `requires_approval: true` were granted for ONE column.
+Approval obtained for dropping `qty` is not approval for dropping `total`.
+
+That settles the direction without a second opinion, which matters because the subagent budget is
+exhausted and only one of the two reviewers is available: CASCADE is not the fix, and would convert
+a fail-closed stop into silent data loss. The remaining question is only WHERE to refuse, not
+whether to cascade.
+
+### What shipped
+
+A comment at the C2 site carrying both measurements, so the next reader meets the reasoning at the
+line that would otherwise look like an oversight - a bare drop with no CASCADE where PostgreSQL
+itself suggests one. Recording the measured cost of the hint is the point; without it the comment
+would just be an assertion, and the next person would take the hint.
+
+No behaviour change. Refusing EARLIER - at plan time, naming the dependent generated column, instead
+of stopping mid-contract with a raw server error - remains open on #167, and is the version worth
+building.
+
 ## F166 - two renames of one table in one migration, REPRODUCED BY ME and pinned
 
 #166 was filed off a reviewer's end-to-end probe; I had not reproduced it. Now I have, through the
