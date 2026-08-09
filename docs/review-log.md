@@ -8292,3 +8292,54 @@ policy_approval.rs:21, knob.rs:169, compose_oracle.rs:1022.
 registry default at :499-503. A second test would be noise. Removing an uncalled derive has no
 meaningful RED and none was invented - the compiler is the only check, and saying so is better than
 dressing it up.
+
+## F133 - the permissive stub is gone rather than corrected
+
+Closes #138. `impl GuardDecisions for BodyScopeDecisions` answered
+`effective_destructive_ops` with `DestructiveOps::Allow`, the loosest posture, while every other
+stub in that block returned least privilege - `GrantRegion::Ungranted`, `None`, `false`,
+`Vec::new()` - and it alone carried no comment explaining itself.
+
+### The claim I filed was imprecise, twice
+
+I wrote "nine siblings". There are ELEVEN, and three of them (`pinned_schema`,
+`grants_namespace_bool`, `grants_cross_schema`) return scope-DEPENDENT permissions rather than flat
+denials. The accurate statement is narrower: `effective_destructive_ops` was the only NON-SCHEMA
+decision the adapter fabricated permissively.
+
+I also claimed this compounded with F132, on the theory that an author writing the stub would reach
+for `DestructiveOps::default()`. Both reviews refuted it independently: the stub writes a literal
+`DestructiveOps::Allow` and never calls `default()`. They share a CAUSE - the `#[default]` teaching
+that `Allow` is this enum's zero value - not a call path. No comment in either commit claims
+otherwise.
+
+### Unreachable, and fixed by deletion rather than by a better literal
+
+VERIFIED three ways: `BodyScopeDecisions` is constructed at exactly one site (:2485, inside
+`check_raw_view_body_text`); the sole consumer of the method is `check_sql_data_security_policy`,
+called only from :979 on the `GuardConfig` walker path; `check_body_text` calls only `check_node`.
+
+So changing `Allow` to `Forbid` would have been a correct value nobody reads. Instead the method is
+removed from the `GuardDecisions` trait and from both impls, and
+`check_sql_data_security_policy` moved out of `impl<D: GuardDecisions> GuardWalker<'_, D>` into a
+concrete `impl GuardWalker<'_, GuardConfig>`. The one call site is `self.walker()`, already typed
+`GuardWalker<'_, GuardConfig>`, so it did not change.
+
+A body-scope decision object can no longer answer a destructive-ops question, and no future
+implementor of the trait can opt itself into a posture by accident. The permissive answer is
+unrepresentable rather than merely correct.
+
+### No test, deliberately
+
+With the method gone there is nothing to assert. A test constructing `BodyScopeDecisions` and
+asserting a return value would pin an implementation detail of a method nobody calls, pass forever,
+and teach a later reader that the value is load-bearing when it is not. The compiler is the proof,
+which is the stronger one. Deleting code beats testing it.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2313 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+Count unchanged, which is what a change that adds no test should look like. Separability of F132 and
+F133 was MEASURED, not assumed - each was compiled alone with the other reverted, both exit 0.
