@@ -38,3 +38,10 @@ crates/zero-migrate-node/npm/
 # OS / editor
 .DS_Store
 *.swp
+
+# A local dev stub that satisfies a `file:` link in some working copies. It calls
+# itself `zero-migrate` at version `0.0.0-stub`, so tracking it would put a second
+# thing claiming that package name in the tree. Two commits have now swept it in by
+# accident via `git add -A`; ignoring it is what stops a third. Whether such a stub
+# should exist at all is a separate open question and this entry does not answer it.
+sdks/
