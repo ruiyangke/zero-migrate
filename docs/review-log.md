@@ -8985,6 +8985,93 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F149 - an orphan check that could not see its own universe
+
+Closes #159. The bug F148's verification turned up, fixed by moving the diagnosis rather than
+deleting it - and the reasoning changed twice on the way.
+
+### The bug
+
+engine.rs:2255 passes `&batch` into `apply_with_lock_backend`, so the comparator's entire supplied
+set is the coalesced DDL batch that call was handed. Anything in the journal but not in that batch
+was reported an orphan, which on the host path means every previously applied migration, on every
+incremental apply. Latent only because the report was a `tracing::warn!` with no subscriber
+installed - so the moment one were installed, apply would start loudly naming present migrations as
+missing.
+
+### Two opinions, two verdicts, and the fact that decided it
+
+Delete versus relocate, and the halves split. Deleting is attractive because `status` already
+computes this correctly against the full manifest set and reports it typed as `unexpectedJournal`.
+What settled it against deletion: `packages/zero-migrate-cli/src/index.ts:409` throws
+"status is not available for SQLite; SQLite apply is supported". An entire dialect can apply and can
+never run status, so deleting removes the only orphan diagnosis it could ever have. One half found
+that and the other did not.
+
+### My own decision was then wrong in its premise
+
+I specified "relocate to a boundary that can ATTEST it holds the operator's complete set". No such
+boundary exists. cli.ts applies file by file with `priorMigrations = files[0..i]`, so every call -
+`apply_ir` and `deploy_envelopes` alike - receives a PREFIX. Making the existing check plainly
+unconditional would refuse ordinary reruns of a multi-file directory and could name a file that is
+present. That was tested rather than argued: implementing it broke a live authoring test with three
+priors-free applies over an accumulating journal, and it was reverted.
+
+### What shipped: the strongest claim a prefix can support
+
+The diagnosis moved to `require_applied_prefix` (crates/zero-migrate-node/src/lower.rs), reached
+from the in-lock apply boundary, reusing the canonical full-manifest reconciliation rather than a
+second orphan algorithm. It surfaces through a `Result` the CLI turns into a nonzero exit and a
+message, so nothing depends on a subscriber and no assertion about it is vacuous.
+
+The window: a COMPLETED journal step recorded at a lower `event_seq` than the newest
+supplied-and-completed step cannot be a later file, so it is a deleted one. Steps at or above that
+frontier stay unreported. Keying on `event_seq` rather than version is not a detail -
+`AppliedEntry::event_seq`'s own doc says it is "the ONLY sound apply order. Version order is not",
+because plan and step versions are `MigrationId::derive` hashes. `unexpected_journal.first()` is
+hash-ordered and would have picked an arbitrary entry.
+
+The per-batch loop in executor.rs is gone; the shared types survive.
+
+### Verified rather than accepted, including one false negative of my own
+
+RED reproduced by gating the new window behind an env var: exactly one test failed - "CLI apply names
+a deleted migration's journal step once, and only it" - with 121 others passing, so the failure is
+the window and not collateral damage.
+
+METHOD NOTE WORTH KEEPING: the FIRST attempt at that reproduction reported a clean 122-pass and no
+failure. That result was garbage. The addon rebuild had exited 127 because `napi` is not on PATH in
+that shell, so the host suite ran against the ALREADY-FIXED binary while the gated source was never
+compiled. It was caught only because the build's exit code was captured with `$?` and read before
+the test result was believed. A gate that tested a different tree is not a gate, and here the
+different tree was a stale artifact rather than a stale checkout.
+
+fmt 0, clippy 0, doc 0; 86 targets / 2346 passed and node crate 4 / 53, both identical to the
+previous commit because existing tests were extended rather than added; host suite 120 -> 122.
+
+### Corrections to my own filing
+
+I claimed the shipping check at lower.rs had no test, on the strength of its error string occurring
+exactly once in the tree. The string count was right and the inference was wrong: it is asserted by
+SUBSTRING at lower.rs:3155 and :3169. A full-string grep is narrower than the assertions it is
+looking for - the same detector-narrower-than-its-data mistake this log has recorded three times
+already, this time in my own hands.
+
+I also asked for a comment saying the relocated diagnosis "emits to a channel with no receiver". That
+was refused, correctly: at this boundary it reaches the operator through the error path, so the
+comment would have been false.
+
+### Two consequences to know about
+
+SQLite now has no in-apply orphan check. What it lost was the per-batch warning that named present
+migrations and reached nobody, so nothing correct was removed - but its CLI path is prefix-shaped
+too, and serving it needs a wire distinction between "first file" and "no prefix declared" that does
+not exist yet.
+
+And a directory that permanently drops an old migration file while its journal step remains is now
+refused on every deploy rather than only when something is pending. Same refusal class that already
+shipped, now consistent - and `squash` is the supported way to retire history.
+
 ## F148 - REJECTED as filed: a warnings channel with nothing correct to carry
 
 Closes #159 as filed. The commissioned fix was not built, and the reason is that all three sites it
