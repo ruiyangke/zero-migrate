@@ -8985,6 +8985,112 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F152 - two legal spellings of one index, reconciled without renaming either
+
+Closes #150. Step 1 (255f6d0) corrected the comments that promised a byte-for-byte agreement the
+differ does not implement; this is the behaviour change those comments pointed at, and it is
+deliberately NOT the change the ticket originally proposed.
+
+### What was wrong
+
+The data plane and the declarative author cap an overlong index name differently. Derived by
+EXECUTING both functions rather than reimplementing them - a temporary in-crate probe calling
+`non_unique_index_name`, `unique_index_name` and `schema::query::index_name` over natural lengths
+46..76, since deleted and replaced by a permanent assertion:
+
+    natural bytes | author (cap_ident_name)        | data plane (query::index_name) | agree
+    <= 60         | verbatim                       | verbatim                       | yes
+    61 / 62 / 63  | verbatim, 61 / 62 / 63         | 51-char prefix + 8 base32 = 60 | no
+    >= 64         | 52-char prefix + 10 hex = 63   | 60                             | no, differently
+
+One index therefore has two live-legal names, and the index diff keys on NAME - so whichever scheme
+built the live index, the other scheme's spelling reads as a missing index plus an unexpected one.
+It is reachable: the collection name and the field name are capped at 63 INDEPENDENTLY, so a natural
+name reaches 131 bytes, and a table `t` plus a 55-byte column already reaches 61.
+
+### The decision, reconciled from two independent opinions
+
+Keep BOTH schemes, rename NOTHING. A desired index whose name the author DERIVED may be satisfied by
+the live index carrying the other derivation of that same (table, column, unique) triple, when the
+comparable shape matches.
+
+The ticket's original plan - route the desired side through `query::index_name` - was rejected, and
+the reason is not aesthetic. VERIFIED BY ME at `render/declarative.rs:7515-7520`: a DROP INDEX
+carries `destructive_flags()` only when `idx.unique`. The reconciliation that plan hands to
+engine-created tables would emit ungated drops for the vector, geo and plain btree indexes, paired
+with a plain non-concurrent CREATE INDEX that this repo's own analyzer says holds a SHARE lock for
+the whole build. No `ALTER INDEX ... RENAME TO` is modelled anywhere here.
+
+A blanket shape fallback was rejected too: index names are first-class and copied verbatim into the
+desired snapshot, so a user renaming an index while keeping its columns must still get a CREATE plus
+a DROP. Scoping the alias to DERIVED names is what keeps that true.
+
+### The RED, and two of its four arms are the ones that matter
+
+REPRODUCED BY ME with the alias provenance disabled behind a temporary env gate. Arm A fails on BOTH
+surfaces, which is the point - fixing only the differ would have left drift reporting the same index
+as simultaneously missing and unexpected:
+
+    an index the data plane named must not churn: the live name is
+    "zz_idx_alias_faaa...aaa_e54f3xoa" (60 bytes), the authored name is
+    "zz_idx_alias_faaa...aaa_key" (61 bytes).
+    plan carried: [
+        "CREATE UNIQUE INDEX IF NOT EXISTS \"...aaa_key\" ON ...",
+        "DROP INDEX \"proj_...\".\"...aaa_e54f3xoa\"",
+    ]
+    drift carried: StructuralDrift {
+        missing_objects:    ["zz_idx_alias index zz_idx_alias_faaa...aaa_key"],
+        unexpected_objects: ["zz_idx_alias index zz_idx_alias_faaa...aaa_e54f3xoa"],
+    }
+
+Arm D fails too: `NotTableOwner { table: "zz_idx_alias", owner: "app_test", deploying_app: "app_zzz" }`.
+The ownership check decides "structurally changed" by table equality, and `IndexSnapshot` equality
+compares the name, so the two spellings made a table unequal even though the differ emitted nothing
+for it. That was a question in the brief rather than a known defect, and measuring it is what turned
+it up.
+
+Arms B and C PASS at RED and must keep passing: an engine-named index still round-trips clean, and an
+author-supplied rename still produces a CREATE plus a DROP. Without them the fix could have been
+demonstrated by breaking the population that already worked, or by silently swallowing a real rename.
+
+### How it is built
+
+`DesiredSchema.derived_index_aliases` is provenance captured where the desired schema is built, while
+the name is still known to be derived - beside `sqlite_schemas`, excluded from `PartialEq`, retained
+to surviving tables. It records ONLY the names where the two schemes actually disagree.
+
+`pair_indexes` pairs exact names first, then aliases, one-to-one, and returns an error when two
+desired indexes claim the same live index rather than awarding it to whichever came first. The differ,
+the drift comparison and the ownership check all call it, so they cannot disagree about what paired.
+
+`same_definition_except_name` was extracted FROM `IndexSnapshot`'s existing `PartialEq`, which is now
+written in terms of it - one comparator, not two that can drift. It is a comparable-shape check, not
+physical proof: opclass and NULLS NOT DISTINCT are emission-only and invisible to live introspection,
+and the doc says so rather than implying the check is stronger than it is.
+
+The FTS index is absent from the alias map on purpose - F151 gave it a single shared derivation, so it
+has no second spelling. Policy-injected indexes are absent for the same reason: they already use
+`query::index_name` on both the build and the recognition side.
+
+### The gap, stated rather than papered over
+
+My own brief called population A's drop ungated. That is right for the vector and geo legs and WRONG
+for the arm actually proven live: the testable case is the `unique: true` index, and that drop is
+gated. The container has neither pgvector nor PostGIS, so the ungated leg is covered at unit level
+only - the alias builder is pinned to emit `btree`/`gist`/`ivfflat` and every alias key is asserted to
+name a real emitted index - and is NOT proven against a live server.
+
+fmt 0, clippy 0, doc 0; 88 targets / 2360 passed / 0 failed / 0 ignored, up from 87 / 2349. Zero
+`LIVE-DATABASE COVERAGE SKIPPED` banners. Scratch schemas from my reproduction dropped.
+
+### Public surface
+
+`DeclarativePlan` and `DeclarativeDeployPlan` each gain a public `accepted_index_aliases` field, and
+`DesiredSchema` gains `derived_index_aliases`. None of the three is `#[non_exhaustive]`, and
+`DeclarativePlan` has all-public fields, so a downstream constructing one with a struct literal
+rather than `..Default::default()` will no longer compile. `diff_snapshots_with_index_aliases` and
+`AcceptedIndexAlias` are additive.
+
 ## F151 - the index the differ deleted every deploy, because the server had renamed it
 
 Closes #160, which came out of the #150 Step 2 reconciliation rather than out of the ticket it was
