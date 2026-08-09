@@ -9048,12 +9048,18 @@ to touch rendered SQL. It moved from private to `pub(crate)`; the public API is 
 The whole-table walk matters: an expression names OTHER columns, so rewriting only the renamed
 column's own expression would miss every sibling that reads it.
 
-### Still open, deliberately not in this change
+### The other lane is pinned rather than fixed
 
-The `ColumnSnapshot` lane (`generated`, `inline_checks`) wants a pinning test and a comment rather
-than a fix, for the reason F163 established: the structured `Expr` is rendered away at construction,
-`inline_checks` are not even regenerable, and VERIFIED BY ME that `ColumnSnapshot`'s hand-written
-`PartialEq` omits all of them, so nothing compares them either.
+The `ColumnSnapshot` lane gets a test and a comment, not a repair, for the reason F163 established:
+the structured `Expr` is rendered away at construction, `inline_checks` are not even regenerable, and
+VERIFIED BY ME that `ColumnSnapshot`'s hand-written `PartialEq` omits all of them.
+
+`the_snapshot_lane_keeps_a_stale_generated_body_and_no_reader_reports_it` asserts each side
+separately, because a test that only checked "the differ is quiet" would pass just as well against a
+differ that had stopped looking at columns at all. It asserts the folded body still names the
+pre-rename column; that two columns differing ONLY in the generated body compare EQUAL; and that
+`diff_snapshots` reports nothing when that body is rewritten. The staleness is pinned as known, not
+endorsed.
 
 Three items found while probing, to be filed rather than fixed here:
 two `renameColumn` ops on one table in ONE migration fail on SQLite (`no such column: "qty"` in the
@@ -9065,7 +9071,7 @@ come through the same renderer is accurate, given this defect is precisely the t
 ### Gates, run by me
 
 `fmt` 0, `clippy --workspace --all-targets -D warnings` 0, `doc` 0, four-crate test set 0, node crate
-0. Totals `targets=95 passed=2412` -> `targets=96 passed=2414 failed=0 ignored=0`, the two tests
+0. Totals `targets=95 passed=2412` -> `targets=96 passed=2415 failed=0 ignored=0`, the three tests
 above. Zero `LIVE-DATABASE COVERAGE SKIPPED`. Non-ASCII on added lines: 0, and 0 in the new file.
 
 ## F163 - the differ stops byte-comparing a hand-rolled renderer against PostgreSQL's deparser
