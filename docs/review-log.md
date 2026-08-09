@@ -8985,6 +8985,87 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F155 - one question about what makes an index the same index
+
+Closes #162. The exact-name arm of the index pairing compared two facets by hand while the alias arm
+added in fa7bb58 asked a comparator built for exactly this. So a same-name index whose ACCESS METHOD,
+predicate, INCLUDE payload, storage parameters, ONLY or comment had moved returned a clean plan while
+the live index was a different index.
+
+### REPRODUCED BY ME against live PostgreSQL 18.4, with the two-facet check restored behind an env gate
+
+    test a_access_method_change_is_surfaced ... FAILED
+    test b_predicate_change_is_surfaced ... FAILED
+    test c_include_change_is_surfaced ... FAILED
+    test d_unchanged_index_still_plans_nothing ... ok
+    a same-name index whose access method changed must not diff clean; the plan carried: []
+
+The negative arm passing in the same RED run is what makes the three failures mean something: a fix
+that reported drift on everything would have passed the other three and failed that one. The defect is
+MEASURED rather than deduced - deploy, mutate the live index by hand, re-introspect, re-plan, and the
+plan comes back `Ok` and empty.
+
+### The decision: refuse, do not synthesize the rebuild
+
+A shape difference now joins the existing `UnsupportedInV1` refusal rather than emitting DROP+CREATE.
+`render_drop_index` classifies a DROP as destructive and approval-requiring ONLY when the index is
+unique, so auto-emitting a rebuild would take an unreviewed DROP of a non-unique vector or geo index
+plus a non-concurrent CREATE INDEX that holds a lock for the length of the build. Refusing is
+recoverable - the author writes the migration - and an ungated rebuild is not.
+
+The facet list now lives in ONE place: `definition_differences_except_name` returns the differing
+facets, and `same_definition_except_name` is defined as that being empty, so the answer and the
+message can never name different sets.
+
+### What it still cannot see, said in the code rather than implied
+
+`opclass`, `nulls_not_distinct` and `expr_cascade_columns` are emission-only. Live introspection never
+populates them, they are excluded from `IndexSnapshot` equality by their own field docs, and they are
+invisible here too. Passing is agreement on the observable facets, not proof that two indexes are
+interchangeable.
+
+### The collateral, and it was a real defect rather than test noise
+
+Widening the check turned two green SQLite tests red:
+
+    UnsupportedInV1("index docs.docs_embedding_idx definition change: access method btree -> ivfflat")
+    UnsupportedInV1("index places.places_loc_idx definition change: access method btree -> gist")
+
+`vector_index_snapshot` and `geo_index_snapshot` pushed PostgreSQL method labels into the desired
+snapshot on EVERY dialect, while neither the SQLite nor the MySQL `create_index` emits a `USING` clause
+at all - both build a plain index and both introspect it back as `btree`. The desired snapshot was
+describing an object no emitter creates, and the widened comparison is simply the first reader with
+enough resolution to notice. `.fts()` was already dialect-branched for precisely this reason.
+
+`fold_ann_index_for_dialect` now models those two indexes as the plain B-tree the target dialect
+actually builds. The two tests were also building a PostgreSQL-default desired snapshot and diffing it
+with a SQLite author, the usage `desired_snapshot`'s own doc forbids and that a prior commit already
+fixed for the FTS tests.
+
+### A comment I corrected before committing
+
+The new fold's doc said emitted SQL is unchanged because "the two non-PG emitters read neither field".
+VERIFIED BY ME BY READING: `MysqlEmitter::create_index` reads neither, but `SqliteEmitter::create_index`
+DOES read `access_method` - to route the `fts5` sentinel to a virtual-table CREATE. The conclusion
+survives, because the fold is called at the vector and geoPoint sites alone and the FTS snapshot never
+reaches it, but the stated reason was wrong. A comment claiming a mechanism it does not have is the
+defect this review keeps finding, and it does not get a pass for being new.
+
+### Reported in passing, NOT fixed, and worth its own ticket
+
+`sqlite_existing_table_needs_rebuild` hand-picks the same two facets. After this change a SQLite
+access-method, predicate or INCLUDE change no longer triggers a rebuild - it falls through to the new
+refusal. That is consistent with the decision above, so it was left alone deliberately.
+
+One risk checked and cleared by reading rather than by running: the PG emitter defaults an ivfflat
+index to `WITH (lists = 100)` while the snapshot sets `with: None`, which looked like a false refusal
+waiting to happen on a real pgvector deployment. `IndexStorageParams` models only `pages_per_range` and
+`fillfactor` and the PG parser discards every other reloption, so live reads back `None`. NOT MEASURED -
+this container has neither pgvector nor PostGIS, so no PG ANN round-trip exists in the suite.
+
+fmt 0, clippy 0, doc 0; 90 targets / 2378 passed / 0 failed / 0 ignored, up from 89 / 2374 - one new
+target and four tests. Zero skip banners. Scratch schemas from my reproduction dropped.
+
 ## F154 - the sealed obligation now resolves at the table it names
 
 Ships the fix F153 measured and deliberately did not build. The decision was reconciled from two
