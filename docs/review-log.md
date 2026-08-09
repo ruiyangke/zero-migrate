@@ -8985,6 +8985,106 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F154 - the sealed obligation now resolves at the table it names
+
+Ships the fix F153 measured and deliberately did not build. The decision was reconciled from two
+independent read-only opinions that converged; the implementing agent then contradicted one of my
+constraints, and it was right.
+
+### The decision, and why the obvious alternative is worse
+
+Keep the knob `PerTable` and resolve the obligation at each concrete object. VERIFIED BY ME by reading:
+the sibling knob `safety.require_approval` is registered identically (Require + PerTable) and IS
+already resolved per object in `policy_approval.rs` through
+`normalize_pg_identifier(&format!("{schema}.{table}"))`; `compose_oracle.rs` authors
+`safety.require_rls` AT NARROW SCOPES and asserts it resolves at the covered objects, so the guard was
+contradicting its own policy engine's conformance test; and `GuardConfig::require_rls()` had ZERO
+callers in `crates/` and `sdks/`, which is what removed the one reading that could have made the
+Global interpretation correct.
+
+Refusing a narrow scope at LOAD was rejected. It would make that oracle test un-loadable, and
+`SealedPolicy::verify` takes a freshly COMPOSED policy - so refusing a previously-loadable document
+means the charter can never be re-composed and its seal never verified again. That is a bricked
+pipeline at policy load rather than one rejected migration, which is the maximal form of the rule that
+a check rejecting a working migration is worse than the gap it closes.
+
+Reclassifying the knob to Global was rejected too: `object_model` is a field in
+`KnobDef::canonical_encoding`, which feeds `PolicyRegistry::digest()`, which the seal MACs. It would
+invalidate every existing seal, including policies that never mention the knob. Nothing here changes
+registry bytes, so every seal still verifies.
+
+### REPRODUCED BY ME, with the old witness resolution restored behind a temporary env gate
+
+    test table_scoped_require_rls_refuses_unprotected_create ... FAILED
+    test schema_scoped_require_rls_refuses_unprotected_create ... FAILED
+    test default_scope_inherited_require_rls_refuses_unprotected_create ... FAILED
+    test table_scoped_require_rls_folds_the_created_identifier ... FAILED
+    test scoped_require_rls_judges_the_renamed_identity ... FAILED
+    test scoped_require_rls_refuses_disable_at_a_covered_table_only ... FAILED
+    test unqualified_table_under_a_multi_schema_charter_fails_closed ... FAILED
+    test top_scoped_require_rls_refuses_unprotected_create ... ok
+    test top_scoped_require_rls_behaviour_is_unchanged ... ok
+    test table_scoped_require_rls_admits_a_table_outside_its_scope ... ok
+    test result: FAILED. 7 passed; 7 failed
+
+My gate covered the structured resolver only, so the raw-SQL arms pass in my run; the implementing
+agent's RED against wholly unmodified code failed eight. The two arms that matter most PASS in both
+directions: the top-scope CONTROL, which is what makes the seven failures mean something, and
+`top_scoped_require_rls_behaviour_is_unchanged`, which passes before AND after and is therefore
+evidence for the byte-identity claim rather than an assertion of it.
+
+### Where the object comes from
+
+The final loop resolves on the map KEY rather than the stored table, because the key is the identity a
+rename lands on - `tables.remove(from)` then `tables.insert(to_key, state)`. Both directions are
+pinned: renamed INTO scope refuses, renamed OUT admits.
+
+The object is built through `normalize_pg_identifier`, byte-for-byte the construction
+`policy_approval::object_for_op` uses, so the composer's PG fold applies on both sides. Passing raw
+bytes would have made `CREATE TABLE "Users"` miss a scope of `app.users`, and that has its own arm.
+
+### The empty-schema trap
+
+`table_key_for_policy` yields an EMPTY schema when there is no unique owned schema, and
+`normalize_pg_identifier(".users")` returns None. Falling back to `false` re-opens the exact hole for
+unqualified tables under a multi-schema charter; falling back to a bare `true` would fail every
+unqualified create under charters that never mention RLS. The fallback asks whether the obligation is
+authored AT ALL, through one additive policy query that erases scope by construction and says so in
+its own doc.
+
+### The constraint of mine that was wrong
+
+My brief said to attribute raw SQL to concrete CREATION targets only. That is incompatible with the
+byte-identity requirement in the same brief, and the agent caught it. Today's blanket ban refuses every
+raw island once the obligation is authored; attributing only creates would have ADMITTED
+`INSERT INTO app.users` and `SET LOCAL work_mem` under `scope = "all"`, and would have let a raw
+`ALTER TABLE app.users DISABLE ROW LEVEL SECURITY` through while the structured `SetRls` path refuses
+exactly that.
+
+What shipped attributes every relation the statement names, through one shared resolver the namespace
+gate already uses. Under `scope = "all"` every relation is covered and every relation-less statement is
+unattributable, so the refusal is unchanged; under a narrow scope an island touching only uncovered
+relations is admitted.
+
+### The exception made visible rather than fixed
+
+The witness helper now asserts the knob's `ObjectModel` really is `Global`. That assertion WOULD fire
+for `schema.create_schema` (PerSchema) and `access.policy` / `access.rls` (PerTable), which are read at
+the witness today. Rather than change their behaviour inside this commit, those five call sites moved
+to a separately named helper whose doc states it is a known-open scope erasure. The exception is now
+named at the API instead of being an unmarked call, and it is the next commit's work.
+
+fmt 0, clippy 0, doc 0; 89 targets / 2374 passed / 0 failed / 0 ignored, up from 88 / 2360 - one new
+target and fourteen tests, exactly the new file. No pre-existing test changed.
+
+### Still out of scope, deliberately
+
+The declarative path still reaches no final-state check, so a table created declaratively is
+unprotected regardless of scope. No load-time warning was added: the docs describe a charter that
+intentionally pairs `default_scope` with a scope-less require, and warning on a documented idiom is
+noise. `default_scope` inheritance for Require rules is unchanged - removing it would WIDEN scopes and
+force resealing.
+
 ## F153 - MEASUREMENT, not a fix: a sealed require_rls obligation that enforces nothing
 
 Records what was measured for #161 and stops there deliberately. The fix turns previously accepted
