@@ -8985,6 +8985,89 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F164 - a rename follows the generated expressions the runtime descriptor ships
+
+#133 and #130 were filed as "a generated column expression survives a rename naming the old column"
+and "a renamed column leaves its inline CHECK naming the old name, and the hardened SQLite connection
+rejects the result". Two independent read-only reviews agree: AS FILED, NEITHER IS A CORRECTNESS BUG.
+What they pointed at instead is a defect one lane over, which is what this fixes.
+
+### Why the filed shape is not the bug
+
+The SQLite rebuild renderer does emit both carriers, and a fold-derived snapshot would be stale. But
+nothing executes it. A pure rename routes to the arm that replays the catalog's PRE-rename stored
+body byte-for-byte, then lets SQLite's own `ALTER TABLE ... RENAME COLUMN` rewrite the generated
+expression and the CHECK. MEASURED BY A REVIEWER end-to-end through the prebuilt addon and the real
+CLI `apply()`: creating `total_cents GENERATED ALWAYS AS (qty*unit_cents) STORED` and renaming `qty`
+to `quantity` APPLIES, and the final catalog reads
+`"total_cents" INTEGER GENERATED ALWAYS AS (("quantity" * "unit_cents")) STORED`.
+
+A refusal was considered and rejected. MEASURED on SQLite 3.51.2 and live PostgreSQL 18.4 that both
+engines follow a rename into a generated expression and a CHECK body, and measured through the engine
+that the migration applies today. Refusing it would be a strict regression - the same rule that
+already killed the proposed fix in F163.
+
+### The defect that IS real, and REPRODUCED BY ME
+
+`fold_to_field_defs`'s `Op::RenameColumn` arm renamed only the map key and `field.name`. It never
+touched `field.generated`, which unlike the snapshot lane carries the CLOSED `Expr` rather than
+rendered text. That result feeds `schema.runtime.json`.
+
+My own RED, written first and run before any fix:
+
+    test a_rename_follows_the_generated_expressions_that_read_the_column ... FAILED
+    no column reference may still name the renamed-away column, or the shipped runtime descriptor
+    describes a column the database does not have:
+    {"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},
+     "rhs":{"node":"colRef","name":"unit_cents"}},"stored":true}
+
+A second defect in the same arm, REPRODUCED BY ME separately behind a temporary env gate so each
+half is proven independently: the recovered CHECK and foreign-key facets are lifted onto columns BY
+NAME after the op stream has been walked, and the lift looks the column up rather than failing. So a
+rename that did not carry the pending facet's name forward silently dropped it:
+
+    assertion `left == right` failed: the bound survives the rename onto the new column name:
+    {"type":"int"}
+      left: None
+
+`min` and `max` simply vanish. The foreign-key lift has the identical shape and would lose
+`onDelete` / `onUpdate` the same way.
+
+### The fix
+
+The rename arm now walks the whole table rewriting every generated expression through
+`rename_expr_column`, and carries the pending `RecoveredCheck` / `RecoveredFk` column names forward.
+
+`rename_expr_column` already existed and already shipped - `gen_types` calls it from its own rename
+arm, which is exactly why the authoring types emitted alongside `schema.runtime.json` were correct
+while the runtime descriptor was not. It walks the SERIALIZED expression and rewrites only `colRef`
+nodes, so it cannot corrupt a string literal that spells the old column name. That is the property
+that makes following a rename into an expression sound here and unsound everywhere this crate refuses
+to touch rendered SQL. It moved from private to `pub(crate)`; the public API is unchanged.
+
+The whole-table walk matters: an expression names OTHER columns, so rewriting only the renamed
+column's own expression would miss every sibling that reads it.
+
+### Still open, deliberately not in this change
+
+The `ColumnSnapshot` lane (`generated`, `inline_checks`) wants a pinning test and a comment rather
+than a fix, for the reason F163 established: the structured `Expr` is rendered away at construction,
+`inline_checks` are not even regenerable, and VERIFIED BY ME that `ColumnSnapshot`'s hand-written
+`PartialEq` omits all of them, so nothing compares them either.
+
+Three items found while probing, to be filed rather than fixed here:
+two `renameColumn` ops on one table in ONE migration fail on SQLite (`no such column: "qty"` in the
+rebuild copy list - every op in an envelope lowers against the same pre-envelope snapshot; fail-closed
+but unapplicable); PostgreSQL's expand-contract rename emits `DROP COLUMN` with no CASCADE, which PG
+refuses when a generated column depends on it; and whether `genArtifacts`'s claim that both artifacts
+come through the same renderer is accurate, given this defect is precisely the two diverging.
+
+### Gates, run by me
+
+`fmt` 0, `clippy --workspace --all-targets -D warnings` 0, `doc` 0, four-crate test set 0, node crate
+0. Totals `targets=95 passed=2412` -> `targets=96 passed=2414 failed=0 ignored=0`, the two tests
+above. Zero `LIVE-DATABASE COVERAGE SKIPPED`. Non-ASCII on added lines: 0, and 0 in the new file.
+
 ## F163 - the differ stops byte-comparing a hand-rolled renderer against PostgreSQL's deparser
 
 Closes #131. Filed as "a rename leaves an index predicate and expression key naming the old column",
