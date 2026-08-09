@@ -8985,6 +8985,42 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F165 - REJECTED as filed: the genArtifacts comment says what it should, and I misread it
+
+I filed #168 on a reviewer's characterisation that `genArtifacts` "documents `envDbTs` and
+`runtimeJson` as coming through the SAME Rust renderer", and treated the F164 defect - those two
+artifacts disagreeing after a rename - as evidence the comment was false. I checked the comment
+before acting on my own ticket, and the premise does not survive contact with it.
+
+VERIFIED BY ME BY READING `zero-migrate-node/src/bridge.rs:115-130`. The claim is:
+
+    Both sources funnel through the SAME Rust renderer, so their output is byte-identical for
+    equivalent schemas
+
+"Both SOURCES" is the envelope source against the descriptor source - the two INPUTS `genArtifacts`
+accepts. It says nothing about the two artifacts. Different claim.
+
+And the claim it does make is TRUE. VERIFIED BY ME BY READING: `gen_artifacts_from_envelopes`
+(`api.rs:182`) calls `render_artifacts`, and `gen_artifacts_from_descriptors` (`api.rs:221`) calls
+`render_artifacts_from_descriptors`, which at `gen_types.rs:475-477` turns descriptors into ops and
+then calls `render_artifacts` - the same function. One renderer, two entry points, exactly as
+written.
+
+So no change. The ticket was mine and it was wrong; recording that is cheaper than leaving a
+plausible-sounding correction in the log for someone to act on later.
+
+### The residue that IS real, and is a separate question
+
+Inside `render_artifacts` the two ARTIFACTS do come from two different paths -
+`render_runtime_descriptor_v1` (over `fold_to_field_defs`) and `authoring_tables_from_ops` (the
+authoring replay). That is precisely why they could disagree after a rename until F164.
+
+The code already knows this: the doc above `authoring_tables_from_ops` says `dialect` "must be the
+SAME dialect `render_runtime_descriptor_v1` folds under or the two artifacts describe different
+tables". So the two-path structure is documented, and the agreement between them is a contract
+nothing enforces in general - F164 pins it for one input. Whether to build a broader
+artifact-agreement gate is a real question, and a different one from the ticket I filed.
+
 ## F164 - a rename follows the generated expressions the runtime descriptor ships
 
 #133 and #130 were filed as "a generated column expression survives a rename naming the old column"
