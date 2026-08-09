@@ -8789,3 +8789,126 @@ single failing test would not have been enough. Restored byte-identical.
     0 live-database skip banners
 
 2320 is exactly +2 on 2318 for the two tests added. No new non-ASCII.
+
+## F140 - four derived index names promising a byte-for-byte match they do not keep
+
+Part of #150, the COMMENT half only. The behaviour fix stays open, for the reason recorded below.
+
+### The finding
+
+`cap_ident_name` (plan/author.rs:177) caps at 63: a natural name of 63 bytes or fewer comes back
+verbatim, longer ones become prefix(52) + "_" + 10 hex. `query::index_name` (schema/query.rs:2185)
+caps at 60: verbatim to 60, then prefix(51) + "_" + 8 base32. They agree at 60 or fewer and diverge
+above, in two regimes - at 61..=63 the first returns the name untouched while the second hashes it,
+and at 64 and beyond the two produce different lengths with different tails.
+
+Four desired-snapshot names are built with the first scheme while the data plane creates the live
+object with the second:
+
+    declarative.rs:4040   vector_index_snapshot   (ivfflat)
+    declarative.rs:4073   geo_index_snapshot      (gist)
+    declarative.rs:3889   unique_index_name       vs query.rs:1967 index_name(.., true)
+    declarative.rs:4095   fts_index_name          a DIFFERENT mechanism, below
+
+The comparison is pure name equality with no shape fallback: declarative.rs:5471-5510 keys a
+BTreeMap on `i.name`, missing-desired emits CREATE and live-only emits DROP, and the only skip is
+the primary-key index. apply/drift.rs:1729-1767 is name-keyed too, so its attribute compare never
+gets the chance to notice the columns are identical.
+
+Reachable: query.rs:475-509 caps the collection name at 63 and :606-658 the field name at 63,
+independently, so the natural name reaches 131 bytes. A table named `t` with a 55-byte column
+already crosses at 61.
+
+The unique case is the sharpest. `render_drop_index` classifies a unique index drop as destructive,
+so that one does not churn quietly - it produces a migration waiting on approval.
+
+### The FTS site is a different mechanism, and it was measured
+
+`fts_index_name` and its data-plane counterpart are both UNCAPPED, so they build the same string.
+The divergence there is PostgreSQL's own truncation, measured on 18.4 rather than assumed:
+
+    NOTICE:  identifier "zz_trunc_probe_ccc...ccc__fts_idx" will be truncated to "...ccc_"
+    pg_indexes.indexname length = 63
+
+The desired snapshot holds the untruncated string while the live name is 63 bytes. That one has to
+be capped on both sides in lockstep or neither; capping only the desired side moves the mismatch
+rather than removing it.
+
+### Why the behaviour fix is still open
+
+Two reviewers agreed the routing change is the right remedy and disagreed on whether it is free. One
+argued it renames nothing because the 63-scheme name has never been on disk. That is false, and
+reading the code settled it: declarative.rs:5287-5308 iterates a new table's indexes - including the
+vector and geo snapshots - and calls render_create_index, which hands `idx` to the emitter and names
+the migration `create_index_{idx.name}` with no re-derivation anywhere. The engine puts the
+63-scheme name on disk for any table the engine itself creates.
+
+So there are two populations. An index the data plane created carries the 60-scheme name and drifts
+today. An index the engine created carries the 63-scheme name and has zero drift today. Routing the
+desired side to the 60 scheme fixes the first and forces a one-time reconciliation on the second,
+and this repository cannot tell which deployments exist. That is a migration-behaviour change with a
+rollout story, which is why it is not being smuggled in behind a comment cleanup - the same call the
+earlier investigation made when it filed #150 rather than fixing it.
+
+### What shipped, and two overstatements that did not
+
+The comment sites that promised byte-for-byte agreement now say where the agreement holds and where
+it stops. declarative.rs:3433-3434 had said the name was "routed through the shared `crate::schema`
+kernel so the opclass + name match plugin-db's runtime form byte-for-byte"; the opclass is, the name
+is not.
+
+"Perpetual churn" was not reproduced, because it is conditional: the first diff emits CREATE(63) +
+DROP(60) and the next is clean unless the out-of-repo plugin recreates its name, and nobody in
+either review has read that plugin. "Spatial search falls back to a full table scan" was removed as
+unsupported - the same plan creates an equivalent gist index on the same column.
+
+## F141 - a timeout knob naming "no indefinite lock", and the value that means indefinite
+
+Closes #149 as filed. Opens #151 and #152.
+
+### The ticket asked for the wrong control
+
+#149 asked whether to wire `runtime.lock_timeout_ms` and `runtime.statement_timeout_ms` as enforced
+ceilings, since both were reclassified DeclaredOnly when nothing read them. Both reviewers said no,
+for the same verified reason: the knob registers `default: Uint(1)` with `hard_floor: 1`
+(policy_registry.rs:282) against executor defaults of 3s lock and 60s statement (conn.rs:124), so a
+reject-style ceiling wired against that default is a rollout incompatibility.
+
+### The defect it was circling
+
+Measured on live PostgreSQL 18.4, each knob separately rather than assuming one follows the other:
+
+    SET lock_timeout = 0;      SHOW -> 0        SET lock_timeout = 1;      SHOW -> 1ms
+    SET statement_timeout = 0; SHOW -> 0        SET statement_timeout = 1; SHOW -> 1ms
+
+`0` is PostgreSQL's spelling for "no limit". `effective_timeout_ms` and `effective_lock_timeout_ms`
+(postgres/session.rs:158-176) pass the per-migration flag through with no floor, on both apply paths,
+so an authored `lock_timeout_ms: Some(0)` makes the DDL wait forever while holding what it already
+acquired. conn.rs:145 already calls those two timeouts "mandatory (no indefinite locks / DoS)", so
+the value sits outside the contract the code declares for itself.
+
+### Three corrections the second opinion produced
+
+MySQL is not parity, which is what my own filing had claimed. mysql/session.rs:285-286 floors the
+lock wait; `effective_timeout_ms` at :268 is unfloored exactly like the PostgreSQL one. The fix
+covers four helpers, not two.
+
+The IR loader is not a sufficient boundary. `validate_ir_plan_execution_metadata` has one call site
+(lower.rs:2913, inside assemble_plan), `Migration` and `MigrationFlags` are public serde structs with
+public fields, and a zero can also arise from config - conn.rs:383 truncates a sub-millisecond
+Duration to 0 through `as_millis()`. Validation belongs at the config and execution boundary with the
+loader as early author feedback, not at the loader alone.
+
+And refusing zero is a PREREQUISITE for any future ceiling, not a substitute for one. `UintCharter`
+orders with ordinary numeric `<=` (value_order.rs:49), so semantic-infinity 0 reads to the comparator
+as the tightest possible value. Wire the ceiling first and the single value meaning "unbounded" sails
+through as maximally safe.
+
+Clamping stays off the table: `lock_timeout_ms` is folded into the checksum (migration.rs:378 into
+:581, pinned by the test at :998), so clamping would run a migration whose behaviour differs from its
+checksummed identity.
+
+### Filed separately
+
+#152 - `acquire_project_lock` (postgres/session.rs:58) takes the blocking `pg_advisory_lock` before
+any per-migration timeout is installed, so no timeout fix here bounds the wait for the project lock.
