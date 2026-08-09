@@ -8985,6 +8985,93 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F156 - the object-scoped grants stop being decided by a witness that is not the target
+
+Closes #161 slice 2, the opening `a922445` marked rather than closed. That commit added an assertion
+that the fixed-witness read is only used for `Global` knobs; three knobs would have tripped it, so
+their call sites were parked on a separately named helper documented as a known-open scope erasure.
+Naming the exception is what made this commit findable.
+
+### Two directions, both measured with clean controls
+
+These are GRANTS defaulting to false, so the failure modes invert relative to F154's obligation. The
+witness is SCHEMA-shaped, and a schema object matches only patterns whose table glob is exactly `*`:
+
+ - FAIL CLOSED: a narrow `include` is invisible to it, so the probe falls to the default and the guard
+   REFUSES what the charter explicitly grants. A working migration, rejected.
+ - FAIL OPEN: an `exclude` narrower than a table is equally invisible, so the guard ADMITS exactly what
+   the charter excluded.
+
+REPRODUCED BY ME with the witness resolution restored behind a temporary env gate:
+
+    narrow_rls_grant_admits_the_table_it_names        ... FAILED
+    narrow_policy_grant_admits_the_table_it_names     ... FAILED
+    narrow_create_schema_grant_admits_the_schema      ... FAILED
+    excluded_table_is_refused_rls                     ... FAILED
+    excluded_table_is_refused_policy                  ... FAILED
+    excluded_schema_is_refused_drop_schema            ... FAILED
+    narrow_rls_grant_refuses_a_table_outside_it       ... ok
+    narrow_policy_grant_refuses_a_table_outside_it    ... ok
+    top_scoped_*_behaviour_is_unchanged  (three)      ... ok
+    test result: FAILED. 5 passed; 6 failed
+
+The three `scope = "all"` controls pass in both directions, which is the evidence that this widened
+nothing for the charters everything in this repo actually uses.
+
+### Two things my brief got wrong, both caught by measuring
+
+I told the agent `schema.create_schema`'s fail-open direction was already closed and to skip that arm.
+Half right: `CREATE SCHEMA` is resolved per object by `check_namespace_structural`, but `DROP SCHEMA`
+has NO such resolver, and under `include=["*"] exclude=["app"]` a `DROP SCHEMA app` was ADMITTED. The
+skipped arm was replaced by a real one on the drop.
+
+I also listed the sites and missed one: `DROP POLICY` was parked on the same helper, and its
+fail-closed direction was real.
+
+### How each site gets its object
+
+`ALTER TABLE` takes its relation, `CREATE POLICY` its table, `CREATE SCHEMA` its schema name, and
+`DROP SCHEMA` each named target - all through the shared relation resolver or `normalize_pg_identifier`,
+so the pinned-schema rule and the composer's PG fold apply on both sides. `DROP POLICY` needed care:
+the grammar appends the policy name to the relation's name parts, so the relation is everything before
+the last element, confirmed empirically rather than assumed.
+
+`DropStmt` now requires EVERY named target to be granted, so `DROP SCHEMA owned, other` is no longer
+decided by one witness.
+
+### The unattributable case
+
+`grants_object_bool(key, None)` answers from a whole-universe check: only a `GrantRegion::Top` grant
+covers a target the guard cannot name (an unqualified relation with no unique owned schema,
+`CREATE SCHEMA AUTHORIZATION joe`). That is byte-identical to the old witness read for `scope = "all"`
+and for the no-grant case, and fails closed for every narrower region - which is why the controls did
+not move.
+
+The parked helper is deleted; nothing was left on it.
+
+### One deliberate non-change
+
+The `CREATE SCHEMA` pre-gate stays, though it is now redundant with the per-object resolver behind it.
+Deleting it would also fix fail-closed, but it would change the refusal code for an ungranted
+`CREATE SCHEMA` from `unrecognized_dangerous_construct` to `CreateSchemaNotGranted`. Nothing asserts
+either code today, so it was a free choice, and the one that leaves observable behaviour alone wins.
+
+### What I fixed before committing
+
+The new test file carried five non-ASCII characters - an ellipsis and four em dashes - in doc comments.
+Converted. The added-line ASCII check is per-commit for a reason; a new file is exactly where this
+slips in.
+
+fmt 0, clippy 0, doc 0; 91 targets / 2389 passed / 0 failed / 0 ignored, up from 90 / 2378 - one new
+target and eleven tests, no existing test moved.
+
+### Still open
+
+The IR authoring path never reaches any of this: #165 establishes that `IrAuthor` pins its own scope
+and no production caller widens it, so vendor-capability ops are refused there regardless of policy.
+That fix lands next, and it lands AFTER this one deliberately - routing newly-authorized ops onto a
+resolver that answers the wrong question would have been the wrong order.
+
 ## F155 - one question about what makes an index the same index
 
 Closes #162. The exact-name arm of the index pairing compared two facets by hand while the alias arm
