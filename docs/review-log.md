@@ -8985,6 +8985,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F159 - the declarative path stops creating tables an obligation says must be protected
+
+Closes #161. The RLS final-state check had exactly ONE non-test caller, on the authored-IR path. The
+declarative planner produces `Vec<Migration>` - SQL text, never a `MigrationIr` - so it reached no
+final-state check at all, and a table created declaratively was unprotected no matter how
+`safety.require_rls` was scoped, including `scope = "all"`.
+
+VERIFIED BY ME by reading: `grep -in "rls"` over `render/declarative.rs` returns ZERO hits, and
+`check_ir_data_security_policy` takes `(cfg, ir)` - no dialect, one caller.
+
+### REPRODUCED BY ME, with the shared resolver forced to answer false behind a temporary env gate
+
+    require_rls_over_the_created_schema_refuses_the_declarative_create  ... FAILED
+    require_rls_names_only_the_covered_table_of_a_multi_table_create    ... FAILED
+    require_rls_over_another_schema_still_plans_the_create              ... ok
+    require_rls_admits_an_alter_only_and_a_no_op_diff                   ... ok
+    a_charter_without_require_rls_plans_the_create                      ... ok
+    test result: FAILED. 3 passed; 2 failed
+
+Three arms holding while two move is what makes this the defect rather than a widening. The
+alter-only arm is live rather than hand-built: v1 deploys through `apply_declarative` against real
+PostgreSQL and is re-introspected with `snapshot_schema`, so "alter-only" is decided by the catalog.
+
+### What shipped, and what was deliberately NOT built
+
+The refusal names the covered tables and says why nothing here could satisfy the obligation:
+
+    refusing to create ["widgets"] in schema '...': a safety.require_rls obligation covers these
+    tables, and a declarative diff carries no RLS transition that could satisfy it - the desired model
+    records no per-table RLS ... Either author these tables through the IR migration path, where a
+    setRls op can accompany the create, or narrow the obligation's scope so it does not cover them
+
+Rejected, and the reasons are in the code rather than only here: a blanket refusal whenever the knob
+exists would break a deploy the obligation does not cover; silently appending ENABLE ROW LEVEL
+SECURITY would invent state the author never declared, since the declarative model has no RLS intent
+to render from; and documenting the limit would leave a knob the registry marks Enforced inert on one
+of two entry points, which is what `Enforcement::DeclaredOnly` exists to prevent.
+
+The check sits in `plan_declarative` right after the diff, so the differ stays a differ and every
+existing refusal keeps its precedence. `created_tables` comes from the same map the deferred-FK pass
+reads - the tables a CREATE was actually emitted for - so it cannot drift from a re-derived
+"desired minus live". The obligation resolves through ONE shared `requires_rls_at_table`, lifted out
+of the IR walk's private helper rather than copied, so both entry points fold identifiers the same
+way and share the fail-closed fallback.
+
+### The agent added an arm I had not asked for, and it is the one that matters most
+
+`require_rls_names_only_the_covered_table_of_a_multi_table_create`: one diff creating two tables into
+the same schema with the obligation scoped to one of them. All four arms I specified would still pass
+if the check resolved PER SCHEMA; only this one fails. It is the arm that pins per-table resolution.
+
+### A judgement call I am recording rather than burying
+
+The check is NOT dialect-gated, so a SQLite declarative deploy under a covering charter is refused
+too. VERIFIED BY ME: `check_ir_data_security_policy` takes no dialect either, so the authored path
+already refuses a covered `CreateTable` on SQLite today. Gating the declarative side by dialect would
+have made the two entry points disagree - the exact defect this closes. SQLite has no RLS, so the
+obligation is genuinely unsatisfiable there, and refusing says so.
+
+Full declarative RLS - per-table intent in the desired model, the introspector and the differ - is a
+feature and is explicitly not implied by this refusal. The error says that too.
+
+fmt 0, clippy 0, doc 0; 93 targets / 2400 passed / 0 failed / 0 ignored, up from 92 / 2395 - one new
+target, five tests. Zero skip banners, and no scratch schema left behind.
+
 ## F158 - the load gate asks the same question the lower gate does
 
 Closes #165. F157 moved the LOWER gate off `SchemaScope` and onto the charter and left the VALIDATE
