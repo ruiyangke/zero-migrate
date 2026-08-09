@@ -8985,6 +8985,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F171 - the catalog oracle for the drop gate, verified 10/10 - and the obvious query is wrong
+
+F170 named this as the first thing to do before implementing: verify the `pg_depend` joins that
+would name the blocking dependents. Done, MEASURED BY ME against PostgreSQL 18.4. The obvious query
+does not work, and finding that out now is the whole point of doing it before writing the gate.
+
+### Ground truth first
+
+One table, one column per shape, so each drop differs in exactly one variable. Each drop run inside
+`BEGIN; ... ROLLBACK;` so the fixture survives:
+
+    gen_src     REFUSED     a generated column reads it
+    view_src    REFUSED     a view reads it
+    excl_expr   REFUSED     an EXCLUDE expression reads it
+    gen_out     allowed     the generated column itself
+    excl_plain  allowed     EXCLUDE over the plain column
+    excl_mixed  allowed     EXCLUDE naming it plainly AND in an expression
+    idx_pred    allowed     partial index predicate
+    idx_key     allowed     index key
+    idx_expr    allowed     index expression key
+    plain       allowed     no dependents
+
+### The obvious query gets 2 of 3
+
+The natural reading of "NORMAL blocks, AUTO does not" is a join on `pg_depend` filtering
+`deptype = 'n'`. MEASURED, that flags `gen_src` (`n:pg_attrdef`) and `view_src` (`n:pg_rewrite`) and
+MISSES `excl_expr` entirely, which reports `a:pg_class` - an AUTO dependency. A gate built on that
+rule would let the expression-EXCLUDE drop through to the server error it was written to prevent.
+
+Decomposing the edges by catalog shows why, and gives the real discriminator:
+
+    excl_expr    a:pg_class                      the INDEX depends on the column; the constraint does not
+    excl_plain   a:pg_constraint                 the CONSTRAINT itself depends on the column
+    excl_mixed   a:pg_class, a:pg_constraint     BOTH
+
+An exclusion's index is INTERNALLY owned by its constraint, so auto-dropping the index is not a
+route PostgreSQL will take on its own - it refuses. When the constraint ALSO depends on the column
+directly, that path drops the whole constraint and the column goes. That is the mechanism behind the
+mixed-shape result in F170, rather than a special case to memorise.
+
+### The verified predicate
+
+    refuse = any dependency with deptype = 'n'
+             OR ( an AUTO dependency from a pg_class row that is INTERNALLY owned by a pg_constraint
+                  AND no AUTO dependency from that pg_constraint on the same column )
+
+Run over the fixture it predicts `excl_expr`, `gen_src`, `view_src` and nothing else - matching the
+measured outcomes 10 of 10. That is the oracle the gate should use, and it is worth carrying as a
+test against a live server rather than as a comment, because it encodes PostgreSQL's behaviour and
+not ours.
+
+### What this does not settle
+
+The predicate is verified over the shapes I built. It says nothing about triggers, foreign keys from
+other tables, composite types, or dependencies from other schemas, none of which I fixtured. It is
+also PostgreSQL-only: F170 already records that SQLite refuses a wider set and wants a
+rebuild-closure rule instead.
+
+Still not built. This entry replaces a plausible query with a measured one, which is the difference
+between a gate that fires when PostgreSQL would and a gate that agrees with it twice out of three
+times.
+
 ## F170 - DESIGN, not shipped: where the column-drop dependency gate belongs, and the rule it must use
 
 #129 and #167 want one fix. This records the design and, more importantly, the correction that came
