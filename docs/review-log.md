@@ -8985,6 +8985,138 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F161 - crash recovery refuses the `up`s it cannot prove it may re-run, and keeps the marker
+
+Closes #163, whose measurement is F160. The fix is at RECOVERY, not at the fresh-apply gate: an
+`up` outside the replay-safe set still applies exactly as it does today and loses only AUTOMATIC
+crash recovery.
+
+### The decision, and where the two opinions split
+
+One Opus agent and one `codex exec -s read-only` job, same question. They agreed on six points: fix
+at the recovery layer; converge on the MySQL model (VERIFIED BY ME AT `mysql/mod.rs:654`, whose own
+doc says DDL is auto-committing); wrap the `completed` INSERT and the marker DELETE in one
+transaction; an armed marker must dominate the precondition gate, because Skip is worse than Halt -
+it reports success forever; no per-statement progress record; correct all three false comments.
+
+They split on whether to ALSO harden the fresh-apply validator into a positive allowlist. Codex won
+on the rule this review already runs on: that allowlist refuses `transactional:false` + `CREATE
+TABLE`, which works today on the clean path, and a check that rejects a working migration is worse
+than the gap it closes. Deferred to its own decision. Codex also supplied the honest framing that
+replaced my "it was never safe": the shape WAS accepted and DID work; what it never satisfied was
+the advertised automatic-recovery contract.
+
+### The stop clause fired, and my premise in it was inverted
+
+The brief told the implementer to stop if `conn.batch` turned out NOT to use simple-query semantics,
+on the theory that a non-txn `up` could then legitimately carry several statements. That is
+backwards - simple query is exactly what PERMITS several statements. VERIFIED BY ME BY READING:
+`NapiHostSession::batch` (`zero-migrate-node/src/session.rs:119`) sends `kind: "batch"`, and the
+shipped host handles it at `packages/zero-migrate-cli/src/driver-pg.ts:325` as
+`await client.query(request.sql)` - one string, no values, which is node-postgres's simple query.
+Multi-statement `up`s do work.
+
+The single-statement rule survives on a different footing, MEASURED BY THE AGENT against live
+PostgreSQL 18: a multi-statement simple query runs inside one implicit transaction block, and three
+of the four admitted shapes refuse to run in one -
+
+    CREATE INDEX CONCURRENTLY ...; CREATE INDEX CONCURRENTLY ...;
+      ERROR:  CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+    DROP INDEX CONCURRENTLY ...; DROP INDEX CONCURRENTLY ...;
+      ERROR:  DROP INDEX CONCURRENTLY cannot run inside a transaction block
+    VACUUM t; VACUUM t;
+      ERROR:  VACUUM cannot run inside a transaction block
+    ALTER TYPE mood ADD VALUE IF NOT EXISTS 'b'; ... 'c';   -> works
+
+So the rule refuses nothing that ever worked, for three of four. The one real narrowing is a
+multi-`ALTER TYPE ... ADD VALUE` `up`: it applies today and recovers today, and now fails closed
+after a crash instead.
+
+### A counter-example of mine that does not carry the weight I gave it
+
+My brief settled the single-statement rule on `DROP TABLE IF EXISTS t; CREATE TABLE IF NOT EXISTS t
+(...)`, whose replay deletes post-migration data. It contains no statement that is in the admitted
+set, so it does not actually show that ADMITTED statements are unsafe in composition. The rule is
+still right; the implicit-transaction-block measurement above is what carries it, and that is what
+went in the code comment.
+
+### REPRODUCED BY ME, both arms, with both controls passing in the same binary
+
+Via a temporary env gate (`ZERO_MIGRATE_RED_163`) that suppresses the refusal and the marker's
+precedence over Skip while leaving every export and every test intact. No file was reverted.
+
+    test a_committed_non_txn_concurrent_index_still_recovers_on_replay ... ok
+    test a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_kept ... FAILED
+    test a_guarded_create_partition_replay_is_a_clean_noop ... ok
+    test a_transactional_create_table_rolls_back_at_the_same_boundary_and_replays ... ok
+    test an_armed_marker_outranks_a_skip_precondition ... FAILED
+
+    expected NonTxnRecoveryUnsafe, got MigrationFailed { version: "mig_0344LfyNJlIQ5gKFxn4bBg",
+      source: BackendError(DbError { message: "relation \"wedged\" already exists",
+      sqlstate: Some("42P07") }) }
+
+    a version holding an armed marker must never be reported as a successful deploy:
+      ApplyOutcome { applied: [], skipped: ["mig_0344LfzcoQgMw8cTLCztFG"], recovered: [] }
+
+The crash comes from a new fault point, `points::APPLY_AFTER_UP_BEFORE_COMPLETED`, tripped in BOTH
+apply shapes at the same boundary - inside the open transaction on the transactional path, after the
+auto-commit on the two-phase one. That is what makes the transactional control a measurement of the
+shape rather than an assertion about it. F160 had to inject its crash with a database-side trigger
+because no such point existed.
+
+### What changed
+
+`check_non_txn_up_replayable` (`postgres/session.rs`) admits, per the decision: `CREATE INDEX
+CONCURRENTLY IF NOT EXISTS <named>` (unnamed is refused - `index_names_in_up` skips it, so recovery
+could not drop the INVALID residue), `DROP INDEX CONCURRENTLY IF EXISTS` (bare refused),
+`ALTER TYPE ... ADD VALUE IF NOT EXISTS`, `VACUUM`, and exactly one substantive statement. It is
+called from `apply_non_transactional` under `had_inflight` only. Nothing went on the backend trait:
+`uses_two_phase_path` (`backend/mod.rs:356`) is `!ddl_is_transactional() || !m.flags.transactional`
+and MySQL's is always false, so trait-level wiring would have refused every MySQL migration.
+
+The clear-then-rearm window is closed by deletion rather than by ordering: `recover_non_transactional`
+no longer calls `clear_inflight` at all, and `record_started` is already `ON CONFLICT DO NOTHING`, so
+the ORIGINAL marker survives the recovery pass untouched. It is now continuously armed from the first
+attempt until `record_completed`'s DELETE - and that DELETE is inside a transaction with the INSERT,
+via a new `finalize_non_txn` that folds four duplicated finalize blocks into one.
+
+### The refusal, verbatim from a live run
+
+> migration mig_0344LIjcddbFzbhQ1niZA9 has an inflight marker from an interrupted
+> non-transactional apply, and zero-migrate cannot prove its `up` is safe to re-run (...), so it
+> will not replay statements that may already have committed. Inspect the live schema against the
+> migration SQL, restore and verify the complete pre-migration shape yourself, clear the marker with
+> DELETE FROM "meta_...".schema_migrations_inflight WHERE version = '...', then run apply again.
+> Clearing the marker inspects nothing: it records your assertion about the shape. Do not hand-write
+> a completed event into the append-only journal.
+
+One deliberate deviation from the brief: it names route (1) only. MySQL's message also offers
+`MysqlBackend::recover_inflight_ddl`, and PostgreSQL has no analogue - naming an audited repair that
+does not exist would be the worse failure.
+
+### Two things reaching past the brief's scope
+
+The Skip fix sits in the generic `execute_pending`, so a MySQL version holding a marker under
+`OnUnmet::Skip` now also refuses instead of reporting a clean deploy. Same defect, same fix, full
+suite green with it - but it is a behaviour change on a backend the brief scoped to PostgreSQL.
+
+Preconditions are still EVALUATED under an armed marker, so an unmet `OnUnmet::Halt` check still
+aborts from the same `?`. VERIFIED BY ME AT `precondition.rs:263`. Only the Skip verdict and the
+transitive dependency-skip are overridden.
+
+### Not closed here
+
+`ANALYZE` parses as `VacuumStmt` and is admitted as-is. `REINDEX CONCURRENTLY` is still absent from
+the classifier's four non-transactional shapes. Whether the FRESH path should also refuse the shapes
+recovery cannot replay is the deferred decision above.
+
+### Gates, run by me on the restored tree
+
+`fmt` 0, `clippy --workspace --all-targets -D warnings` 0, `doc` 0, four-crate test set 0, node crate
+0. Totals `targets=93 passed=2400` -> `targets=93 passed=2408 failed=0 ignored=0`, +8 = 4 live-PG
+scenarios + 4 classifier unit tests, all eight listed by name in the log. Zero
+`LIVE-DATABASE COVERAGE SKIPPED`. Non-ASCII on added lines: 0.
+
 ## F160 - MEASUREMENT, not a fix: a replay-safety proof that checks two statements out of all of them
 
 Records what was measured for #163 and stops there. The remedy rejects migrations that apply
