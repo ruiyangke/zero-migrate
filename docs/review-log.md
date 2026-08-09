@@ -8985,6 +8985,51 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F166 - two renames of one table in one migration, REPRODUCED BY ME and pinned
+
+#166 was filed off a reviewer's end-to-end probe; I had not reproduced it. Now I have, through the
+engine's own SQLite harness rather than through the addon, so the failure is pinned by a test in this
+repo rather than by a report.
+
+### The failure, from my own run
+
+    PROBE apply failed: backend error: sqlite rebuild of 'people' failed:
+    sqlite migration statement failed: no such column: "nickname" - should this be a string
+    literal in single-quotes? in INSERT INTO "people__zero_migrate_rebuild"
+    ("city", "created_at", ..., "nickname", ...) SELECT "city", ..., "nickname", ...
+    FROM "people" at offset 214
+
+Two `renameColumn` ops on one table in ONE envelope. The second rebuild's value-copy list still
+names `nickname`, which the FIRST rebuild has already renamed to `handle`. Every op in an envelope
+lowers against the same pre-envelope live snapshot - the engine re-introspects between envelopes,
+not between the ops inside one - so the second rebuild is planned against a table shape that no
+longer exists by the time it runs.
+
+Fail-closed: the rebuild transaction rolls back. But the migration cannot be applied at all, and
+nothing tells the author the repair is to split the two renames across migrations.
+
+### What the error text also shows, and it is not incidental
+
+`should this be a string literal in single-quotes?` is SQLite's message when double-quoted-string
+behaviour is OFF. That is the hardening #132 pinned. With DQS on - SQLite's default - `"nickname"`
+in the SELECT list would have degraded to the string literal `'nickname'`, and the rebuild would
+have copied the constant text "nickname" into every row of that column instead of failing. So the
+setting pinned in #132 is exactly what makes this defect loud instead of silent data corruption.
+That connection was not in the ticket and is worth keeping.
+
+### Pinned, not fixed
+
+`two_renames_of_one_table_in_one_migration_fail_closed_on_sqlite` asserts the apply fails and that
+the message names the column the stale copy list still asks for. It also tolerates the other
+acceptable outcome: if a future change refuses this at LOWER time instead, the test takes that
+branch and asserts the refusal names the table. Either behaviour is defensible; silently succeeding
+is not, and that is what the test rules out.
+
+The fix is a genuine decision - lower each op against the state the previous ops in the same
+envelope produced, or refuse the shape up front - and it stays open on #166. Note that a lower-time
+refusal is the cheaper option but rejects a shape an author may reasonably write, which is the
+consideration that has already reversed two proposed fixes in this review.
+
 ## F165 - REJECTED as filed: the genArtifacts comment says what it should, and I misread it
 
 I filed #168 on a reviewer's characterisation that `genArtifacts` "documents `envDbTs` and
