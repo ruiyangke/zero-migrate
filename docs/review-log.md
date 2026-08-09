@@ -8985,6 +8985,82 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F160 - MEASUREMENT, not a fix: a replay-safety proof that checks two statements out of all of them
+
+Records what was measured for #163 and stops there. The remedy rejects migrations that apply
+successfully today, so it is a decision and gets two independent opinions before anyone writes it.
+
+The finding came from the read-only architectural review, which ran no builds, no tests and no
+database and says so. This is the measurement that decides it, and the premise held on every point.
+
+### The claim, and what the code actually says
+
+`apply/executor.rs:12-18` describes the first pass as validating "that every non-transactional `up`
+is idempotent (each non-txn statement uses the `IF NOT EXISTS` form)".
+
+VERIFIED BY ME BY READING: `validate_non_txn_idempotent` (`postgres/session.rs:499`) is a denylist of
+three arm groups followed by a catch-all -
+
+    NodeEnum::IndexStmt(idx) if idx.concurrent && !idx.if_not_exists
+    NodeEnum::AlterEnumStmt(e) if !e.new_val.is_empty() && !e.skip_if_new_val_exists
+    NodeEnum::InsertStmt | UpdateStmt | DeleteStmt | MergeStmt | TruncateStmt
+    _ => {}
+
+So `CREATE TABLE`, `ALTER TABLE ADD COLUMN` and a bare `DROP INDEX CONCURRENTLY` all pass the
+"proof". The comment describes a check over every statement; the code checks two node types.
+
+### MEASURED BY THE AGENT against live PostgreSQL 18.4, with two controls
+
+The crash was injected DB-side rather than through the repo's fault seam, and the reason is worth
+recording: `fault.rs` has no trip point on this path, and the support harness hooks `exec`/`query_one`
+but not `batch`, so neither could fault the `up`. A `BEFORE INSERT` trigger on the journal reproduces
+the exact durable state instead - the ordinary finalizer is a bare `exec` with no surrounding
+transaction, so a self-committed non-txn `up` and an armed marker both survive, which is byte-for-byte
+what a process crash leaves.
+
+    non-txn CREATE TABLE      -> replay 1 AND replay 2: relation "wedge_me" already exists
+                                 marker still armed, no completed row. PERMANENTLY WEDGED.
+    non-txn DROP INDEX CONCURRENTLY (bare) -> index "ix_seeded" does not exist. Also wedged.
+    CONTROL, transactional, same trigger   -> whole txn rolled back; replay applies cleanly.
+    CONTROL, non-txn CREATE INDEX CONCURRENTLY IF NOT EXISTS -> recovered cleanly.
+
+Both controls passing is what makes the two wedges mean something rather than proving the harness
+broke.
+
+### A second false comment, found by the measurement
+
+`session.rs:479-480` says the other non-txn ops the classifier recognises - `DROP INDEX CONCURRENTLY`,
+`VACUUM` - "are themselves naturally re-runnable". VERIFIED BY ME BY READING that the comment says
+this; the measurement shows it is true only of the `IF EXISTS` form, and nothing requires that form.
+
+### The precondition interaction, measured, and the quiet arm is the worse one
+
+Preconditions are evaluated before backend recovery, so a DDL that already succeeded can invalidate
+its own precondition on replay:
+
+    OnUnmet::Skip -> replay returns Ok: applied=[], skipped=[v], recovered=[]
+                     marker still armed, no completed row. The deploy reports SUCCESS, forever,
+                     while the migration never lands.
+    OnUnmet::Halt -> loud error, equally permanent.
+
+The inflight-checksum gate runs BEFORE preconditions, which is the neighbouring criticism the review
+withdrew - correctly.
+
+### Read, not measured
+
+The ordinary phase-two finalizer is an INSERT then a separate DELETE with no transaction around them,
+while the squash finalizer wraps completion and edges in BEGIN/COMMIT with ROLLBACK on error. The same
+asymmetry repeats in the satisfied-noop branch. Nobody has measured a crash inside that
+INSERT-to-DELETE window.
+
+### Why this stops here
+
+The proposed remedy is a positive AST allowlist instead of a denylist. Measurement B established two
+live routes by which an ordinary `CREATE TABLE` reaches the validator carrying `transactional: false` -
+a direct embedder building `Migration` by hand, which this repo's own tests document and use, and an
+IR envelope flag that `merge_ir_flags` overwrites unconditionally. So an allowlist rejects input that
+applies successfully today. That is a decision, not a fix.
+
 ## F159 - the declarative path stops creating tables an obligation says must be protected
 
 Closes #161. The RLS final-state check had exactly ONE non-test caller, on the authored-IR path. The
