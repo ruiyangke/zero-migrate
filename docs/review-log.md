@@ -7961,3 +7961,105 @@ remaining step, and only then can `RUSTDOCFLAGS` become `-D warnings`. One opini
 redundant set is not a coherent rule - over 400 links share its shape and which ones fire depends on
 whether the label happens to resolve in that module's scope - so it must be re-measured under the final
 flags rather than planned against a count taken earlier.
+
+## F129 - the doc gate now denies warnings, and the 43 explicit targets came out
+
+Closes #113. The gate exited 0 while printing 43 warnings, and a gate whose output is ignored
+teaches contributors to ignore its output.
+
+### What the 43 actually were
+
+Re-measured at 639658f after `cargo clean --doc`, under the final flags:
+
+    RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" \
+      cargo doc --workspace --no-deps --document-private-items
+    -> exit 0, 43 warnings, ALL `redundant_explicit_links`
+       (zero-migrate 37, guard 2, ir 2, policy 1, node 1)
+
+Zero broken links and zero `private_intra_doc_links`; 639658f had cleared the 61. So one lint was
+all that stood between this gate and `-D warnings`.
+
+The earlier note that the redundant set "is not a coherent rule" does not survive contact with the
+lint's semantics. It fires exactly when the label already resolves to the same destination, which
+is to say exactly when the explicit target is doing no work. The 400-odd links that share its shape
+and stay silent are the ones whose target IS load-bearing.
+
+### The claim that they were homogeneous was wrong
+
+Classified all 43 by whether the label contains `::`: 26 bare labels, 17 path labels. That split is
+real but carries NO difference in robustness, which killed the option of fixing only one group.
+
+### Two experiments, because the objection deserved a measurement rather than an argument
+
+Each is a throwaway crate run through the real doc gate, each changes exactly ONE variable, and
+each keeps the agreeing baseline as the witness that the input was real.
+
+Bare label, two same-named types:
+
+    use crate::analyze::Advisory -> lint FIRES; explicit -> analyze; bare -> analyze. Agree.
+    use crate::other::Advisory   -> lint SILENT; explicit -> analyze (right);
+                                    bare -> other (WRONG). Zero warnings, exit 0.
+
+Path label `[`executor::apply`]`, first segment rebound:
+
+    pub use crate::real::executor  -> lint FIRES; bare -> real. Agree.
+    pub use crate::decoy::executor -> lint SILENT; explicit -> real (right);
+                                      bare -> decoy (WRONG). Zero warnings, exit 0.
+
+So a path label has the same exposure as a bare one, one level up, and no lint catches either
+retarget - the label still resolves, just to a different item. Shortening a link genuinely trades
+precision for quiet.
+
+### Why the 43 came out anyway
+
+Because the repository already made this choice, and the count settles it:
+
+    2024 bare shortcut links `[`Foo`]`   vs   408 explicit `[`Foo`](target)`
+    of the 408, 43 redundant -> 365 load-bearing
+
+Bare-by-default, explicit only where needed. The 43 are not a deliberate pinning convention; they
+are the accidental overlap where scope happens to make the target unnecessary. Allowing a lint
+across five crates to preserve 43 of 2432 links that carry exposure the other 2024 already carry
+is a disproportionate remedy.
+
+Two supporting facts, both measured rather than assumed. Every name in the bare set has exactly ONE
+definition in the workspace, so the collision-candidate reading - `MigrationBackend` at four sites,
+`SqlSession` at five - was counting link SITES, not definitions. The sole exception is `LiveSchema`
+(schema/diff.rs:224 and render/lower.rs:257), and `render/sql_preview.rs:252` already links it bare
+to the same item, so the explicit target at :19 protected nothing its own file did not already
+expose.
+
+Rendering is unchanged: the label is what renders, the target never appears. The pluralised
+`[`Advisory`]s` keeps the trailing `s` outside the link.
+
+### The dissent, and why it was not followed
+
+The two opinions split. One said fix the 43 and flip the gate; the other said keep them, allow the
+lint once in `[workspace.lints.rustdoc]`, and flip the gate anyway.
+
+The dissent's conclusion rested on "preserve the repository's explicit-target convention". That
+premise is false and was already measured: the convention is bare, 2024 to 408. The dissent never
+measured the ratio. Its other contributions stand and are recorded here - a duplicate import cannot
+silently retarget anything because Rust rejects the duplicate binding, so the retarget always
+requires REPLACING a binding, which matches what the experiment had to do; and its own third option,
+kind disambiguators (`struct@`, `trait@`), it argued against itself, since rustdoc does not
+normalise the disambiguator before comparing destinations and a later toolchain could start
+flagging them.
+
+### One correction to the lint list
+
+`rustdoc::unescaped_backticks` is default-`allow`, verified against the toolchain's own table, so
+`-D warnings` does NOT enable it; naming it would need `-W` and a fresh count. Seven rustdoc lints
+are default-`warn` and are now load-bearing: broken_intra_doc_links, private_intra_doc_links,
+bare_urls, invalid_html_tags, invalid_rust_codeblocks, invalid_codeblock_attributes,
+redundant_explicit_links. `-D warnings` additionally makes ordinary compiler warnings fatal during
+the doc build, including the workspace's `missing_debug_implementations`, so the gate is stronger
+than the seven alone.
+
+### Gates
+
+    doc 0, fmt 0, clippy 0
+
+43 added / 43 removed across 22 files, one line replaced per site. Non-ASCII checked at the
+CHARACTER level: the set on added lines equals the set on removed lines, so nothing new was
+introduced - the em dashes and arrows are pre-existing and remain #11's job.

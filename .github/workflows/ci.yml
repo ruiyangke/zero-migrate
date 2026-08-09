@@ -87,10 +87,21 @@ jobs:
       # a link an earlier commit message had claimed to fix. Nothing is published
       # from these crates - the release workflow ships the napi addon and the npm
       # packages - so this widens what the gate SEES without changing any artifact.
-      - name: cargo doc (no broken intra-doc links)
+      # `-D warnings` rather than the single broken-links lint, because the gate
+      # exited 0 while printing 43 warnings, and a gate whose output is ignored
+      # teaches contributors to ignore its output. The 43 were all
+      # `redundant_explicit_links`; they are fixed in the same commit, so this
+      # flag starts from zero rather than deferring a cleanup.
+      #
+      # Seven rustdoc lints are default-`warn` and so become load-bearing here:
+      # broken_intra_doc_links, private_intra_doc_links, bare_urls,
+      # invalid_html_tags, invalid_rust_codeblocks, invalid_codeblock_attributes,
+      # redundant_explicit_links. `unescaped_backticks` is default-`allow` and is
+      # NOT enabled by this flag - naming it would need `-W` and a fresh count.
+      - name: cargo doc (no rustdoc warnings)
         run: cargo doc --workspace --no-deps --document-private-items
         env:
-          RUSTDOCFLAGS: "-D rustdoc::broken_intra_doc_links"
+          RUSTDOCFLAGS: "-D warnings"
 
   # ---------------------------------------------------------------------------
   # node: build the JS packages, typecheck, and run the DB-free test suites.
