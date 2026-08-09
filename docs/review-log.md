@@ -8985,6 +8985,111 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F162 - the 26 authoring inputs are executed, and the corpus they claimed to produce was three weeks stale
+
+Closes #164. The ticket said 26 `.mig.js` are executed by nothing. VERIFIED BY ME BY READING, and the
+situation was worse than filed: `op_support_matrix.rs:90` iterates the fixture directory and
+`continue`s past every non-`.json` entry, and `golden-parity.test.ts` ALSO read only `.golden.json`
+while re-authoring 6 of the 26 stems inline in TypeScript. The one test that looked like it covered
+this compared a golden against hand-written test code.
+
+### The decision, and how the disagreement resolved
+
+Two independent read-only opinions. They agreed on: do not generalize `authorProjection()`; delete
+the 6 inline re-authorings; byte-identity IS achievable but ONLY through the real Rust resolver;
+the honest runner goes red on day one; pin the stem count explicitly.
+
+They split on placement. Codex wanted one gate in the addon's `__test__` directory behind a NEW
+narrow N-API `resolveIr` verb, arguing the addon is the only honest route to the real resolver.
+REJECTED on a fact I checked myself: `resolve_create_table_policy` is defined at
+`model/table_shape.rs:241`, re-exported at `lib.rs:198`, called by the addon's PRODUCTION lowering at
+`zero-migrate-node/src/lower.rs:266`, and already called directly by roughly twenty existing Rust
+integration tests with `support::confined_charter()`. The resolver is reachable from a plain Rust
+integration test, so no new shipped API was warranted. Codex itself named the two-stage design as the
+sound alternative.
+
+### What shipped
+
+Two halves joined by one committed intermediate, `op_fixtures/recorded.json` (one object keyed by
+stem, `{ name, ops }`):
+
+    packages/zero-migrate/tests/recorded-corpus.test.ts   executes all 26 .mig.js -> recorded.json
+    crates/zero-migrate/tests/op_fixture_goldens.rs       recorded.json -> real resolver -> golden
+
+Composed, that is `.mig.js` -> golden for all 26, with each half in the job that already has its
+toolchain and no CI change. There is deliberately NO re-bless environment variable in either half;
+`docs/review-log.md:2160` records why - an easy update affordance is what converts a corpus into a
+mirror of whatever the code emits today.
+
+### REPRODUCED BY ME, both halves, by restoring the corpus to HEAD
+
+Not by reverting a source file: the runners are new, so the honest control is to point them at the
+OLD data and confirm they catch it.
+
+    cargo test -p zero-migrate --test op_fixture_goldens        -> exit 101
+      left:  IrColumn { name: "id", ty: String { length: 255 }, ... }   (the resolver)
+      right: IrColumn { name: "id", ty: Text, ... }                      (the committed golden)
+
+    pnpm --filter zero-migrate test                             -> exit 1
+      not ok 187 - every .mig.js records the committed raw-author envelope
+
+The stem-list test passed in the same run, so the failure is the comparison, not the enumeration.
+
+### The corpus owed the code, in two independent ways
+
+VERIFIED BY ME: `git log -1 -- crates/zero-migrate/tests/op_fixtures/` is `6a3f2bc`, 2026-07-17.
+`23cc698`, 2026-07-21, "bound injected system columns", re-typed the policy inject token `text` to
+`ColType::String { length: 255 }` at `table_shape.rs:350` because MySQL cannot key an unbounded
+`TEXT`. Four days later the goldens still said `text`, and nothing could notice.
+
+The re-bless is EXACTLY 36 columns across 10 goldens and nothing else - MEASURED BY ME by
+uniq-counting the diff, which contains only `"type": "text"` becoming
+`{"string":{"length":255}}`. My own earlier grep found 12 files containing the token; both numbers
+are right for different questions, because two of those files carry the token on an author-declared
+column and have no `createTable` op at all.
+
+Second, three fixtures authored a bare `id` that today's resolver refuses outright
+(`table_shape.rs:283`; only the prefix/identity forms fold, `:491`). They now omit `id`, matching the
+convention `fluent_ddl.mig.js` already stated in its own header, and a new unit test
+`bare_author_id_without_a_prefix_or_identity_is_refused` pins `SystemColumnCollision` for the non-PK
+shape the existing sibling test did not cover.
+
+NO GOLDEN WAS DELETED, deliberately: `op_support_matrix.rs` pools ops from EVERY golden into one
+corpus and checks them against a frozen `EXPECTED_OPS` list, so deleting one could silently drop
+op-variant coverage. VERIFIED BY ME that nothing was lost: `ddl_create`'s op tags are identical
+before and after, no golden in the tree ever carried a `synth` default, and `genRandomUuid` is still
+exercised by `fluent_dml`.
+
+### Why the projection was deleted rather than generalized
+
+`authorProjection()` derived the expected column set FROM the recorder's output and then filtered the
+golden to that set, so a recorder that silently DROPPED a column could still pass. MEASURED BY THE
+IMPLEMENTING AGENT, not by me: deleting `avatar: t.bytes()` from the inline re-authoring left the old
+suite at exit 0 with 6/6 passing, and the new Half A fails that same edit. It was also a second
+implementation of policy living in a test file, under a header claiming it owned no duplicate policy.
+
+### The pins
+
+Both halves carry: a committed 26-name stem list rather than a glob; set equality in BOTH directions
+against the directory for the `.mig.js`, `.golden.json` and `recorded.json` key sets, with no
+`continue` branch; enumeration from the `.mig.js` rather than the output; a `compared == 26` counter;
+and per-stem non-emptiness plus an op-count check before any deep compare. The counter is the only
+pin that catches a loop enumerating 26 stems and asserting on none of them.
+
+### Gates, run by me on the restored tree
+
+`fmt` 0, `clippy --workspace --all-targets -D warnings` 0, `doc` 0, four-crate test set 0, node crate
+0, `pnpm --filter zero-migrate test` 0. Rust totals `targets=93 passed=2408` -> `targets=94
+passed=2411 failed=0 ignored=0`. JS 219 tests, 218 passed, 0 failed, 1 skipped - that skip is the
+pre-existing absent-platform-corpus one, not new. Zero `LIVE-DATABASE COVERAGE SKIPPED`.
+
+Non-ASCII on added lines: 0, and 0 in both new code files. `recorded.json` carries one non-ASCII
+line - an accented letter, a tab escape, an escaped quote and a supplementary-plane digit - which
+VERIFIED BY ME is a byte-for-byte transcription of
+deliberate supplementary-plane scalar coverage already committed in both `edge_scalars.mig.js` and
+its golden at HEAD. It is the test data, not prose, and blanking it would destroy what that fixture
+exists to cover.
+
 ## F161 - crash recovery refuses the `up`s it cannot prove it may re-run, and keeps the marker
 
 Closes #163, whose measurement is F160. The fix is at RECOVERY, not at the fresh-apply gate: an
