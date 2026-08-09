@@ -276,11 +276,17 @@ Current coverage is:
 | Table-shape injection | Applied during table creation resolution |
 | Required approval | Host-enforced; the host owns review and stored approval |
 | Database privilege requirement | Host-enforced through database provisioning |
-| Runtime timeout/index/rewrite rules | Declared and composable, but not applied to execution yet |
-| No-hard-delete obligation | Declared and composable, but not enforced yet |
+| Runtime timeout/index/rewrite rules | Declared only; a value above the default is refused at load |
+| No-hard-delete obligation | Declared only; a value above the default is refused at load |
 | Generic `[[validate]]` rules | Declared and queryable, but not automatically enforced yet |
 
 Do not rely on a declared-only rule as a production control.
+
+The declared-only rows are registered `DeclaredOnly` in the builtin registry, which
+means the engine does not implement the control. Such a knob may be stated at its
+default, where it advertises nothing, but a document that raises it is rejected at
+load rather than composed and sealed. A sealed policy therefore never claims one of
+these controls.
 
 Use policy together with:
 

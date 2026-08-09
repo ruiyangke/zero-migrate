@@ -8409,3 +8409,102 @@ file defines 18 test fns. The agent flagged the discrepancy rather than quietly 
     fmt 0, clippy 0, backfill_sqlite 18 passed / 0 failed
 
 Non-ASCII on added lines: none.
+
+## F135 - five controls claimed enforcement the engine does not implement
+
+Closes #145. The worst of the convention-sweep findings, because a sealed artifact could carry the
+false claim.
+
+### The defect
+
+Five knobs were registered `Enforcement::Enforced` while NOTHING reads them. Every `KEY_*` constant
+has zero references outside crates/zero-migrate-ir/src/policy_registry.rs:
+
+    runtime.lock_timeout_ms   runtime.statement_timeout_ms   runtime.index_creation
+    runtime.table_rewrite     safety.no_hard_delete
+
+`Enforcement::DeclaredOnly` exists and has a load gate - `reject_declared_only_nondefault`
+(document.rs:180) raising `LoadError::DeclaredOnlyNonDefault`, added by 04217a0. Because these five
+were labelled `Enforced`, that gate never fired, so an operator could author, compose and SEAL
+`safety.no_hard_delete = true` and hold a sealed policy advertising a control that does not exist.
+
+docs/policy.md:279-281 already said these were declared-only. The docs were honest; the TYPE was the
+thing that lied, and the type is what the gate reads.
+
+### The trap in the obvious fix
+
+DO NOT flip the constructors. `posture_grant` builds `runtime.index_creation` AND
+`safety.destructive_ops` (read at guard/mod.rs:368); `bool_require` builds `safety.no_hard_delete`
+AND `safety.require_rls` (read at guard/mod.rs:354). Only `uint_charter` is exclusive to the five.
+Demoting a shared constructor would have silently reclassified two LIVE controls - the same defect
+this work removes, reintroduced by its own fix.
+
+Fixed with a one-knob `declared_only(KnobDef) -> KnobDef` wrapper applied at exactly five adjacent
+registration sites: one mechanism to audit, and the five reclassifications land where a reviewer
+counts them.
+
+The guard test pins the WHOLE PARTITION, not just the five - `DeclaredOnly` equal to exactly those
+five, `HostEnforced` equal to exactly `{safety.require_approval}`, and `require_rls` /
+`destructive_ops` asserted `Enforced` by name. A later constructor flip cannot widen this silently,
+which is precisely how the original drift went unnoticed.
+
+### The seal question, and why b6f767d does not govern
+
+Reclassifying IS seal-affecting: `enforcement` is encoded into `canonical_encoding()`
+(knob.rs:284-286), which backs the registry digest, and knob.rs:420 asserts the variants encode
+differently, commented "(seal-affecting)". b6f767d declined a change for exactly this reason.
+
+It does not govern here, on three grounds:
+
+  - b6f767d turned on SILENT-vs-LOUD, not digest-vs-no-digest. Re-pointing that serde default would
+    have silently changed what existing documents MEAN; the digest change was the evidence of the
+    silent flip, not the objection itself. This change is loud: a charter setting one of the five
+    gets `DeclaredOnlyNonDefault` naming the exact key.
+  - b6f767d's change bought nothing - the two values were behaviourally identical under a pin. This
+    buys removal of a false safety claim.
+  - b6f767d had a cheaper alternative that avoided seal bytes and took it. Here every non-digest
+    option relocates the lie: refusing by key name puts engine content in a crate documented as
+    shipping "only the mechanism" and is bypassable by a downstream composing over
+    `builtin_registry()` directly; a doc-only change removes nothing, since docs/policy.md already
+    said the honest thing and did not stop the seal.
+
+The governing precedent is F16, not b6f767d: seals are in-memory. VERIFIED - `seal()` and
+`SealedPolicy::verify()` have zero non-test callers, and `SealedPolicy` has private fields with no
+`Serialize`, so a seal cannot cross a process boundary. The digest change is loud where it lands and
+lands nowhere in-repo. No version bump: document grammar, hash format and MAC payload are all
+unchanged.
+
+### Coverage genuinely lost, stated rather than absorbed
+
+`three_layers_meet_each_grant_down_the_stack` (layered_policy.rs) grants runtime.lock_timeout_ms
+across three layers and now fails at load. Its `safety.destructive_ops` chain is kept; the timeout
+layers are removed with a comment recording what went.
+
+BOTH builtin `UintCharter` knobs are among the five, so no `UintCharter` now meets through
+`effective_policy_from_charter_layers` - the engine's own front door - and that cannot be rebuilt
+from builtins. The residual gap is the front door, not the algebra: that entry point runs one
+composer for every knob kind and the OrderedEnum chain still exercises it, while compose_oracle.rs
+proves narrowing over a UintCharter more strongly against its own registry. Substituting a different
+knob kind was considered and rejected: it would restore DIFFERENT coverage while reading as if
+nothing had been lost.
+
+### RED, reproduced by me
+
+Mutated ONE knob back to `Enforced` - the wrapper stayed defined, every export intact, no revert:
+
+    a_charter_raising_a_declared_only_knob_is_refused_at_load ... FAILED
+    the_knobs_no_engine_path_reads_are_declared_only ... FAILED
+    no_knob_an_engine_path_reads_is_declared_only ... FAILED
+    a_charter_stating_a_declared_only_default_still_loads ... ok
+
+The positive control PASSING while three fail is what separates "refused the right thing" from
+"refused everything". The failure payload is the defect verbatim: a sealed-ready `RootCharter`
+carrying `safety.no_hard_delete = true`.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2317 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+2317 is exactly +4 on 2313 for the four tests added. Non-ASCII at character level: added set is
+`{⊑}`, identical to the removed set.
