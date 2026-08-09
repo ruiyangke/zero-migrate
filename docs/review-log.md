@@ -8985,6 +8985,86 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F147 - a lock the server granted and the client was told it never got
+
+Closes the remaining item on #152. The ceiling question that task was filed for was rejected; this is
+the defect that survived the reconciliation.
+
+### The race, and it is not theoretical
+
+PostgreSQL can GRANT a session advisory lock and still fail the acquiring statement. From
+`LockErrorCleanup()` in src/backend/storage/lmgr/proc.c: "Somebody kicked us off the lock queue
+already. Perhaps they granted us the lock", followed by
+`if (waitStatus == PROC_WAIT_STATUS_OK) GrantAwaitedLock();`. `pg_advisory_lock` acquires with
+sessionLock=true, so the grant is recorded against the SESSION and a transaction abort does not
+release it. Every acquire site was a bare `?` that returned the error and left the grant behind.
+
+I expected this to be unprovokable on a real server and said so when commissioning the work,
+authorising a seam-level fallback. That expectation was wrong. Timing a peer's release inside a 1ms
+band centred on the waiter's `statement_timeout` hits the window on live PostgreSQL 18.4 about 15% of
+the time - 584 hits in 4000 attempts - with `pg_advisory_lock` erroring 57014 while the same
+session's `pg_advisory_unlock` then returns `t`.
+
+### What shipped
+
+A private best-effort `drop_grant_from_failed_acquire` on three PostgreSQL error paths and no success
+path: the blocking acquire's exec error, and the try-lock's query error AND its bool-decode error.
+That second branch returned `ApplyError::Backend` without a `?`, so it needed its own arm rather than
+inheriting one.
+
+Safe unconditionally, measured before the work started rather than assumed: `pg_advisory_unlock` on a
+key the session never held returns `f` rather than erroring.
+
+PostgreSQL only, and the asymmetry is documented at both siblings rather than left to be discovered.
+MySQL's `GET_LOCK` failures are exactly the values that say the lock was NOT taken, and SQLite's is a
+local file try_lock.
+
+### The outer-hold interaction, checked rather than assumed
+
+This was the one thing worth fearing: advisory locks stack by depth (F143), so a compensating unlock
+fired when no grant happened would drop an OUTER bracket's hold. It cannot happen here because every
+acquire site is the outermost bracket for its session - each guarded by `LockMode::Acquire`,
+`owns_lock` or `we_hold_lock`, with inner sub-batches threaded `AlreadyHeld` and taking no lock of
+their own. That invariant is now written into the doc comment, so a future nested acquire has
+something to trip over instead of silently inheriting a release.
+
+### The test, and why its control arm is the important half
+
+The live test runs the race in two arms. The CONTROL arm issues the engine's own bare acquire with no
+compensation and must leak at least once or the test FAILS - a race proves nothing unless the run can
+show it hit the window. The ENGINE arm then runs the same race through the shipped path, and the
+verdict is a `pg_locks` read from a THIRD live session while the acquiring session is still open.
+
+Three shapes the server-side race cannot reach - a lost reply after a real grant - are covered by a
+driver-seam fault that runs the statement for real and only then corrupts the reply, so the grant,
+the session and the `pg_locks` assertion stay live and only the reason the reply was lost is
+synthetic.
+
+Reproduced independently by gating the compensation behind an env var rather than reverting a file:
+4 failed, 2 passed, `Tally { attempts: 200, failed: 57, leaked: 22 }` with the control arm needing 8
+attempts to show the window was reachable. The 2 that still passed are the positive controls, which
+is what makes the 4 failures mean the compensation and not collateral damage.
+
+fmt 0, clippy 0, doc 0; 86 targets / 2346 passed / 0 failed / 0 ignored (85/2340 before, +1 target
+and +6 tests), 0 live-database skip banners.
+
+### Known limits, stated rather than discovered later
+
+The race test's hit rate is machine-dependent. If a slower server cannot provoke the window, the
+control arm fails with a message saying exactly that - "the harness could not provoke the window
+here", not "the engine is broken". That is the right failure mode but it is a flake risk, and CI
+should be watched for it.
+
+One MySQL shape is deliberately uncovered: `GET_LOCK` returning 1 with a reply the client cannot
+decode would leave a held named lock, the same shape as the PostgreSQL decode branch that IS fixed.
+No shipped driver produces it, and this work was scoped to PostgreSQL.
+
+### Also from #152, and still open
+
+Observability (a contended-path diagnostic naming the holder) and de-duplicating the raw
+`pg_advisory_lock` SQL inlined at baseline.rs instead of going through the backend trait. Neither is
+urgent; both are recorded on the task.
+
 ## F146 - REJECTED as filed: resolve crosses two lock brackets with a key, not a decision
 
 Closes #157 without a code change. Filed during the #155 dual opinion as a TOCTOU: `resolve` reads
