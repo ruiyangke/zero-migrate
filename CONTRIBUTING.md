@@ -44,6 +44,49 @@ Native addon (only when you touch the `#[napi]` surface):
 cd crates/zero-migrate-node && pnpm build
 ```
 
+### Live databases
+
+Much of the Rust suite proves itself against a real server rather than a mock.
+Those tests are opt-in: with no DSN exported they return early, and an early
+return still counts as a pass. `cargo test` then prints the same passed count a
+genuine run prints.
+
+Bring the servers up with the compose file in the repo root:
+
+```
+docker compose -f docker-compose.test.yml up -d
+export ZERO_MIGRATE_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:5434/zero_migrate_test
+export ZERO_MIGRATE_MYSQL_URL=mysql://root:root@127.0.0.1:3306/zero_migrate_test
+docker compose -f docker-compose.test.yml down -v   # when you are done
+```
+
+Without a DSN each gated test binary prints a banner to stderr once:
+
+```
+==================== LIVE-DATABASE COVERAGE SKIPPED ====================
+```
+
+Read it as what it says: the passed count below it says nothing about live
+coverage. If you are changing anything that touches apply, drift, the fold's
+agreement with a real catalog, or a dialect's SQL, run with the DSNs exported -
+a green run without them has not exercised the code you changed.
+
+Set `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` to turn that skip into a failure. Use it
+whenever a run is supposed to have a database, so a missing DSN fails loudly
+instead of reporting coverage that never ran:
+
+```
+export ZERO_MIGRATE_REQUIRE_LIVE_DB=1
+```
+
+CI exports the DSNs, so a skipped live suite is a local trap rather than a hole
+in the pipeline. Note that `cargo test --workspace` cannot link (the addon
+crate needs the Node symbols), so run the engine crates directly:
+
+```
+cargo test -p zero-migrate -p zero-migrate-ir -p zero-migrate-guard -p zero-migrate-policy
+```
+
 The CLI package's host tests drive the real addon against live databases. Point
 them at your servers and build the addon first:
 
