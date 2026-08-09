@@ -8912,3 +8912,75 @@ checksummed identity.
 
 #152 - `acquire_project_lock` (postgres/session.rs:58) takes the blocking `pg_advisory_lock` before
 any per-migration timeout is installed, so no timeout fix here bounds the wait for the project lock.
+
+## F142 - refusing the timeout budget that means "no timeout"
+
+Closes #151. The fix F141 identified.
+
+### The rule
+
+A resolved `statement_timeout` / `lock_timeout` budget of `0` is refused rather than applied. Both
+engines spell "no limit" as zero, so a zero budget does not tighten the limit, it removes it, and the
+DDL waits indefinitely holding whatever it already took. `apply/timeout.rs` carries the rule and the
+argument; `ApplyError::IndefiniteTimeout` and `RollbackError::IndefiniteTimeout` surface it, naming
+which knob produced the zero - the migration's own override or the executor config.
+
+### Where it fires, and why not only at the loader
+
+At the point the effective value is resolved, in both backends' session renders, plus an IR load gate
+for early author feedback. The loader alone would not be a boundary: `validate_ir_plan_execution_metadata`
+has one call site inside `assemble_plan`, `Migration` and `MigrationFlags` are public serde structs
+with public fields so an embedder reaches `apply` with no loader involved, and a zero can arrive from
+config entirely - `conn.rs:383` is `Duration::as_millis`, and `Duration::from_micros(500).as_millis()`
+is 0. The IR gate says in its own doc that it is feedback and not the binding half.
+
+### What the implementation corrected in the brief
+
+The brief said four unfloored per-migration helpers. There are three - postgres `effective_timeout_ms`
+and `effective_lock_timeout_ms`, mysql `effective_timeout_ms`. Two further unfloored renders were
+found that the brief did not name, both config-only and both on the DML/backfill path where the
+`as_millis` truncation lands with no migration flag anywhere: postgres `dml_set_local_session_sql` and
+mysql `configure_data_session`. Both now take the migration version and run the same refusal.
+
+The brief also said to leave MySQL's `ms.div_ceil(1000).max(1)` floor alone. That was wrong and the
+instruction was overridden with a better argument. The refusal now runs BEFORE the rounding: a
+sub-second finite budget still floors to 1s exactly as before, but a zero is refused rather than
+rounded up. Leaving it would have meant one migration refused on PostgreSQL and silently running with
+a 1s budget on MySQL, and substituting a budget for a checksummed value is the clamp this rule exists
+to prevent.
+
+### Verified rather than accepted
+
+The RED was reproduced independently by adding a temporary env-gated early return inside
+`resolve_timeout_ms` - keeping the signature and every export intact rather than reverting a file,
+which can delete an export a new test imports and fail to compile, proving nothing. With the refusal
+disabled: `FAILED. 3 passed; 4 failed`, exit 101, failing in exactly the four defect cases (both
+overrides, the config truncation, the non-transactional path). The three still passing are the
+premise test and the positive controls, which is what makes the four failures evidence of the gap
+rather than of a broken harness. The gate was then removed and its absence confirmed.
+
+The new IR gate was checked to have a live call site (`model/load.rs:71`, inside `load_ir_document`
+between structural validation and ownership) before being believed - a declared gate nothing calls is
+the defect class this review has found repeatedly.
+
+fmt 0, clippy 0, doc 0; 84 targets / 2335 passed / 0 failed / 0 ignored across zero-migrate,
+zero-migrate-ir, zero-migrate-guard and zero-migrate-policy; 0 live-database skip banners.
+
+### The MySQL leg is not live-tested, and should not be read as if it were
+
+`ZERO_MIGRATE_MYSQL_URL` is read by no Rust code in this repository - the only mention is a comment
+saying the live MySQL end-to-end lives in the host CLI suite. The MySQL coverage here drives the real
+`MysqlBackend` through the existing recording seam, asserting the refusal fires before any byte
+reaches the driver and that a finite budget still reaches the session pin. That is real coverage of
+the refusal, and it is not a live server.
+
+`cargo test --workspace` still cannot pass, before this change as much as after: `zero-migrate-node`'s
+test binaries fail to link because the napi symbols exist only inside Node. Unrelated and
+pre-existing.
+
+### Left open
+
+#153 - the refusal fires per-migration at render time, so a batch applies the good migrations before
+refusing the bad one. Whether it should join the up-front gate family is an operator-visible contract
+change and wants its own decision. It would be an addition to the render-time check, not a
+replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
