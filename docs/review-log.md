@@ -8343,3 +8343,69 @@ which is the stronger one. Deleting code beats testing it.
 
 Count unchanged, which is what a change that adds no test should look like. Separability of F132 and
 F133 was MEASURED, not assumed - each was compiled alone with the other reverted, both exit 0.
+
+## F134 - the lock was real and the comment named the wrong global
+
+Closes #139. `crates/zero-migrate/tests/backfill_sqlite.rs` called the fault registry
+PROCESS-GLOBAL at :16-17 and :29-32 while the same file said `thread_local!` at :777-778, with
+`armed_fault_does_not_cross_thread_boundary` (:816) proving the latter. `fault.rs:59-61` settles it:
+the registry is a `thread_local!`, and `arm`'s own doc says CALLING THREAD ONLY.
+
+Same defect class fault.rs was corrected for under #117, now in the test file that work produced.
+
+### Splitting the fix from the question was the point
+
+The comment being wrong is NOT evidence the `serial()` lock is unnecessary. A lock can be
+load-bearing for a reason nobody wrote down, so the correction shipped as a comment fix and the lock
+went to measurement.
+
+The hypothesis I gave was that these compio tests might share an OS thread, which would make a
+`thread_local` shared between them. MEASURED and DISCONFIRMED: every one of the 18 tests got its own
+Rust `ThreadId` and its own OS tid, and a `#[compio::test]` body runs on the test's own thread, so
+`block_on` does not migrate the future. My hypothesis was wrong.
+
+### What the lock is actually for, measured by mutation
+
+Removing `let _g = serial();` from all 18 tests, reproduced by me:
+
+    test result: FAILED. 16 passed; 2 failed
+    failures:
+        armed_fault_claim_is_released_when_a_thread_exits_without_disarming
+        armed_fault_fires_when_armed_on_the_applying_thread
+    MUT_EXIT=101
+
+Deterministic, the same two tests every run, 12 runs by the agent and 1 by me.
+
+    assertion `left == right` failed: arming claimed a slot for this thread
+      left: 2, right: 1
+    assertion `left == right` failed: a fired one-shot fault releases the arming thread's claim
+      left: 2, right: 0
+
+The lock protects the COUNTER, not the registry. `fault::ARMED_THREADS` (fault.rs:35) is a
+process-global `AtomicUsize`, and six sites in these tests assert on `armed_thread_count()` in
+ABSOLUTE terms. Those readings hold only while no other thread in the process has a claim; the
+crash-fuzz test arms on its own thread, so an overlapping run makes the counter read two.
+
+So the original comment was wrong about the mechanism and right that something global needed
+protecting. It named the registry, which is isolated, instead of the counter, which is not. Both
+halves matter: correcting only the scoping claim would have left a lock with no recorded purpose,
+which is how the next person deletes it.
+
+### Left alone deliberately
+
+The lock and the `#![allow(clippy::await_holding_lock)]` both stay. 16 of the 18 tests pass without
+the lock, so the serialization buys them nothing measurable - but "16 green" is the weak evidence
+warned about up front, and narrowing the lock to the three counter-observing tests, or changing them
+to assert a delta rather than an absolute, is a larger change than this commit. The comment now
+records that option so it is a decision rather than a discovery.
+
+### A stale figure of mine, corrected
+
+I briefed the agent that this target's baseline was 66 passed. It is 18, before and after, and the
+file defines 18 test fns. The agent flagged the discrepancy rather than quietly adopting my number.
+
+### Gates
+
+    fmt 0, clippy 0, backfill_sqlite 18 passed / 0 failed
+
+Non-ASCII on added lines: none.
