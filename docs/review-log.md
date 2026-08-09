@@ -8508,3 +8508,78 @@ carrying `safety.no_hard_delete = true`.
 
 2317 is exactly +4 on 2313 for the four tests added. Non-ASCII at character level: added set is
 `{⊑}`, identical to the removed set.
+
+## F136 - the seal verifier trusted the caller for the value the MAC covers
+
+Closes #147 and #148. Two defects in one function, sharing a theme: `SealedPolicy::verify` promised
+guarantees it did not deliver.
+
+### The digest the MAC trusted came from the caller
+
+`verify()` took `expected_registry_digest` from the caller, compared it to `self.registry_digest`,
+and then passed THAT SAME CALLER VALUE into `mac_tag`. It never derived the digest from the `policy`
+it was handed. So a policy composed under a different registry verified clean whenever the canonical
+rule bytes matched, and the MAC could not catch it because the MAC was fed the caller's value too.
+
+`seal()` had derived it correctly all along (`policy.registry().digest()`), and
+`EffectivePolicy::registry()` is public - the mint path derived, the verify path did not, with no
+structural reason.
+
+The A/B pair was already in the repo. `requires_db_privilege` has exactly ONE reader workspace-wide,
+`KnobDef::canonical_encoding`; nothing in load or compose consults it. So the existing
+`registry_flipped_privilege()` fixture composes byte-identical sealed rule bytes under two different
+digests - precisely the substitution the missing check allows.
+
+### The correction that matters, and it inverts what I briefed
+
+I instructed that after the fix the DERIVED check would be the one with independent rejection power.
+That is backwards. Measured by deleting each check in turn:
+
+    delete the DERIVED check -> `policy_composed_under_another_registry_fails` still REJECTS,
+                                as Err(TagMismatch). The MAC subsumes it once policy_digest feeds
+                                the MAC. It buys a precise diagnostic, not a rejection.
+    delete the PIN check     -> `wrong_registry_digest_fails` returns Ok(()). An ACCEPT where there
+                                must be a reject: a self-consistent seal-A-over-policy-A bundle MACs
+                                correctly forever, and only an out-of-band pin refuses it.
+
+So deriving the digest does not merely preserve the parameter's usefulness - it CREATES it. Before
+the fix the parameter fed the MAC and could never disagree with it; after, it is the one check in
+`verify` that rejects something the MAC alone accepts. That is the strongest available answer to
+"why not just drop the parameter", and it is the opposite of the reasoning I started with. The
+implementing agent pushed back and documented the measured version rather than mine.
+
+### What the pre-checks were worth before this
+
+Deleting ALL FOUR pre-checks from the pristine `verify` gives 2310 passed / 4 failed, and every
+failure is `Err(TagMismatch)` where a precise variant was expected. ZERO accept/reject outcomes
+change. So no test in the suite distinguished "the binding is checked" from "the MAC happens to
+fail", and the doc's "HARD-FAILS on any mismatch" described four checks with no rejection power over
+the MAC alone. Corrected.
+
+### The constant-time claim
+
+`// Constant-time compare via the HMAC verify path.` sat above `if expected == self.tag`, an
+ordinary `[u8; 32]` comparison free to lower to a short-circuiting memcmp. The crate pulled in no
+constant-time comparator at all.
+
+No new dependency was needed: `mac_tag` already built a `Mac`, so it split into a `seal_mac` that
+returns the unfinalized MAC and a `mac_tag` that finalizes it for minting, with `verify` calling
+`verify_slice`. That resolves to `ct_eq` from `subtle` in digest-0.10.7 - checked, not assumed.
+
+Deleting the word "constant-time" was rejected as the fix: it would make the comment honest and
+leave a MAC compared with `==`, which is the weaker outcome.
+
+NO RED for this one, and none invented. A timing property is not testable at this level; saying so
+is better than a proxy test that would pass either way.
+
+### Gates
+
+    fmt 0, clippy 0, doc 0, workspace 83 targets / 2318 passed / 0 failed / 0 ignored,
+    0 live-database skip banners
+
+2318 is exactly +1 on 2317 for the single new test. Non-ASCII on added lines: none introduced.
+
+Both defects were latent - `verify` has no non-test caller and `SealedPolicy` cannot be serialised.
+They are worth fixing now because docs/policy.md already advertises sealing a policy that crosses a
+process or storage boundary, so the first serialisation work is also the moment the first real
+caller appears, reading a signature that offers `registry_digest()` as a same-typed argument.
