@@ -8985,6 +8985,111 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F150 - the diagnostics channel F148 refused to build, built where the events actually are
+
+Closes #156, the task F148 left carrying a dependency on #159. F148 declined to route these events
+through the CLI's typed `WARNING:` channel because the three sites it was filed for had nothing
+correct to carry. That verdict stands and is not revisited here. What changed is that #159 fixed the
+one site whose computation was wrong, so the remaining 43 `tracing::warn!` sites are now events worth
+delivering - each one a secondary failure the reply cannot carry, such as a release or a `RESET ROLE`
+that failed on the way out of a deploy that already has an error to return.
+
+VERIFIED BY ME: 43 `tracing::` call sites across 16 files under `crates/`, and every one of them is
+`warn!` - there is no `info!`, `debug!` or `trace!` anywhere in the tree. That is what makes a fixed
+filter honest rather than lossy.
+
+### Where the collector goes, and why not the obvious place
+
+`crates/zero-migrate-node/src/runtime.rs`, inside the closure `run_engine_blocking` runs on its
+spawned worker thread, wrapping the `futures::executor::block_on` call. Thread-scoped through
+`tracing::subscriber::with_default`, never `set_global_default`.
+
+The published package carries both `exports` and `bin`, so it is a library first, and a global
+install would mutate process-wide logging state for anyone who merely imports it. `with_default`
+does not propagate into threads spawned inside it, and upstream's own answer to that is to call it
+FROM the new thread - which is exactly where this sits, on the thread that runs every async verb
+(`applyIr`, `applyIrSqlite`, `resolvePending`, `statusIr`, `statusIrSqlite`, `status`, `history` all
+reach it through `run_verb`/`run_in_process_verb`).
+
+Default OFF, behind `ZERO_MIGRATE_LOG`. `RUST_LOG` is deliberately not read: it is a Rust-ecosystem
+name reaching an operator running a Node CLI, and it is set incidentally in environments that have
+nothing to do with migrations. STDERR is pinned explicitly with `.with_writer` because
+`tracing_subscriber::fmt()` defaults to STDOUT, and `lint`/`plan`/`status`/`history` each write one
+JSON document there that callers parse - a diagnostic on that stream is a corrupted reply, not a
+noisy one. ANSI only when stderr is a terminal.
+
+A fixed `Targets` filter rather than an `EnvFilter`: there is no directive string to parse, so the
+regex engine `env-filter` links in buys nothing. Measured by the implementing agent at +733 KiB for
+`EnvFilter` against +90 KiB for `Targets`; I did not re-measure the two builds myself. The root
+manifest's `tracing-subscriber` feature list also lost `env-filter`, `json` and `tracing-log`, which
+were declared and consumed by nobody - VERIFIED BY ME, the addon is the only consumer in the tree.
+
+### The proof it reaches the verbs, which is the whole risk
+
+The brief's stop clause was to measure whether a worker-scoped install actually reaches the verbs
+rather than assume it, because a subscriber that receives nothing would be the same defect this task
+exists to fix. The test provokes a real secondary failure end to end: a peer holds the project lock,
+`apply` parks inside `pg_advisory_lock`, and its backend is terminated from the holder's session.
+The acquire fails, and the compensating `pg_advisory_unlock` in `drop_grant_from_failed_acquire`
+fails too, because it runs on the connection that just died.
+
+REPRODUCED BY ME, both directions, with the collector disabled behind a temporary env gate and the
+addon rebuilt for the run:
+
+    the opted-in operator must see the cleanup failure the reply cannot carry
+    actual: |-
+      WARNING: --database-url contains an inline password; ...
+      zero-migrate: failed to acquire project lock: db error: terminating connection due to
+      administrator command
+
+and with it restored, the same run gains the line the operator asked for:
+
+    2026-08-09T13:29:21Z  WARN zero_migrate::apply::backend::postgres::session: zero-migrate: failed
+    to drop a possible advisory-lock grant after a failed project-lock acquisition error=db error:
+    Connection terminated unexpectedly
+
+The kill is deterministic rather than a race against a sleep: the test polls `pg_stat_activity` for
+`wait_event = 'advisory'` and terminates only once a backend is genuinely parked.
+
+### The blocking defect the test exposed, which contradicts the brief
+
+`packages/zero-migrate-cli/src/driver-pg.ts` never attached an `error` listener to the `pg.Client`.
+Node turns an unhandled `error` event into an uncaught exception, so a dropped backend killed the
+CLI with a raw stack trace BEFORE any engine cleanup or error reporting ran - which means the
+warnings this task exists to deliver were unreachable through the shipped CLI on exactly the failure
+they describe. REPRODUCED BY ME by gating the one-line listener off:
+
+    node:events:497
+          throw er; // Unhandled 'error' event
+    Error: Connection terminated unexpectedly
+        at Connection.<anonymous> (.../pg/lib/client.js:199:73)
+
+Nothing is swallowed by the listener: `pg` rejects the in-flight query with the same error and every
+later query fails "not queryable", so the engine still sees, reports and cleans up.
+
+### The one site deleted rather than delivered
+
+`backfill_sql.rs:2255` announced the operator's own approved `externalInvariant` cursor spec on every
+invocation. That is expected state, not a secondary failure, and the plan status manifest already
+carries it machine-readably as `cursorStabilityMode`/`cursorStabilityInvariant` BEFORE approval - the
+point where the decision is actually made. Relevelling it to `info!` would have been worse than
+deleting it: the filter is `warn`, so an `info!` reaches nobody, which is the exact defect being
+fixed. The other 43 sites are untouched.
+
+The two `schema/diff.rs` comments F148 shipped are updated, not reversed. They said "no tracing
+subscriber is installed anywhere in this workspace"; that clause is now false, so it is gone, while
+the operative reason those arms reach nobody - never compiled, behind the never-declared `introspect`
+feature - is preserved.
+
+### Correction to F148
+
+F148 recorded the site count as 46. The real figure is 44 before this change and 43 after, across 16
+files. My original grep counted comment mentions alongside call sites.
+
+fmt 0, clippy 0, doc 0; 86 targets / 2346 passed / 0 failed / 0 ignored in the core crates, identical
+to the previous commit; the addon crate 53 -> 54; the CLI host suite 122 -> 123; zero
+`LIVE-DATABASE COVERAGE SKIPPED` banners in any of the three.
+
 ## F149 - an orphan check that could not see its own universe
 
 Closes #159. The bug F148's verification turned up, fixed by moving the diagnosis rather than

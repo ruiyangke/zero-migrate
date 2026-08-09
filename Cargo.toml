@@ -66,7 +66,12 @@ hex = "0.4"
 
 # Logging / tracing facade (no runtime, no crypto).
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "env-filter", "fmt", "ansi", "json", "tracing-log"] }
+# Feature set trimmed to what the addon's diagnostics collector actually uses:
+# `fmt` + `ansi` for the human line format, and `registry` (pulled in by `fmt`) for
+# the fixed `Targets` filter. `env-filter`, `json` and `tracing-log` were declared
+# and consumed by nobody, and they are not free -- they pull a regex engine,
+# `tracing-serde` and the `log` bridge into a `.node` that ships to every install.
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "ansi"] }
 
 # Bounded MPMC queue — the migration actor's single-writer queue.
 flume = { version = "0.11", default-features = false, features = ["async"] }
