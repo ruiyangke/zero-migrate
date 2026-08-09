@@ -8984,3 +8984,61 @@ pre-existing.
 refusing the bad one. Whether it should join the up-front gate family is an operator-visible contract
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
+
+## F143 - a comment whose own parenthetical refutes its conclusion
+
+Closes #154. Comments only, no behaviour change.
+
+### The claim, and the measurement
+
+Two sites said that under `LockMode::AlreadyHeld`, re-acquiring the project advisory lock and
+releasing it would FREE the lock between sub-batches and let a concurrent deploy interleave:
+
+    apply/executor.rs:642-646
+    engine.rs:2162-2165   "never re-acquiring (which would pop a re-entrant level on release and
+                           free the lock between sub-batches)"
+
+Measured on live PostgreSQL 18.4 rather than reasoned about. Session advisory locks stack by depth:
+
+    SELECT pg_advisory_lock(424242);   -- outer
+    SELECT pg_advisory_lock(424242);   -- inner
+    SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=424242;  -> 1
+    SELECT pg_advisory_unlock(424242);
+    SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=424242;  -> 1   STILL HELD
+    SELECT pg_advisory_unlock(424242);
+    SELECT count(*) FROM pg_locks WHERE locktype='advisory' AND objid=424242;  -> 0
+
+A balanced re-acquire and release nested inside an outer hold leaves the outer hold intact. Nothing
+could interleave.
+
+### Why it survived review
+
+The sentence contains its own counter-example. "PG advisory locks are session-re-entrant, so a
+nested unlock would pop one level" is exactly right, and popping one level from a depth of two
+leaves one, which is still held. The parenthetical states the mechanism correctly and the main
+clause draws the opposite conclusion from it, so a reader checking the reasoning finds a true fact
+and moves on.
+
+### What changed, and what deliberately did not
+
+Both sites now say what actually excludes a concurrent deploy: the OUTER hold, acquired once by
+`apply_declarative`. The skip is described as what it is - one fewer round trip per sub-batch, and
+one fewer error path that could strand an unbalanced level - rather than as a correctness
+requirement.
+
+The code was not touched. Skipping re-acquisition is still the right shape; only its stated reason
+was wrong.
+
+A third nearby comment (`executor.rs:66-73`) was left alone after checking it, and the distinction
+is the point. It says the outer acquires once and the lock is "never freed between sub-batches
+(where a second deploy could otherwise interleave)". That is TRUE: it describes the alternative
+where no outer hold exists, in which each sub-batch's own acquire/release really would drop the
+depth to zero between batches. Only the claims about a NESTED acquire/release freeing the lock were
+false.
+
+The repeat at `engine.rs` was found by grepping the claim rather than the file that raised it - the
+same wrong justification copied to a second site is the recurring shape this review keeps hitting,
+and editing only the site that surfaced would have left the tree stating both versions.
+
+fmt 0, clippy 0, doc 0; 84 targets / 2335 passed / 0 failed / 0 ignored, unchanged from the previous
+commit, which is what a comment-only change should produce.
