@@ -9026,6 +9026,37 @@ So the readers do not share an answer, and the writer list alone cannot produce 
 next step is to enumerate readers and decide per reader whether it wants current or pre-envelope
 state. Recorded as unmeasured rather than guessed.
 
+### The reader half has one actionable instance, found the same way
+
+Walking the readers rather than grepping for them turned up a concrete refusal. `Op::SetColumnDefault`
+resolves a container or JSON default's rendering from the column's live data type:
+
+```rust
+live_schema.table_snapshots.get(table)
+    .and_then(|snap| snap.columns.iter().find(|c| c.name == *column))
+    .map(|col| col.data_type.as_str())
+    .ok_or(IrLowerError::UnsupportedOp(
+        "setColumnDefault container defaults need live column type"))?
+```
+
+`AddColumn` never writes `table_snapshots`, and `CreateTable` writes only `tables`. So two ordinary
+authoring shapes hit that `ok_or`:
+
+```text
+addColumn(t, c, ty)  then setColumnDefault(t, c, container)   snapshot has the table, not the column
+createTable(t, ..)   then setColumnDefault(t, c, container)   snapshot has neither
+```
+
+Both are correct migrations refused at lower. NOT YET REPRODUCED - this is a reading, and the RED
+that captures the exact error text comes before any fix.
+
+The fix is not the obvious one. "Keep `table_snapshots` current" would insert a column into the
+snapshot's `columns` without regenerating `stored_create_sql`, which is precisely the disagreement
+F180 was filed for: the SQLite rebuild's `CREATE` and its value-copy list moving apart. The narrow
+alternative is an envelope-local map of columns declared so far, consulted only when the snapshot
+lacks the column, touching no shared state and unreachable from the rename leg. That adds state to
+the lowering loop, so it wants a second opinion before it is built.
+
 ### The method note is worth more than the measurement
 
 I got a wrong picture three times inside this one investigation, each from a name-shaped search, one
