@@ -9019,11 +9019,34 @@ it while dependents exist. `CREATE EXTENSION` restores what `DROP EXTENSION` rem
 `ExtensionSnapshot` (snapshot.rs:1198) carries the one thing the create needs - `schema` - and
 derives `PartialEq` over it. That one really is cheap.
 
-INFERRED, NOT VERIFIED: I am reading PostgreSQL's RESTRICT/CASCADE semantics from the op shapes and
-from what the DDL means, not from a live experiment in this repo. Before shipping the schema arm,
-prove the cascade case on the live server: author a `dropSchema` with `cascade: true` over a schema
-holding a table, roll it back, and confirm the table does NOT come back. That measurement is what
-should justify the refusal, not this paragraph.
+NOW MEASURED, on the PostgreSQL 18.4 the gate runs against. The paragraph above was originally
+recorded as inference; it has since been proven rather than reasoned, and the numbers are the point.
+
+Both halves hold. RESTRICT really does refuse a non-empty schema, so it cannot silently destroy
+anything:
+
+    postgres=# DROP SCHEMA cascade_probe;
+    ERROR:  cannot drop schema cascade_probe because other objects depend on it
+    DETAIL:  table cascade_probe.keepme depends on schema cascade_probe
+    HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+
+And CASCADE really does make `CREATE SCHEMA` a lying inverse. Against a schema holding one table
+with one row:
+
+    postgres=# DROP SCHEMA cascade_probe CASCADE;
+    NOTICE:  drop cascades to table cascade_probe.keepme
+    DROP SCHEMA
+    postgres=# CREATE SCHEMA cascade_probe;
+    CREATE SCHEMA
+    postgres=# SELECT count(*) FROM pg_tables WHERE schemaname='cascade_probe';
+    0
+    postgres=# SELECT * FROM cascade_probe.keepme;
+    ERROR:  relation "cascade_probe.keepme" does not exist
+
+The re-create SUCCEEDS. Nothing errors, nothing warns, and the schema is there - empty. A rollback
+built on it would journal a clean success over a table and a row that are permanently gone. That is
+the whole argument for the third refusal, and it is now a measurement rather than a claim about
+what the DDL ought to mean.
 
 ### The vendor renderer's second caller constrains how the inverse gets threaded
 
