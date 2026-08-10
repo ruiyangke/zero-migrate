@@ -8985,6 +8985,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F204 - the rollback takes the lock, and the security model had started denying its own fix
+
+Two follow-ons to F203, and the second is a defect I introduced myself the same day.
+
+### The lock
+
+`rollback` shipped without taking the project advisory lock, documented as such rather than implied
+safe. It now mirrors `apply`: `rollback` acquires, `rollback_with_lock` accepts an outer holder, and
+the lock is released on the acquire path even when the unwind fails, with the rollback error
+surfaced ahead of any unlock error - the caller needs the reason the `down` failed, not the reason
+the unlock did.
+
+Verified: fmt 0, clippy 0, `cargo test -p zero-migrate` 88 targets, 2134 passed, 0 failed, zero skip
+banners. Scoped to that crate deliberately: `zero-migrate-ir`, `-guard` and `-policy` are its
+DEPENDENCIES, not dependents, so a change inside `executor.rs` cannot reach them. The arithmetic
+agrees - 2439 minus 2134 is 305 across the 13 remaining targets, unchanged.
+
+What that does NOT show, stated in the commit as well: the six rollback arms passing prove the
+acquire/release path works, not that it EXCLUDES a competitor. That needs a concurrent attempt
+racing a rollback, which is unwritten.
+
+`rollback` also gained a parameter the day it was exported. Defensible only because nothing outside
+this repo consumes it - there is still no CLI verb and no addon verb.
+
+### The doc that started lying because the code got better
+
+`docs/security-model.md:320` said:
+
+    Low-level Rust down operations do not provide complete selection, approval, guard, or state
+    validation.
+
+True while the only reachable rollback was the backend leaf. False the moment F203 landed, because
+`rollback` provides all four. In a SECURITY document that is the harm shape of #98: it tells a
+careful reader the safe path does not exist, so they hand-roll a loop over
+`rollback_one_transactional` and get none of the gating.
+
+Corrected to name what `rollback` enforces and to say plainly that driving the leaf per migration
+does none of it. The roll-forward guidance stayed, with the reason it survives a working rollback
+added: a rollback that runs correctly still cannot return data a `down` dropped.
+
+### The sweep I did not do
+
+Five doc sites say some version of "no public rollback". The reflex was to fix all five. Reading them
+individually showed FOUR were still accurate: `operations.md`, `concepts.md` and `architecture.md`
+say no rollback COMMAND, which is true because there is no CLI verb, and `node-api.md` says no
+rollback FUNCTION across the addon boundary, also true because there is no addon verb. Only
+`security-model.md` had become wrong.
+
+A sweep would have introduced four false claims while fixing one. This log is full of findings about
+text that stopped matching its code; the same failure runs in reverse when a correction is applied
+wider than the thing that actually changed.
+
 ## F203 - the rollback orchestrator now ships, and Q4 is answered by building rather than deleting
 
 Q4 was raised on 2026-08-06 and sat unanswered for four days: the rollback API was exported with no
