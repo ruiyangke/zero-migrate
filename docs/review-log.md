@@ -8990,6 +8990,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F230 - #23's premise is wrong about where the inverse comes from, and the live catalog is the one source that cannot supply it
+
+#23 says the eight `down: None` ops are "fully recoverable from the live catalog the lowerer
+already introspects". Measured, that is false in both halves, and the correction changes which
+mechanism the work should use.
+
+THE LOWERER'S LIVE CATALOG DOES NOT CARRY THESE OBJECTS. `LiveSchema` (lower.rs:257) has exactly
+seven fields - `tables`, `unique_indexes`, `table_snapshots`, `sqlite_schemas`, `table_ownership`,
+`partitions`, `logical_columns`. No views, triggers, functions, policies, schemas, extensions or
+sequences. `pg_get_viewdef` does exist in this repo, but only at `apply/drift.rs:741`, on the
+drift path, not on the lowering path.
+
+THE TICKET'S LINE NUMBERS HAVE ROTTED. `lower.rs:7665` is not `DropView` (it is index planning),
+`:7954` is a `CommentTarget` arm, `:7449`/`:7466` are capability helpers. The real sites are
+`Op::DropView` at lower.rs:8059-8082, `Op::DropTrigger` at ~:8370, `Op::DropSequence` at ~:7882.
+Each has a Create sibling that DOES synthesise a down (`DROP SEQUENCE`, `DROP TRIGGER IF EXISTS`,
+`{drop_kw} IF EXISTS`), which is what makes the asymmetry look like an oversight rather than a
+decision.
+
+WHERE THE INVERSE ACTUALLY LIVES. `Op::DropView` carries only name/schema/existence_guard/
+materialized (ir.rs:3318) - no definition. But `Op::CreateView` carries `query: ViewQuery`
+(ir.rs:3309) and renders it through `render_view_query` (lower.rs:8037). The fold already walks
+both ops and keeps a `BTreeMap<String, ViewSnapshot>` (fold.rs:991, 2292-2317) - it simply
+DISCARDS the body, storing `definition: None` (fold.rs:2306) into a field documented "Diagnostic
+metadata for now" (snapshot.rs:949) whose `PartialEq` deliberately ignores it (snapshot.rs:954-958).
+So the migration history holds every byte the `CREATE VIEW` needs; nothing reads it back.
+
+DECISION - synthesise from the IR history, not the live catalog. The deciding evidence is that
+lowering runs with NO database at all on the preview path: `sql_preview.rs:407` and `:1215` both
+lower against `LiveSchema::default()`. A live-derived down would therefore be present under
+`apply` and absent under `plan --sql`, so the previewed SQL would not be the SQL apply runs. That
+is exactly the defect class #74 already fixed. It would also make the artifact
+environment-dependent: two machines lowering the same source would embed different downs and
+check-sum differently.
+
+Neither option is free on threading - `render_view_op(op, eff_schema, dialect, scope)` (lower.rs:8017)
+and `lower_view_op(&self, op, eff_schema, decl, confinement)` (lower.rs:5705) receive neither the
+live schema nor fold state. But the sibling `lower_dml_op` already takes `live_schema: &LiveSchema`
+(lower.rs:5751), so threading per-op context is the established shape here.
+
+THE ADOPTED-VIEW CASE keeps today's behaviour deliberately. When the view was created outside the
+history the fold has no body, and the correct down is still `None`: `has_down()` (step.rs:248)
+returns false and the rollback planner refuses the migration. That is the engine's existing way of
+saying "no inverse", and it should be reused rather than replaced with a guess.
+
+RED, reproduced end to end against a real database rather than at the lowering boundary. A new
+suite creates `users` + a structured `active_users` view, applies through `load_ir_document` +
+`lower_plan` + `MigrationEngine::apply_plan` onto a temp-file SQLite backend, asserts the view is
+present in `sqlite_master`, applies a `dropView`, asserts it is gone, then rolls back one step:
+
+    rolling back the dropped view must succeed:
+      Irreversible { version: "mig_7n42DGM5PLfASyCbyYbm7t", name: "drop_view_active_users" }
+
+Every assertion reads `sqlite_master`, not the plan the engine intended to run. The failure is the
+planner refusing the step, which is the honest RED for this defect.
+
+NOT COMMITTED, and deliberately so: the suite is red until the synthesis lands, so it is held at
+`<scratchpad>/drop_view_rollback_sqlite.rs` and ships in the same commit as the fix. It needs
+`#[compio::test]` (not tokio), `SqliteDescriptorGuard::new()` for the guard argument, and the
+`sqlite_master` cell type is `Option<String>` - all three cost a compile cycle to discover.
+
+STILL OPEN: the PG arm of the same proof, and a second opinion from `codex exec` that had not
+returned when this was written. The decision above rests on evidence I verified myself
+(`sql_preview.rs:407`, `:1215`), not on that opinion.
+
 ## F229 - the SQLite lock sidecar needs no downstream notice, and the pin I believed appbase was on was wrong
 
 `cb1bcb59` (hexcafe, "fix(sqlite): take the project lock on a sidecar, not the database file")
