@@ -8985,6 +8985,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F178 - #87 shipped, and the gate I first wrote was too wide by two ops
+
+F177 decided "refuse on MySQL". Implementing it showed that decision was right for THREE of the five
+alter-column ops and wrong for the other two. The split is the result.
+
+### REFUSED: setColumnType, setColumnNotNull, dropColumnNotNull
+
+MySQL does these with `MODIFY COLUMN`, which requires the COMPLETE column specification restated and
+silently DISCARDS every facet omitted. `Op::SetColumnType` builds its snapshot with
+`add_column_snapshot(.., None, None, None, None, None, None, None)` - "a one-field descriptor" in its
+own comment - so rendering `MODIFY COLUMN` from it would take an authored `setColumnType` and quietly
+drop that column's default, NOT NULL, charset and comment. Today's failure is a server-side syntax
+error that loses nothing. Refusing keeps it loud.
+
+### CORRECTED, not refused: setColumnDefault, dropColumnDefault
+
+My first gate covered all five, and the addon crate's suite caught it: two tests that use
+`setColumnDefault` on MySQL as ordinary fixture material started failing. Those tests were right and
+the gate was wrong.
+
+MEASURED BY ME on the live container (MySQL 8.4.11), which is what settled it:
+
+    CREATE TABLE zm87.t (c VARCHAR(64) NOT NULL DEFAULT 'old');
+    ALTER TABLE zm87.t ALTER COLUMN `c` SET DEFAULT 'new';   -> accepted, COLUMN_DEFAULT = new
+    ALTER TABLE zm87.t ALTER COLUMN `c` DROP DEFAULT;        -> accepted, COLUMN_DEFAULT NULL
+
+MySQL spells `SET DEFAULT` / `DROP DEFAULT` exactly the way PostgreSQL does. Unlike a type change,
+they do not need the column restated, so nothing can be silently dropped. The ONLY thing wrong was
+the identifier quoting. Refusing them would have removed a capability the database has - the failure
+mode that has already reversed several fixes in this review - so they now render through
+`alter_column_refs`, which follows `render_add_fk`'s existing per-dialect shape.
+
+That is the second time in two entries that the interesting content was a scope correction rather
+than the fix: F176's exemptions, and now this. Deciding "refuse" at the ticket level was not the same
+as knowing WHICH ops to refuse, and only building it surfaced the difference.
+
+### One ordering subtlety, found by a failing test
+
+`setColumnType` to an `enum`/`domain` on MySQL has TWO reasons to fail. The blanket gate ran first
+and replaced `NamedTypeUnsupported` with the alter-column refusal, breaking
+`mysql_named_type_reference_outside_inline_create_add_fails_closed` (`tests/enums_domains.rs:351`).
+The named-type error is the better answer - that type cannot exist on MySQL at all, so it is not
+fixable by hand-authoring the SQL, whereas an alter-column change is - so the MySQL check was split
+out as `refuse_mysql_alter_column` and moved BELOW the named-type dispatch. The other two refusing
+ops keep the combined `require_alter_column_rendering`.
+
+### Why the capability was left alone
+
+`Capability::NativeAlterColumn` still answers `true` for MySQL. Its readers are the five lower gates
+plus `model/support_matrix.rs:31`, which is user-facing: publishing "MySQL: no native alter column"
+to describe OUR renderer gap would be a false statement about MySQL.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. Workspace 100 targets / 2427 passed / 0 failed / 0 ignored (2425 -> 2427).
+Addon crate 4 targets / 54 passed - the two `setColumnDefault` tests pass again, which is the
+evidence the narrowing was right rather than merely convenient. Host suite 124 / 124 / 0 skipped with
+the addon rebuilt. JS gates green. Zero `LIVE-DATABASE COVERAGE SKIPPED` banners.
+
 ## F177 - #87 decided: refuse on MySQL. The second opinion overturned my leaning and my reachability claim
 
 Decision made, not yet implemented. Recorded now because it is settled and because it corrects two
