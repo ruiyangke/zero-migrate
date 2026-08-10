@@ -317,9 +317,19 @@ See
 [Interrupted MySQL or non-transactional work](operations.md#interrupted-mysql-or-non-transactional-work)
 for the checklist and the exact statement.
 
-There is no public high-level rollback workflow. Low-level Rust down operations
-do not provide complete selection, approval, guard, or state validation. Prefer
-a forward migration and keep tested backups.
+There is no rollback command in the CLI and no rollback function across the Node
+addon boundary. The Rust API does provide one: `zero_migrate::rollback` selects
+and gates the whole unwind before any `down` runs - approval, target resolution,
+checksum agreement, reversibility, the guard over the `down` SQL, dependency
+coherence and reverse-topological order - and holds the project advisory lock
+throughout.
+
+Driving `MigrationBackend::rollback_one_transactional` per migration instead does
+NONE of that. It is the leaf `rollback` calls, not a substitute for it: it runs
+one `down`, journals it, and enforces no ordering and no refusals.
+
+Prefer a forward migration and keep tested backups regardless. A rollback that
+runs correctly still cannot return data a `down` dropped.
 
 ## Current JavaScript boundaries
 
