@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F250 - the second attempt worked because the first one ran
+
+Shipped 5387396c, closing the DropView half of #188.
+
+The rollback verb refused every inverse the engine can synthesise. It lowered through the apply
+entry, whose projection advances the schema by the ops still PENDING - correct when the catalog
+has not caught up, and empty at rollback time, so a `dropView` lowered against a database where
+the view was already gone.
+
+Attempt 1 folded the executed history ONTO the live catalog. It compiled cleanly on the first try
+and failed three tests, two of which had been passing:
+
+    failed to rebuild the applied schema after envelope "create_notes":
+      fold: table `notes` already exists
+
+The base handed to this verb IS the live catalog, already post-history, so replaying the history
+over it double-applies. The apply entry never hits this because its base and its fold set are
+disjoint by construction. I reverted rather than patched: two regressed tests are evidence the
+model is wrong, not that the code needs another round.
+
+Attempt 2 replays the history from an EMPTY snapshot into a separate reconstruction and lends the
+live schema only the object DEFINITIONS - views, sequences, extensions, schemas - leaving the
+catalog authoritative for tables. That is what this ticket had meant all along by "recover inverse
+state"; attempt 1 read the same phrase as a full catalog reconstruction.
+
+What made attempt 2 quick was that attempt 1 had run. The failure named the exact wrong
+assumption, and the fix was one changed fold target plus a merge - the loop shape, the ordering
+and both hazard predicates came back unchanged from the reverted branch. Reading harder would not
+have produced that: I had read the pending projection three times across three sessions and
+called the model settled each time.
+
+The green was then checked rather than believed. Disabling the merge behind a temporary env gate
+failed EXACTLY the view test and left the other three passing, so the new code is load-bearing and
+precisely targeted rather than incidentally green.
+
+Two guards worth keeping in view. A contributor must match its own checksum in a completed
+journal entry of kind `apply`, because `plan_rollback` checksum-checks only the versions it
+SELECTS - an earlier createView is never re-checked there, so editing it would change the
+synthesised CREATE VIEW while the selected dropView checksum stayed put. And a contributor that
+could have been skipped contributes nothing, which cannot be spelled `existence_guard().is_some()`
+because that returns `None` for every vendor CREATE.
+
 ## F249 - the gate failed on its own documentation, and it was right
 
 Shipped a76baae1.
