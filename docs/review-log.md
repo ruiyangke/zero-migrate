@@ -8985,6 +8985,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F190 - #153 reconciled: the ticket's scoping reason is backwards, and the split found a hole in #151
+
+#153 says explicitly it "needs the dual opinion before implementing - it changes when a deploy fails,
+which is an operator-visible contract". Ran it. Both premises it flagged survive, its scoping REASON
+does not, and the second instrument found a defect neither the ticket nor I was looking for.
+
+### Its two unverified premises hold
+
+VERIFIED BY ME. `apply_with_lock_backend` (`apply/executor.rs:661-669`) takes `migrations: &[Migration]`
+- the whole batch. Its approval gate (`:676-679`) is `migrations.iter().any(|m| m.flags.destructive
+|| m.flags.requires_approval)`, commented "BEFORE doing anything (not even the lock)". So it is a real
+up-front, whole-batch precedent of exactly the shape an added check would take.
+
+### Its scoping reason is backwards
+
+The ticket: "the DML/backfill session renders resolve budgets that no per-migration pre-scan covers.
+So an up-front gate would be an ADDITION to the render-time refusal, not a replacement for it."
+
+Those budgets have NO per-migration component at all, which makes them MORE pre-scannable, not less.
+Both dialects say so in their own docs:
+
+  - `postgres/session.rs:405-409` - "A DML step carries no per-migration override slot, so both
+    budgets come from the executor config", and the call passes `None` plus `cfg.statement_timeout_ms()`.
+  - `mysql/session.rs` `configure_data_session` - "DML/backfill steps do not carry per-migration
+    timeout overrides, so they use" the config defaults, same `None` + `cfg.*` shape.
+
+So an up-front gate can be COMPLETE rather than partial:
+
+    per migration m:  m.flags.timeout_ms.unwrap_or(cfg.statement_timeout_ms()) == 0      -> refuse
+                      m.flags.lock_timeout_ms.unwrap_or(cfg.lock_timeout_ms()) == 0      -> refuse
+    independently:    cfg.statement_timeout_ms() == 0 or cfg.lock_timeout_ms() == 0      -> refuse
+
+The config arm is needed on its own: a migration with a finite override masks a zero config for ITS
+DDL session, while the DML session still reads the zero.
+
+The ticket's CONCLUSION - addition, not replacement - stands, on a different reason. The render-time
+check is defense in depth at the resolution point, the same rationale the approval gate carries
+("so a direct caller cannot bypass it"), and embedders reach session renders directly. Third time this
+session a conclusion outlived its stated reason.
+
+### What the second instrument found
+
+The codex pass reported, and I VERIFIED BY READING
+`postgres/backfill_sql.rs:1748-1758`: `batch_session_sql` interpolates `cfg.statement_timeout_ms()`
+and `cfg.lock_timeout_ms()` straight into `SET LOCAL statement_timeout = {}` / `lock_timeout = {}`. It
+never calls `resolve_timeout_ms`, so #151's refusal does not run there at all. With the `as_millis()`
+truncation at `conn.rs:385`, a sub-millisecond config becomes `= 0`, which PostgreSQL reads as NO
+LIMIT - the exact defect #151 exists to prevent. Its MySQL counterpart routes through
+`configure_data_session` and IS covered, which is the asymmetry that gives it away.
+
+Filed as #171. Not folded into #153: it is a missing call at a leaf, not a question about when a
+batch fails, and merging them would bury a concrete defect inside a design decision.
+
+### Also worth carrying into the implementation
+
+The rich-plan path does NOT hand `apply_with_lock_backend` the whole plan - it coalesces each maximal
+consecutive DDL run into `batch: Vec<Migration>` (`engine.rs:2239-2318`), so a check placed only there
+still lets earlier batches apply. The whole-plan gate is `preflight_plan_approval(steps: &[PlanStep],
+...)` (`engine.rs:2746-2753`). REPORTED by codex; I have NOT read those two sites yet, and they decide
+whether the fix needs one insertion point or two. Verify before building.
+
+Nothing implemented.
+
 ## F189 - #152 item 3 does not do what it claims: the subscriber it depends on is opt-in by design
 
 Item 3 is the last open one on #152: "Observability instead of a timeout: `SET log_lock_waits = on`,
