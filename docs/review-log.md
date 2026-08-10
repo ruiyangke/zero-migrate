@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F245 - the comment warning about hand-copied lists was two files away from one
+
+Shipped 54493b1b, closing #189.
+
+I rebuilt the addon for an unrelated reason and its own JS gate went red:
+
+    mysql journal: required identity column
+    schema_migrations_rollback_inflight.version is missing after bootstrap
+
+`ensure_binary_identity_columns` (journal_sql.rs:311) asks `information_schema.COLUMNS` for the
+ten pairs in `BINARY_IDENTITY_COLUMNS` and refuses the bootstrap if any is absent. The canned
+host driver in `__test__/mock_apply.mjs` answered from a hand-written list of eight - it never
+learned the two `schema_migrations_rollback_inflight` rows added when the rollback marker landed.
+
+The Rust const carries this comment, at journal_sql.rs:295-297:
+
+    Shared with the test that asserts the repair rather than mirrored into it: a
+    hand-copied second list is a list that silently stops covering a table somebody
+    adds here, which is how the rollback marker's own column nearly shipped unchecked.
+
+The author saw the failure mode exactly, and closed it on the Rust side by sharing the const.
+The JS mock is the hand-copied second list that comment describes, in a language the sharing
+could not reach. Sharing a constant fixes the mirrors that can import it and silently leaves the
+ones that cannot.
+
+Two things kept it quiet. The compiled `.node` is gitignored (`crates/zero-migrate-node/.gitignore:4`),
+so every checkout tests whatever binary that machine last built, and mine was weeks old: against
+a stale binary the gate passed. And the four gates are `&&`-chained in package.json:57, so
+`mock_apply` failing meant the three after it never ran - the suite reported one failure while
+silently not running three quarters of itself. CI builds fresh first (ci.yml:192, then :215), so
+CI was seeing the real answer and my machine was not.
+
+The fix reads the pairs out of the probe SQL instead of restating them, so the mock answers
+whatever the engine asks and cannot fall behind. Codex independently picked the same shape and
+added the part I had already written but should say out loud: parse fail-closed. Mutating the
+regex so nothing matches gives
+
+    FAIL: the identity-column probe was recognised but no (table, column) pair parsed out of it
+
+before the engine's own error, which is the point - the mock now reports its own defect rather
+than letting it surface as an engine complaint about a column that is genuinely fine.
+
+What I did NOT do: guess. The error had two candidate causes wanting opposite fixes - a stale
+fixture, or a bootstrap that really does not create the column, which would have meant no MySQL
+deploy can bootstrap. I read the probe and the mock before touching either. Applying the fixture
+fix to the engine bug would have buried the engine bug under a green suite, which is the same
+move that hid this one.
+
 ## F244 - the fix for a bad error message was to stop pretending we could fix it
 
 Shipped 48fd8a3b, closing #93 as option (a).
