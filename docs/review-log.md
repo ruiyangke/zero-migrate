@@ -8985,6 +8985,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F205 - shipping the rollback driver turned a dormant synthesis bug into live data loss
+
+`render/vendor.rs` built `Op::CreateSchema` with a conditional up and an unconditional down:
+
+    up:   "CREATE SCHEMA " + (if if_not_exists { "IF NOT EXISTS " }) + qid(name)
+    down: Some("DROP SCHEMA IF EXISTS " + qid(name))
+
+So a migration authored with `ifNotExists: true` against a schema that already exists applies as a
+no-op - it creates nothing - and its down drops that schema and everything in it. The guard that
+makes the up safe is exactly what makes the down destructive. `Op::CreateExtension` had the identical
+shape, which I confirmed rather than assumed after flagging it as unchecked.
+
+### Why it was worth doing now rather than in queue order
+
+This was filed as #28 and sat behind other work while it was harmless: until F203 nothing consumed a
+`RollbackPlan`, so no synthesised down ever ran. `zero_migrate::rollback` now executes them, proven
+end to end on SQLite and live PostgreSQL. The defect went from latent to reachable in the same
+session, by my own change.
+
+That is the general lesson worth keeping: making a dormant path reachable promotes every latent bug
+on that path at once. The right move after landing an orchestrator is to re-triage what it now
+executes, not to resume the queue where it left off.
+
+### The fix declines to guess
+
+A guarded create now carries `down: None`. The engine cannot know whether the up created anything -
+that depends on live state at apply time, which the synthesiser does not have and the journal does
+not record. `plan_rollback` already refuses `down: None` as irreversible and already carries the
+force + `skipped_irreversible` path for an operator who accepts the loss, so this reuses an existing
+contract instead of inventing one.
+
+The alternative - record at apply time whether the object was actually created, and make the down
+conditional on that - is strictly better information and needs state that does not exist yet. Worth
+doing if guarded creates become common; not worth blocking a data-loss fix on.
+
+### Verified
+
+RED first, and the control is what makes it meaningful: both guarded arms failed on unmodified code
+while `an_unguarded_create_schema_keeps_its_down` passed. Without that control, emitting `down: None`
+for EVERY create would also have gone green.
+
+`render_vendor_op` had no test at all before this - `grep -rn render_vendor_op` over the test
+directory returned nothing. The first thing to ever call it was the RED.
+
+Gates: fmt 0, clippy 0, `cargo test -p zero-migrate` 89 targets, 2138 passed, 0 failed, zero skip
+banners. The count reconciles exactly: 2134 at the last full run, plus one for the lock arm in
+8a3d68e, plus the three added here.
+
 ## F204 - the rollback takes the lock, and the security model had started denying its own fix
 
 Two follow-ons to F203, and the second is a defect I introduced myself the same day.
