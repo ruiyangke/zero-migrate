@@ -8990,6 +8990,85 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F234 - the guard check that works for views and sequences is DEAD on every vendor op, and copying it would have re-opened the ghost-object hole
+
+Still no code. The second opinion on the threading question answered a different, more important
+question on the way past, and it is the kind of thing that only shows up by reading the seam you are
+copying INTO rather than the one you are copying FROM.
+
+### The landmine
+
+`DropView` and `DropSequence` both refuse to synthesise an inverse for a guarded drop, and both
+express that as `existence_guard.is_some()`. I was about to write the same line for
+`DropExtension`. It would have compiled, passed an unguarded test, and been wrong.
+
+`Op::existence_guard()` returns `None` for EVERY vendor op, deliberately, and says so
+(crates/zero-migrate-ir/src/ir.rs, the arm covering `CreateSchema` / `DropSchema` /
+`CreateExtension` / `DropExtension` / `CreateRole` / ... ):
+
+    // VENDOR - the existence guard is a NATIVE clause (`IF [NOT] EXISTS`) or
+    // an engine-synthesized `pg_roles` probe rendered inline by the vendor
+    // lowering, NOT the catalog-probe `ExistenceGuard` mechanism. None here.
+
+So on a vendor op `existence_guard.is_some()` is a constant `false`. A `dropExtension` authored with
+`ifExists` would have been classified UNGUARDED and handed a `CREATE EXTENSION` inverse - which is
+precisely the ghost-object bug the refusal exists to prevent, re-introduced by carrying a pattern
+across a seam where the same concept has a different representation. On the vendor ops the guard is
+the op's OWN `if_exists: Option<bool>` field, so the check has to be `!if_exists.unwrap_or(false)`,
+and `Some(false)` is genuinely unguarded and eligible.
+
+Worth naming the general shape, because it is the third time something like this has bitten: the
+first two ops made "guarded" feel like one concept with one accessor. It is one concept with two
+representations, and the accessor only covers one of them.
+
+### The threading decision, and why I am not taking the recommendation
+
+The question was how to get the migration history into `render_vendor_op` (vendor.rs:228), whose
+extension arm returns `down: None` at vendor.rs:302. Two shapes were on the table: (A) add a
+`live_schema` parameter, forcing the trigger-only caller at renderer.rs:318 to pass a placeholder,
+or (B) keep the renderer pure and attach the history-derived `down` in lower.rs.
+
+The second opinion recommended a third, A-prime: thread the REAL `LiveSchema` all the way through
+the trigger path too, since `lower_one_op` already holds one, so no placeholder ever exists. That
+genuinely dissolves my objection to (A) rather than arguing with it.
+
+I am going with (B) anyway, on the strength of that opinion's OWN strongest counter-argument, which
+I verified. vendor.rs:14 states the boundary outright:
+
+    //! Every vendor op is `dialect_scope = PgOnly`: this module only renders Postgres,
+    //! and the lower seam (`crate::render::lower`) hard-rejects a SQLite target before
+    //! reaching here. The render is pure (no DB, no live schema).
+
+That purity is not decoration. This module's output is the string the guard `pg_query`-parses at the
+lower seam, so "renders from the op alone" is a security-relevant property, not a style preference.
+A-prime would make the module doc false as written for a marginal gain.
+
+There is a naming trap underneath, and it is the same one that made `LiveSchema::from_catalog_snapshot`
+confusing earlier: the value I would pass is FOLDED HISTORY, not a catalog read, but the type is
+called `LiveSchema` and the doc says "no live schema". Even a correct A-prime would read as a
+violation to the next person.
+
+(B)'s recorded weakness - that a post-processor cannot enforce the `cascade` refusal - only applies
+to a name-and-history-only helper. The lower.rs site is already matching on `op`, so it has the whole
+`Op` in hand and can read `cascade` and `if_exists` directly. That weakness is avoidable by
+construction.
+
+### The eligibility predicates, written down before implementing
+
+    DropExtension:  history has the extension  AND  !if_exists.unwrap_or(false)
+    DropSchema:     history has the schema     AND  !if_exists.unwrap_or(false)
+                                               AND  !cascade.unwrap_or(false)
+
+`CREATE EXTENSION ... WITH SCHEMA` must take its schema from the recorded `ExtensionSnapshot.schema`,
+NOT from the drop's effective schema: `Op::DropExtension` carries no schema qualifier at all, so
+`eff_schema` would be an invention.
+
+VERIFIED BY ME: the `existence_guard()` vendor arm and its comment; the vendor.rs:14 purity
+statement; `Op::DropSchema`'s `cascade` field; `ExtensionSnapshot` carrying only `schema`.
+NOT VERIFIED: that the trigger path could in fact be threaded end-to-end as A-prime describes - I did
+not trace it, because I am not taking that option. Anyone reversing this decision has to check that
+themselves rather than inheriting it from here.
+
 ## F233 - dropSchema is NOT a cheap inverse, and the reason is a cascade flag I would have missed by pattern-matching
 
 No code this entry. Two facts found while scoping the next op, both of which change how it should be
