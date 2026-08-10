@@ -9021,14 +9021,52 @@ case, one of them a code arm written specifically for it.
 The sibling row proves the table can express the refusal: `setColumnDefault`/`nextval` is already
 `Unsupported` for sqlite and mysql. So the omission is not a limitation of the format.
 
-### What is measured and what is not
+### Then measured, in one run, so both answers come from the same tree
 
-VERIFIED: all three sites, and that `support_cell` does not consult capabilities.
+```text
+PROBE support.sqlite = Supported { render: LiveResolved }
+PROBE lower          = Err(SqliteRebuildOnly("setColumnDefault"))
+```
 
-NOT MEASURED: the user-visible consequence. I expect support/status to report the op as available on
-SQLite and deploy to refuse it - the inverse of F99 - but I have not run it end to end and captured
-both messages. The ticket says to do that before quoting the consequence, because "the validator says
-supported" is a claim about a code path I have read and not executed.
+The validator reports the op available on SQLite and lowering refuses it. Confirmed rather than
+inferred, which matters because "the validator says supported" was a claim about a path I had read
+and not executed.
+
+The run corrected one thing: the refusal is not the raw capability error I had assumed.
+`require_capability_for` maps to `IrLowerError::SqliteRebuildOnly`.
+
+### The measurement found a third defect the reading could not
+
+That variant's message is:
+
+```text
+IrAuthor::lower of SQLite op "setColumnDefault" requires a full live table snapshot
+and a supported rebuild shape; refusing to emit a partial table rebuild
+```
+
+It names two conditions, and for this op the FIRST is satisfied while the SECOND is the real reason.
+The probe supplied a complete snapshot including the target column and its data type, and the
+refusal fired anyway, because the capability gate runs before any snapshot inspection. A SQLite user
+reading that message goes hunting for introspection data they already have.
+
+This is only visible by executing. Reading the arm shows a capability check; reading the variant
+shows a plausible message; only running the two together shows the message describing a condition
+that was met.
+
+### Which side is wrong, better evidenced now
+
+The variant is called `SqliteRebuildOnly` and its own doc says named FK add/drop changes DO lower to
+the structured 12-step rebuild when full live structure is available. So the rebuild machinery exists
+and already serves a sibling shape - `setColumnDefault` is simply not wired into it. With the table
+documented as the single source of the gate, and `render_mode` carrying an arm written for the SQLite
+case, three sources now point at the engine being behind the promise rather than the table
+over-promising.
+
+Still a product decision, and the cheap honest option remains: mark both SQLite cells `Unsupported`
+in `dialect-support.toml`, matching the sibling `nextval` row.
+
+Separable and worth doing either way: the message should not assert a missing snapshot when the
+snapshot is complete.
 
 Also worth carrying: the table is GENERATED from `dialect-support.toml` and guarded against
 hand-editing by `tests/dialect_table_faithfulness.rs`, so correcting the table means editing the TOML.
