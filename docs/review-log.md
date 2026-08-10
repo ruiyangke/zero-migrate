@@ -8985,6 +8985,90 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F197 - I propagated a wrong claim into another repo, and the instrument that produced it was a name search
+
+The worst finding of the day is one of mine. It reached appbase's tree, in a doc comment, with my
+name on it, and it was wrong in its central claim.
+
+### What I claimed
+
+That the ungated lowering entry points - `lower_plan`, `lower`, `lower_steps` - skip five gates that
+live only in `model/load.rs`, among them schema confinement and vendor authority. I built that from
+`grep` for `validate_ir_authorized` and `enforce_ir_ownership`, found one production caller each, and
+concluded the BEHAVIOURS run nowhere else.
+
+### Why it was wrong
+
+`validate_ir_authorized` is not one gate. Its own doc at `model/validate.rs:167-170` lists what it
+produces: "cross-schema, invalid schema ident, an ungranted vendor primitive, illegal guard
+direction, or an embedded-expression rejection". Five behaviours behind one name, and the ungated
+path re-implements two of them under different names.
+
+VERIFIED BY READING `render/lower.rs`, schema confinement is enforced there on both branches:
+
+```rust
+if op.schema().is_none() && self.default_schema.is_some() && !confinement.permits(&eff_schema) {
+    return Err(IrLowerError::DefaultSchemaOutOfScope(eff_schema));
+}
+...
+if op.schema().is_some() && !confinement.permits(&eff_schema) {
+    return Err(IrLowerError::LowerCrossSchema(eff_schema));
+}
+```
+
+plus a fail-closed refusal of a non-`main` schema on the SQLite leg. The comment between them says
+why: "Make `lower()` self-defending regardless of whether validate ran."
+
+VERIFIED BY READING the error surface, vendor authority is enforced there too. `IrLowerError` has
+29 variants, and one of them is:
+
+```text
+IrAuthor::lower of vendor op {op} requires capability {capability}, but the active vendor
+capability set does not grant it; refusing before rendering
+```
+
+That message names `lower` explicitly. And this one is worse than a missed check: F157 records me
+SHIPPING that lower gate myself, as 29e6acd, closing #165 with the words "vendor authority comes
+from the charter at both". I contradicted my own shipped finding because I trusted a fresh grep over
+a fact I had already established and written down.
+
+### The instrument, which is the transferable part
+
+appbase hit the mirror image twice today: grep for a private symbol, get zero hits, conclude the
+behaviour never runs. Mine: grep for a validator name, get one caller, conclude the behaviour runs
+nowhere else. Same instrument, opposite signs, and a well-factored codebase guarantees both failures
+- encapsulation hides the name from callers, and defense-in-depth duplicates the behaviour under a
+different one.
+
+A NAME IS NOT A BEHAVIOUR. When the question is "does this run", the evidence has to be a call path,
+an execution, or the error the code can actually produce. The error enum turned out to be the best
+instrument here: what a function can REFUSE is what it CHECKS, and it cannot hide behind a rename.
+
+### What is actually left, and what is still unmeasured
+
+Re-enforced on the ungated path, verified: schema confinement, vendor authority.
+
+NOT VERIFIED EITHER WAY, and deliberately not asserted, because asserting absence from a name search
+is the error being corrected: invalid schema ident, illegal guard direction, embedded-expression
+rejection. `GuardProbeUnbuildable` exists at lower but is probe BUILDABILITY, a different concern
+from direction legality, so it does not settle the second.
+
+Still believed loader-only, on the weaker ground that a lower-side equivalent is implausible rather
+than unfound - they need the deploying app and registry only the loader's caller holds:
+`check_ir_version`, `enforce_ir_ownership`, the checksum-hint comparison, the `owner_app` anti-spoof
+stamp. No negative proven for these either.
+
+So the finding has shrunk from "five gates including confinement" to "possibly a few author-facing
+validations plus the ownership and identity gates", and whether it merits any change is now doubtful.
+Retracted to appbase as ZERO-MIGRATE-2026-08-10-155, OPEN until they confirm their comment is
+corrected.
+
+### What saved it from being worse
+
+Before writing to them I checked the shipped surface and found the Node addon on the guarded door, so
+the message went out scoped as embedder-only rather than as a live defect. That step is why a wrong
+claim cost a doc comment instead of an incident.
+
 ## F196 - the pinned primary key is checked, not restructured, and the second opinion supplied the evidence I lacked
 
 Ruiyang asked whether inject supports primary-key injection. It does - `InjectSpec.primary_key` is
