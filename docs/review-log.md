@@ -8990,6 +8990,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F232 - a dropped sequence is reversible now, and the survey says the remaining ops split two ways
+
+Shipped 132aaacb, plus edb0edb4 which added the PostgreSQL arm the view work owed.
+
+### The sequence needed no new recording at all
+
+`DropSequence` was the cheapest of the eight, and reading before designing is what showed it.
+Where the view required a new `authored_query` field because the fold discarded the body,
+`SequenceSnapshot` already carries every facet needed to re-create one - `as_type`, `increment`,
+`start`, `min_value`, `max_value`, `cache`, `cycle`, `owned_by` (snapshot.rs:1109) - and the fold
+already keeps all of it (fold.rs `Op::CreateSequence` arm). So this was two steps, not four:
+`LiveSchema` gained `sequences`, and the `DropSequence` arm renders the inverse from the snapshot.
+
+The synthesised `CREATE SEQUENCE` writes every facet explicitly rather than relying on server
+defaults, so a restore that quietly fell back to PostgreSQL's defaults for increment or bounds
+would not compare equal. `SequenceDataTypeSnapshot::Unsupported` - a catalog type the portable IR
+cannot author - refuses rather than guessing an inverse.
+
+Same two refusals as the view, for the same reasons: a guarded (`ifExists`) drop keeps `down: None`
+because it can journal `completed` without running, and a sequence the history never created has no
+recorded settings to restore.
+
+### The assertion is strong here, and that is a measured difference
+
+`SequenceSnapshot` derives `PartialEq` over every field (snapshot.rs:1108), with no custom impl, so
+comparing the snapshot before the drop against after the rollback really does compare increment,
+bounds, cache, cycle and ownership. That is worth stating precisely because the VIEW case was the
+opposite: `ViewSnapshot`'s hand-written `PartialEq` compares only `materialized` and `comment`, so
+the equivalent assertion there had to be paired with a direct field read. Two snapshot types, two
+different answers to "does `==` see what I am claiming" - which is exactly the F228 question, and
+it has to be asked per type rather than assumed.
+
+MUTATION, measured. Forcing the sequence down to `None`:
+
+    test rolling_back_a_dropped_sequence_restores_it ... FAILED
+    test a_guarded_sequence_drop_keeps_no_inverse ... ok
+    rolling back the dropped sequence must succeed: migration mig_7n42DGM5T1Mds2urlxtZWL
+      ('drop_sequence_order_no') is irreversible (down: None); rollback refuses by default.
+
+The same mutation was run against the PostgreSQL view suite with the same result, and the view
+suite was additionally checked for a silent skip: without `ZERO_MIGRATE_TEST_PG_URL` it prints
+`LIVE-DATABASE COVERAGE SKIPPED` and finishes in 0.00s, with it 0.39s and no banner. A live suite
+that reports identical output either way proves nothing, so that check is part of trusting the arm.
+
+### What the survey says about the five that are left
+
+`SchemaSnapshot` (snapshot.rs:1216-1230) carries `tables`, `partitions`, `views`, `named_types`,
+`sequences`, `roles`, `schemas`, `extensions`. It carries NO triggers, functions or policies. That
+splits #23's remainder cleanly:
+
+- `DropSchema` and `DropExtension` have a snapshot map already, so they follow the sequence shape:
+  carrier plus render, no new recording.
+- `DropTrigger`, `DropFunction` and `DropPolicy` have no snapshot map at all. Each needs a new
+  snapshot type AND the fold arms to populate it before an inverse is possible - closer to the view
+  in cost, and more, since the view at least had a `views` map to extend.
+- `AlterSequence` is not a drop and does not fit this shape: its inverse is the PREVIOUS settings,
+  which means capturing state before the alter rather than reading what the history holds after it.
+  It should be decided on its own rather than folded into the drop family.
+
+So the ticket's "one op at a time" framing is right, but the ops are not interchangeable and the
+remaining estimate should not be five-times-the-last-one.
+
+GATES: `FMT_RC=0`, `CLIPPY_RC=0`, `TEST_RC=0`, zero skip banners,
+`targets=105 passed=2462 failed=0` against live PostgreSQL 18.4 and MySQL 8.4.11.
+
 ## F231 - a dropped view is reversible now, and the test that first went green was passing against an input production never builds
 
 Shipped 6f5a45a4 on the decision settled in F230. `Op::DropView` renders `CREATE VIEW` as its own
