@@ -9102,6 +9102,32 @@ requires capturing before execution, persisting the capture, and binding it to r
 none of which the live-lower proposal does either. Between the two mechanisms as posed, history is
 the sound one.
 
+### The carrier already exists, which shrinks the work
+
+The obvious objection to synthesising from history is that the `CreateView` sits in an EARLIER
+document than the `DropView`, and a lowering pass sees one document. That objection is answered by
+code that is already here: `refresh_historical_live` (engine.rs:375-400) takes
+`cumulative_ops: &[Op]` - the accumulated authored history - runs `fold_ops(cumulative_ops, ...)`
+over it, and builds the `LiveSchema` that lowering consults from THAT folded snapshot
+(engine.rs:390-392). The function name `LiveSchema::from_catalog_snapshot` reads like a catalog
+introspection, and on the deploy path at engine.rs:475 and `zero-migrate-node/src/lower.rs:933` it
+is one, but at engine.rs:392 it is fed a FOLDED snapshot. So the `LiveSchema` the lowerer already
+receives is history-derived on this path.
+
+That makes a history-sourced `views` entry consistent with the existing design rather than foreign
+to it, and reduces the change to four steps:
+
+1. Keep the typed `ViewQuery` (with effective schema and `replace`) where the fold currently writes
+   `definition: None` (fold.rs:2306).
+2. Carry it through `SchemaSnapshot` into `LiveSchema::from_catalog_snapshot`.
+3. Pass the live schema into the view arm - `lower_one_op` already holds it (lower.rs:4146); the
+   view arm at lower.rs:5379 simply does not forward it to `lower_view_op`.
+4. Emit `CREATE VIEW` as `DropView`'s down ONLY for an unguarded drop with a history entry.
+
+The genuinely catalog-fed callers degrade correctly with no special case: live introspection cannot
+produce a typed `ViewQuery`, so those paths find no entry and keep `down: None`. That is the same
+answer an adopted view gets, for the same reason.
+
 STILL OPEN: the PG arm of the same e2e proof.
 
 ## F229 - the SQLite lock sidecar needs no downstream notice, and the pin I believed appbase was on was wrong
