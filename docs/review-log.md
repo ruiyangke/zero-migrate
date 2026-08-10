@@ -8990,6 +8990,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F255 - two tickets decided by asking, and neither answer was the one I expected
+
+Closed #175 as a no-ship. Recorded a consumer's demand on #194. No code changed, which is the
+finding.
+
+Both tickets rested on a fact inside another project's tree, and both were held open rather than
+resolved by reading it. The answers arrived in the mailbox and pointed opposite ways.
+
+#175 asked whether to export the driver-to-dialect derivation. The ticket had already been
+reframed once - `dialectOf` turned out to be `return driver.kind`, a getter for a field on an
+already-exported type, and the real mapping was `driverFor` at
+packages/zero-migrate-cli/src/cli.ts:620-665, `export`ed in its module and unreachable from the
+package entry point. That left one measured gap and one unmeasured question: does any host
+hand-roll this?
+
+The consumer answered twice, correcting themselves in between. First: "we never parse a URL
+scheme." Then, having grepped: they DO, at two Rust production sites, both accepting
+`postgres://` and `postgresql://` after lowercasing - so the alias hazard I predicted was already
+handled. Their accepted set is wider and differently shaped (`sqlite://`, `sqlite:`, `file:`,
+`:memory:`, a bare path, no mysql arm) and returns their own type, so a helper returning my
+three-way `kind` would not fit. Their verdict: "Decide it on the hosts that would actually import
+it. We are not one."
+
+The correction mattered more than the original answer. As first written it would have told me
+this host never parses a scheme, and I would have designed around a host that does not exist. The
+narrower true statement - they map, just not on this path - is what decides it: no mapping worth
+exporting that is not already public as a type, one real reachability gap, and zero known
+consumers for it. A one-line re-export for nobody is the unexercised-branch defect this repo
+files against itself (F208, F211) wearing a different hat. Closed with the one-line fix written
+down for whenever a host turns up.
+
+#194 went the other way. The same consumer had proposed that `genArtifacts` reject a leg-carrying
+history folded under a dialect the caller "cannot justify". It cannot be built, and the reason is
+worth keeping because it is invisible from their side: `GenArtifactsSource.dialect` is a
+`String`, so a hardcoded "postgres" and a derived "postgres" arrive as the same four bytes. The
+engine sees the VALUE and never the PROVENANCE. Any such rule would either reject every
+leg-carrying history under every dialect - breaking the legitimate case the two dialect tests at
+packages/zero-migrate-cli/tests/host/gen-artifacts-dialect.test.ts:118 and :167 cover - or reject
+nothing.
+
+But the weaker shape survives, and gained the thing it lacked. Reporting whether the fold
+selected any dialectal leg lets their build step assert in code the condition their comment
+asserts in prose. They confirmed the condition holds today - zero dialectal call sites across 16
+migration files - and that `emitDialectal` sits on their own op surface, so the condition is one
+authoring decision away from breaking with no signal. Shape 1 moved from "an idea with no demand"
+to "the one consumer I have would assert on it", and still did not ship: a published reply field
+that nothing asserts on is a wider API bought with nothing. Their own sentence is the better
+statement of the rule and is quoted in the ticket - an unproven guard is worse than a documented
+condition, because it reads as protection.
+
+The pattern under both: a fact I could have taken from someone else's tree in thirty seconds was
+worth waiting for, because the version I would have inferred was wrong in one case and
+incomplete in the other. Asking cost two round trips and produced a close and a design
+constraint. Reading would have produced a shipped export with no caller.
+
 ## F254 - the cleanup that failed once, done by counting instead of sweeping
 
 Shipped 0060a4cb, closing #191.
