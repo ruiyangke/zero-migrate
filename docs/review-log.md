@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F261 - a safety refusal a wrapper walked past, and a test that passed for the wrong reason
+
+Part of #80, fourth of six. Four fixed, two open.
+
+SQLite reconciles `renameColumn` by REBUILDING the table from its stored `CREATE TABLE` text.
+Two renames of one table in one migration would build the second rebuild from text captured before
+the first, so `refuse_repeat_sqlite_rename_target` (render/lower.rs) refuses the pair up front.
+
+It scanned `&ir.ops` and matched `Op::RenameColumn` directly, so a rename authored inside
+`dialect({ sqlite: ... })` was invisible to it. The rename still LOWERS - the lowering path
+expands legs correctly - so the wrapper did not avoid the hazard, only the guard against it. That
+is the worst shape for a safety check: the dangerous thing still happens and the message that
+would have told the author to split the migration is gone.
+
+SELECTED leg, and this one goes the other way from F259/F260 despite also being a refusal. The
+question is still "dialect-specific or identity", and a refusal about what SQLite will RUN is
+dialect-specific: a rename sitting in the PostgreSQL leg is never executed here and rebuilds
+nothing, so refusing on it would reject a migration that is correct on this target. Selection goes
+through the fold's own `selected_dialectal_leg`, promoted to `pub(crate)`, rather than a second
+own-then-default rule written at the call site - two copies of that rule is how they drift.
+
+THE TEST TAUGHT ME MORE THAN THE FIX. My first draft asserted `error.contains("notes")`. Three
+arms went green immediately, which should have been the tell. They were passing on a DIFFERENT
+error:
+
+    IrAuthor::lower of renameColumn on "notes"."a" needs the live `a` column's type
+    (LiveSchema::table_snapshots) to reconcile the IR-carried type against the live column;
+    it is absent - refusing to lower a rename from an IR type alone
+
+The fixtures carry an empty `LiveSchema`, so every rename fails for that unrelated reason, and the
+table name appears in that message too. The assertion matched a token both errors contain. What
+exposed it was the fourth arm - the control asserting the refusal must NOT fire for an unselected
+leg - which could not pass, because SOMETHING always errored. The control that existed to pin the
+direction of the fix is what proved the other three arms were vacuous.
+
+Rewritten to assert the refusal's own words, `"renamed twice in one migration"`, and the control
+now asserts the ABSENCE OF THAT REFUSAL rather than a clean lowering - because requiring success
+would mean building a live catalog irrelevant to the property under test. With that oracle the RED
+is honest: the top-level control refuses (the preflight fires), and both leg arms fall through to
+the live-schema error, which is exactly the preflight failing to see them.
+
+Two lessons paid for again here. A test that passes the moment you write it has not been shown to
+test anything. And a token appearing in output is not evidence of which producer emitted it -
+the same repo lesson as "producers of a token are not witnesses to its meaning", this time with
+me as the producer of the mistake.
+
+One thing worth recording about the fix itself: the first attempt reached for `unsafe` to work
+around a borrow lifetime while threading a `BTreeSet<&str>` through a closure. That was a workaround
+for a design that was wrong, not a legitimate use - the shape that actually fits is one in-order
+walk that resolves each op to its effective slice, which needs no closure and no lifetime
+gymnastics. Deleted before it ran.
+
 ## F260 - a table created inside a leg was applied to the database and owned by nobody
 
 Part of #80, third of six. Three fixed, three open.
