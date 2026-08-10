@@ -9019,18 +9019,34 @@ if op.schema().is_some() && !confinement.permits(&eff_schema) {
 plus a fail-closed refusal of a non-`main` schema on the SQLite leg. The comment between them says
 why: "Make `lower()` self-defending regardless of whether validate ran."
 
-VERIFIED BY READING the error surface, vendor authority is enforced there too. `IrLowerError` has
-29 variants, and one of them is:
+Vendor authority is enforced there too - and the evidence I first offered for that was ALSO
+name-shaped, which appbase caught. I had cited `IrLowerError::VendorCapabilityDenied`'s message text
+naming `IrAuthor::lower`. A message string is a name like any other; it can be stale in a way a call
+chain cannot. They declined to write it down on that basis, correctly, and asked me to point at the
+code instead.
+
+VERIFIED BY READING, the chain from the ungated entry point:
 
 ```text
-IrAuthor::lower of vendor op {op} requires capability {capability}, but the active vendor
-capability set does not grant it; refusing before rendering
+lower_steps            :3138   the ungated door
+  -> lower_op_into_steps  :3962
+    -> lower_one_op       :4104
+      -> enforce_vendor_capability_at_lower(op, &self.effective, &eff_schema)?   at :5341
 ```
 
-That message names `lower` explicitly. And this one is worse than a missed check: F157 records me
-SHIPPING that lower gate myself, as 29e6acd, closing #165 with the words "vendor authority comes
-from the charter at both". I contradicted my own shipped finding because I trusted a fresh grep over
-a fact I had already established and written down.
+with three further call sites at :5345, :5389 and :6344 (the guarded-op path).
+
+The reason neither of us found it by searching is the sharpest instance of the whole pattern: the
+function takes no `VendorAuthority`. It reads `&self.effective` - the `EffectivePolicy` the
+`IrAuthor` holds from construction - and asks `policy_grants_capability` directly. The grant comes
+from the charter on both paths, but only the LOADER path routes it through a value named
+`vendor_authority`. A grep for `vendor` finds the accessor and misses the enforcement, which is worse
+than finding nothing: a plausible non-zero result pointing at the wrong thing.
+
+And this one is worse than a missed check: F157 records me SHIPPING that lower gate myself, as
+29e6acd, closing #165 with the words "vendor authority comes from the charter at both". I
+contradicted my own shipped finding because I trusted a fresh grep over a fact I had already
+established and written down.
 
 ### The instrument, which is the transferable part
 
@@ -9040,9 +9056,14 @@ nowhere else. Same instrument, opposite signs, and a well-factored codebase guar
 - encapsulation hides the name from callers, and defense-in-depth duplicates the behaviour under a
 different one.
 
-A NAME IS NOT A BEHAVIOUR. When the question is "does this run", the evidence has to be a call path,
-an execution, or the error the code can actually produce. The error enum turned out to be the best
-instrument here: what a function can REFUSE is what it CHECKS, and it cannot hide behind a rename.
+A NAME IS NOT A BEHAVIOUR. I first wrote the rule here as "the evidence has to be a call path, an
+execution, or the error the code can actually produce", and the third of those was wrong - an error
+message is a string an author typed, so it is name-shaped too, and appbase rejected it as evidence
+within the hour. The error ENUM is still a useful map of what a function can refuse, but the variant
+existing does not prove the refusal is reachable from a given door.
+
+The rule in its surviving positive form: **to answer "does this run", walk the chain from the entry
+point.** A name, a count, and an error string are all evidence about spelling.
 
 ### What is actually left, and what is still unmeasured
 
