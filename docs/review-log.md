@@ -8990,6 +8990,83 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F218 - #16 is refuted by the comment one line above the function I measured, and its fix would make squash rollback impossible
+
+With rollback now reachable by operators (F217), the two filed refusals #16 and #17
+matter for the first time. Both tickets predate the product surface, so I checked
+their premises before implementing. One holds. One does not.
+
+### The structural claim, verified for both
+
+    awk 'NR>=2450 && NR<=2790' crates/zero-migrate/src/apply/executor.rs \
+      | grep -n "supersed\|pending_contract\|outstanding\|obligation"
+    (no output)
+
+The whole rollback region - `plan_rollback` through `rollback_locked` - references
+neither concept. So both refusals are genuinely absent. That much of both tickets is
+VERIFIED.
+
+### #17 (rename obligation) - CONFIRMED, and it is the one to build
+
+Nothing on the rollback path observes an outstanding online-rename obligation. Gate
+(6) at `executor.rs:2576` walks `depends_on` only, and every planned step then
+executes at `:2757-2762`. A rollback that crosses an obligation's expand set is
+unopposed.
+
+### #16 (squash closure) - REFUTED as filed, on two independent grounds
+
+I measured the mechanism and confirmed it exactly: `superseded_versions`
+(`journal.rs:1895-1929`) computes `net_applied_squashes` as versions whose LATEST
+event is `applied` AND `kind='squash'`, then joins the edge table to it. A
+`rolled_back` event on S makes S's latest event `rolled_back`, S leaves that set, the
+join yields nothing, and `v1..vN` stop being superseded. All true.
+
+Then I stopped reading one comment too early. `journal.rs:1883-1885`:
+
+    /// Only edges of a NET-APPLIED squash count: if `S` was rolled back, its
+    /// supersession no longer holds and the superseded versions become pending again
+    /// (consistent with `S` itself being pending again).
+
+The behaviour the ticket calls a defect is the documented, deliberate semantics, and
+it is coherent: S and its members return to pending together, which is the same state
+the database was in before S was applied.
+
+The second ground is worse for the fix than for the diagnosis. Rollback's candidate
+set is completed-only (`executor.rs:2743-2753`). On a fresh-DB squash `v1..vN` never
+ran, so they have no completed rows, so they can never be selected. "Refuse unless the
+whole superseded closure is selected" would then demand something unselectable - and
+it would demand it precisely in the case the ticket names as worst. Squash rollback
+would become permanently impossible there.
+
+Third, the edges cannot carry the distinction the fix would need. `journal.rs:509-513`
+says one row is written per edge "whether via `apply` running its `up` on a fresh DB,
+or via `crate::ops::squash` recording it baseline-style on a DB that already ran
+`[v1..vN]`". Identical edges, opposite provenance. A closure check over edges cannot
+tell the safe case from the unsafe one.
+
+### What survives of #16
+
+A real but much narrower concern, and a different one: a squash recorded baseline-style
+whose `down` was never a true inverse. That is a `down`-provenance question living with
+#19 and #25, not a supersession-closure question. Re-scoped there rather than deleted.
+
+### The lesson, again, and I only got half of it
+
+F209 says: before calling an exclusion a defect, read the field's own doc. I verified
+the SQL and did not read the eleven lines above it. The second opinion did. Two of us
+asking the same question independently is what caught it - the reconciliation earned
+its keep here rather than just agreeing with me.
+
+### Placement, settled
+
+Both opinions converge on threading the state into `plan_rollback` rather than
+refusing inside `rollback_locked`: load the obligations under the lock where `applied`
+is already loaded (`:2743-2755`), pass a snapshot in, and keep every selection-time
+refusal in the one pure auditable function whose doc already lists them in order
+(`:2460-2476`). One refinement I would not have reached alone: evaluate against the
+FINAL `steps` set, after forced irreversible skips (`:2530-2568`), not the raw target
+selection - a force-skipped version is not being rolled back and must not trip the gate.
+
 ## F217 - rollback is proven on all three dialects, and #185 closes with the gap it opened with gone
 
 The live arms pass on PostgreSQL and MySQL through the shipped CLI
