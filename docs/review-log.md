@@ -8990,6 +8990,53 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F260 - a table created inside a leg was applied to the database and owned by nobody
+
+Part of #80, third of six. Three fixed, three open.
+
+`LoweredArtifact.created_tables` is what the deploy loop folds into the cross-file ownership
+registry - `effective_registry.entry(table).or_insert_with(|| app.to_string())` at engine.rs:566 -
+so a name absent from that list is a name NO app claims, and the next app to declare it takes it
+without conflict.
+
+The list was built by mapping `op_created_table` over the top-level ops (render/lower.rs:2945).
+That helper answers for a SINGLE op and its `_ => None` arm (zero-migrate-ir/src/load.rs:157)
+includes `Op::Dialectal`, so a create authored inside a leg never appeared. The SQL lowering
+further down the same function descends correctly, which is what made this hard to see: the table
+was created on the database and the claim was not.
+
+The RED reads `created_tables` straight off the artifact:
+
+    a_top_level_create_is_registered_as_owned ....... ok
+    a_create_in_the_selected_leg_is_registered ...... FAILED   []
+    a_create_in_an_unselected_leg_is_registered ..... FAILED   []
+
+The middle arm is the unambiguous defect - SQLite SELECTS that leg, so `wrapped` really is created
+on the database, and it claimed nothing.
+
+THE FIX WAS TWO FUNCTIONS AWAY THE WHOLE TIME. `collect_created_tables`
+(zero-migrate-ir/src/load.rs:161) already descends every leg, and `enforce_ir_ownership` already
+uses it to decide who owns what at LOAD time. So the load gate and the registry disagreed: the
+gate demanded you own a name declared in a leg, and the bookkeeping never recorded that you did.
+The change adds the aggregate form the call site needed - `ir_created_tables(ops)` - rather than a
+new traversal.
+
+ALL LEGS, and this is the third direction call in this ticket, decided on three grounds rather
+than by copying either sibling. It is FAIL-CLOSED: over-claiming a name costs a later refusal that
+names the owner, under-claiming lets another app take a table this one authored, and only one of
+those is recoverable by reading an error. It matches the load gate, so two mechanisms stop
+disagreeing. And ownership is not a property of the target - the same file deploys to PostgreSQL
+and to SQLite, and the app that wrote it owns the names it declared either way.
+
+MUTATION-TESTED: restricting the collector to the SQLite leg failed exactly
+`a_create_in_an_unselected_leg_is_registered_as_owned_too` and left the other two green. So the
+all-legs choice is carried by one arm, and a future reader who thinks selection is obviously right
+gets a failing test rather than a silent narrowing of who owns what.
+
+Three walkers in, the pattern is now stated plainly: the question is never "what does the fold
+do", it is "is this output dialect-specific, or is it identity". F258 was dialect-specific and
+takes the selected leg. F259 (checksum) and this one (ownership) are identity and take every leg.
+
 ## F259 - a dialect wrapper was a way to author a table the charter never saw
 
 Part of #80, second of six. Two of the six production non-descenders are now fixed.
