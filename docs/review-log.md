@@ -8990,6 +8990,39 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F249 - the gate failed on its own documentation, and it was right
+
+Shipped a76baae1.
+
+The sibling project applied F248's gate to their tree and reported 42 false hits, every one
+inside a URL: `home` is an ordinary path segment on the web, so
+`apple.com/v/iphone/home/<id>/images` carries a `/home/<segment>/` run that is not a home
+directory. I reproduced it here on the first try by planting their example in a tracked file, and
+the gate named it as a hardcoded path. My tree was green only because it holds no such asset -
+luck, not correctness.
+
+Web URLs are now removed from the line BEFORE the match. Their ordering point is the load-bearing
+part and I would not have derived it: filtering AFTER the match would drop a line carrying both a
+URL and a real path.
+
+The clause that is mine, and the one worth remembering: strip `http` and `https` only, never
+`file:`. A `file:` URL followed by `///home/<user>/` IS a machine-specific path, and it is the
+exact shape that prompted this gate two entries ago. A stripping rule written as "remove URLs"
+rather than "remove web URLs" would blind the gate to its own founding instance. That is the
+same failure as widening an exemption until it covers the thing it was protecting.
+
+Then the part worth writing down. My first fix explained the problem in a comment that spelled a
+real example URL and, on the next line, described what it contained - leaving a bare `/home/cj/`
+in prose, outside any URL. The gate failed on its own header. I read `exit=1` with no offender
+line in the file I had planted, and my first reading was "the fix does not work". It was working
+perfectly; the violation was my documentation of it, in a different file than the one I was
+watching.
+
+The generalisable bit is not "check your comments". It is that I diagnosed a failure from the two
+facts I expected to be decisive - the exit code and the absence of my planted filename - and both
+were consistent with a gate that was entirely correct. Reading the actual offender line took one
+command and reversed the conclusion.
+
 ## F248 - a gate for a defect this repository does not have
 
 Shipped a36485d5.
