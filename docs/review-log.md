@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F224 - the MySQL rollback ticket is the first today to survive verification unchanged, and I mis-corrected it on the way in
+
+Verified, not implemented. #18 says the MySQL rollback leaf has no transaction and no
+inflight marker, and that two failure windows leave no evidence. All of it holds.
+
+`session::rollback_one` (`mysql/session.rs:943-1013`) is, end to end: refuse if `down`
+is None; read the session snapshot; set the session settings; `conn.batch(down)`;
+`record_rolled_back`; restore the snapshot. No `START TRANSACTION`, no `BEGIN`, no
+marker. The PostgreSQL leaf reaches `conn.batch("BEGIN")` at
+`postgres/session.rs ~:1394`; this one never does.
+
+The apply side does carry the machinery being compared to - `mysql/session.rs:753-796`
+refuses an unmatched inflight marker and prints the `DELETE FROM
+{meta}.schema_migrations_inflight` repair. So the asymmetry the ticket describes is
+exactly the asymmetry that exists.
+
+Both windows follow from the shape. MySQL DDL auto-commits, so a two-statement `down`
+whose second fails leaves the first committed, returns `DownFailed` at `:980`, and never
+reaches `record_rolled_back` - net-applied version, half-reverted schema, no record. And
+if `record_rolled_back` errors at `:995` the schema is reverted while the journal still
+says applied. Neither leaves evidence.
+
+### The correction I owe
+
+Opening this, I wrote that the ticket's `mysql/session.rs` reference was wrong because
+the impl is at `mysql/mod.rs:736`. It is not wrong. `mod.rs:736` is the trait impl, and
+it delegates one line later to `session::rollback_one`. I had stopped at the trait
+method without following the delegation and announced a correction on the strength of it.
+
+Worth recording because it is the mirror image of the run this review has been on. Four
+tickets in a row turned out to need correcting, and the fifth got corrected reflexively
+when it did not need it. Expecting a ticket to be wrong is as much a prior as expecting
+it to be right.
+
+### What has to be decided before code
+
+Which table the rollback marker lives in is the sharp one. Reusing
+`schema_migrations_inflight` would give one field two meanings - the defect class this
+review keeps meeting (F209, #143) - and its operator repair text and the docs that quote
+it all describe it as an apply artifact. A discriminator column and a separate table are
+both defensible; the docs move either way.
+
+Then: who fails closed on an unmatched ROLLBACK marker. Apply proceeding over one would
+re-run an `up` against unknown shape; rollback proceeding over one would run a `down`
+twice. Both point at both, which is a reason to say so deliberately rather than land on
+it by default.
+
+And whether the marker write and the `rolled_back` append can share a transaction. The
+`down` cannot, but both meta-schema writes might, which would close window (b) instead of
+narrowing it. That wants checking against how apply pairs `clear_inflight` with its
+completed row rather than assuming apply already gets it right.
+
 ## F223 - the SQLSTATE three tickets asserted is measured, and the gate's scope matches the server exactly
 
 No code change. Closing the one claim F220, F221 and F222 each carried forward without
