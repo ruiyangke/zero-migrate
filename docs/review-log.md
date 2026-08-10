@@ -8985,6 +8985,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F203 - the rollback orchestrator now ships, and Q4 is answered by building rather than deleting
+
+Q4 was raised on 2026-08-06 and sat unanswered for four days: the rollback API was exported with no
+implementation, and the two ways out were to delete the unused types or to build the driver over the
+existing leaf. F202 re-derived the same question yesterday without noticing Q4 already asked it.
+Ruiyang chose to build.
+
+### What was already there, and what was missing
+
+Built and correct: `plan_rollback` (`apply/executor.rs:2477`) with every selection-time refusal, and
+the per-migration backend leaves for all three dialects
+(`postgres/session.rs:1351`, `sqlite/rollback_sql.rs:68`, `mysql/session.rs:943`).
+
+Missing: the loop between them. `RollbackPlan` was constructed at `:2493` and `:2624` and read by
+nothing.
+
+### The shape of the fix
+
+`pub async fn rollback<B: MigrationBackend>` ensures the journal, reduces the journal to
+net-`completed` rows, calls `plan_rollback`, then walks the plan handing each migration to
+`rollback_one_transactional`. About forty lines, because the hard parts were already written.
+
+Two decisions worth recording. It is generic over `MigrationBackend`, not the `SqlSession` seam
+`apply` uses, because the leaf lives on that trait - so unlike `apply`, which is gated behind
+`cfg(pg_seam)`, one path serves PostgreSQL, MySQL and SQLite. And the journal filter drops lone
+`started` markers: an inflight marker is the recovery path's business, not something a rollback
+unwinds.
+
+### Verified
+
+`cargo fmt --check`, `cargo clippy -p zero-migrate --all-targets -- -D warnings` and the four-crate
+test run each captured their own exit code separately: 0, 0, 0. targets=100 passed=2436 failed=0,
+zero skip banners - baseline 2435 plus exactly the one test added.
+
+The RED was a compile failure (`cannot find function 'rollback'`), which is the honest form when the
+defect is an absent function rather than a wrong one.
+
+The proof is `tests/sqlite_rollback.rs`, against real temp-file SQLite: two migrations where the
+child `depends_on` the parent, applied, then ONE `rollback` call. The child's `down` runs first and
+both tables are gone. That is the assertion that distinguishes an orchestrator from a loop.
+
+A near miss worth recording: the first gate run reported exit 0 and I nearly accepted it. The log
+ended in a `cargo fmt --check` diff, so the `&&` chain had short-circuited and the tests never ran -
+the 0 was the wrapper's, not the gate's. Capturing each stage's `$?` separately is what caught it,
+and is why the standing rule says not to pipe gate output through `head`.
+
+### Deliberately not done
+
+The advisory lock is NOT taken, and the function says so rather than implying a safety property that
+does not exist. Only SQLite is exercised end to end; the path is dialect-generic, which is an
+argument rather than a measurement. No CLI verb and no addon verb yet.
+
+Also unchanged, and stated because it is the thing most likely to be misread: `IrEnvelope` still has
+no rollback slot. The `down` this executes is the engine's SYNTHESISED inverse. An authored `down()`
+is still refused (F201). #25 - carrying an authored rollback through the envelope - remains open, and
+zeroship was told explicitly not to re-scope their staged fix on this change.
+
+### Newly worth doing
+
+#16, #17, #19 and #24 were gates on a planner nothing called. They now harden a path that runs, so
+the argument in F202 for deferring them no longer holds.
+
 ## F202 - #20 asks to wire an orchestrator that does not exist, and two sibling tickets inherit that
 
 #20 reads "wire the rollback orchestrator onto `plan_rollback`". That phrasing presumes the
