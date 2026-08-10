@@ -9020,9 +9020,28 @@ pattern today and the first where it cost a dispatched agent rather than a claim
 contract, read the one that exists.
 
 DECIDED, and the CLI projects these rather than inventing:
-- The verb is `down`. `rollback` is available as a concept but `--rollback` is already a resolve flag,
-  and a verb sharing a name with an unrelated flag is the ambiguity this codebase keeps paying for.
-  `down` also pairs with `up`, which is the vocabulary the product already uses.
+- The verb is `rollback`. CORRECTED - this entry first said `down`, on a premise I had not checked.
+
+  The original reasoning was that `--rollback` is already a flag on `resolve`, and that `down` pairs
+  with `up`, "the vocabulary the product already uses". The second half is false. There IS NO `up`
+  verb. The CLI verbs are `new`, `lint`, `plan`, `apply`, `status`, `resolve`, `history`
+  (`packages/zero-migrate-cli/src/cli.ts:1256-1263`), and the forward verb is `apply`. `up`/`down` is
+  the MIGRATION FILE vocabulary, not the command line's, so `down` would pair with nothing.
+
+  That leaves the balance the other way. The engine names this concept `rollback` at every point a
+  reader meets it - `zero_migrate::rollback`, `RollbackTarget`, `RollbackOptions`, `RollbackOutcome`,
+  `RollbackError`, and the journal event `rolled_back`. A CLI verb called `down` would be the ONLY
+  place the concept carries a second name, which is the defect this review keeps finding: F209's
+  `text` token, #143's two identifier budgets, #186's `backup_acknowledged` meaning two things.
+  Introducing a fresh instance of it to dodge a near-homonym is the wrong trade.
+
+  The collision is also weaker than I first argued: `zero-migrate rollback` is a VERB and
+  `zero-migrate resolve --rollback` is a FLAG on a different verb, so they do not occupy the same
+  namespace. `resolve --rollback` means "resolve an online rename by keeping the old column"
+  (cli.ts:1284), which is a genuinely different operation and reads as one.
+
+  Worth recording as method, not just outcome: the false premise was the one part of this entry with
+  no file:line behind it. Every other claim carried a citation and held; the uncited one was wrong.
 - The target is REQUIRED, mirroring `RollbackRequest::new`. No default target, so no accidental
   invocation.
 - `force` and `backup_acknowledged` surface as distinct flags, both off by default, with `force`
