@@ -9033,10 +9033,10 @@ That is the part I reject. A false positive here refuses a *valid* rollback and 
 the operator at the moment they most need the tool. Fail-closed is the right instinct
 for corruption risk; it is the wrong instinct for tool availability. So the gate covers
 only what is unconditionally non-transactional regardless of catalog state:
-`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`,
-`ALTER TABLE … DETACH PARTITION … CONCURRENTLY`.
+`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX ... CONCURRENTLY`,
+`ALTER TABLE ... DETACH PARTITION ... CONCURRENTLY`.
 
-Both opinions independently excluded `ALTER TYPE … ADD VALUE`, since PG12+ permits it
+Both opinions independently excluded `ALTER TYPE ... ADD VALUE`, since PG12+ permits it
 inside a transaction. Agreement reached separately is worth more than agreement reached
 together.
 
