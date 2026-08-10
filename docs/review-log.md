@@ -9018,12 +9018,21 @@ metadata for now" (snapshot.rs:949) whose `PartialEq` deliberately ignores it (s
 So the migration history holds every byte the `CREATE VIEW` needs; nothing reads it back.
 
 DECISION - synthesise from the IR history, not the live catalog. The deciding evidence is that
-lowering runs with NO database at all on the preview path: `sql_preview.rs:407` and `:1215` both
-lower against `LiveSchema::default()`. A live-derived down would therefore be present under
-`apply` and absent under `plan --sql`, so the previewed SQL would not be the SQL apply runs. That
-is exactly the defect class #74 already fixed. It would also make the artifact
-environment-dependent: two machines lowering the same source would embed different downs and
-check-sum differently.
+lowering runs with NO database at all on the preview path: `sql_preview.rs:251` says so in words
+("no DB - an EMPTY `LiveSchema`"), `:407` constructs `LiveSchema::default()`, and `:431` lowers
+per op. The Node `previewSql` entry is database-free by construction (`bridge.rs:170`), and the TS
+`plan` command renders pending envelopes through that same offline preview (`cli.ts:923`). A
+live-derived down would therefore be present under `apply` and absent under preview, so the
+previewed SQL would not be the SQL apply runs - the defect class #74 already fixed.
+
+CORRECTION to my own first draft of this entry. I wrote that a live-derived down would make "two
+machines check-sum differently". That is FALSE and I verified it false: `stamp_ir_plan_steps`
+(lower.rs:8688) computes `authoritative_ir_checksum(ir)` and stamps it onto EVERY `PlanStep::Ddl`
+(lower.rs:8753), and `load.rs:445` documents that anchor as "the authoritative, dialect-neutral
+plan checksum ... over the canonical op list", not over rendered SQL. So the rendered `down` never
+reaches the final checksum. The real consequence is worse than the one I claimed: two machines
+would emit DIFFERENT down SQL under the SAME checksum, a divergence the drift anchor cannot see.
+The conclusion survives; the mechanism I gave for it did not.
 
 Neither option is free on threading - `render_view_op(op, eff_schema, dialect, scope)` (lower.rs:8017)
 and `lower_view_op(&self, op, eff_schema, decl, confinement)` (lower.rs:5705) receive neither the
@@ -9051,9 +9060,49 @@ NOT COMMITTED, and deliberately so: the suite is red until the synthesis lands, 
 `#[compio::test]` (not tokio), `SqliteDescriptorGuard::new()` for the guard argument, and the
 `sqlite_master` cell type is `Option<String>` - all three cost a compile cycle to discover.
 
-STILL OPEN: the PG arm of the same proof, and a second opinion from `codex exec` that had not
-returned when this was written. The decision above rests on evidence I verified myself
-(`sql_preview.rs:407`, `:1215`), not on that opinion.
+### Second opinion, and the three constraints it added
+
+The `codex exec -s read-only` job returned after the above was written. It reached the same verdict
+- history over live catalog - but corrected the checksum claim recorded above and raised two design
+constraints I had not considered. I verified all three in the tree rather than taking them on
+report; each is a measured fact, not an opinion.
+
+1. A GUARDED DROP THAT NEVER RAN WOULD BE ROLLED BACK INTO A GHOST VIEW. An `ifExists` drop can be
+   journaled `completed` with no `DROP` executed: the PostgreSQL existence-guard arm resolves
+   `SatisfiedNoop` and, in its own words at `apply/backend/postgres/session.rs:700`, will "SKIP the
+   `up` AND the role switch, but STILL journal the `completed` row so the version LANDS". Rolling
+   that back with an unconditional `CREATE VIEW` would create an object that never existed on that
+   database. So a guarded drop must stay irreversible unless execution provenance records that the
+   drop actually ran. This is a correctness bug the design would have shipped.
+
+2. `ViewSnapshot::definition` IS NOT EXECUTABLE ROLLBACK SQL AND MUST NOT BE THE SOURCE. It is not
+   even one format: PostgreSQL fills it from `pg_get_viewdef(c.oid, true)`, a bare SELECT body
+   (`apply/drift.rs:741`), while SQLite fills it from `sqlite_master.sql`, the full `CREATE VIEW`
+   text (`apply/backend/sqlite/drift_sql.rs:271`). Retain the typed `ViewQuery` from the authored
+   op instead. The retained entry must also carry the effective schema and `replace`, because the
+   fold ignores schema qualifiers (fold.rs:37) and treats a second `CreateView` as a duplicate even
+   when `replace: true`.
+
+3. THE EXISTING CHECKSUM DOES NOT BIND THE PROVENANCE. `DropView`'s own op checksum does not
+   include the earlier migration's `CreateView.query`, so "keeps the inverse inside the checksum" -
+   which the ticket claimed and I echoed - is false for a cross-migration synthesis. Binding it
+   needs full-history integrity or an explicit rollback-validation step, and should be built
+   deliberately rather than assumed.
+
+Also corrected: my "plan --sql" shorthand is stale as a binary name - the old Rust `plan --sql`
+is retired (`tests/sql_preview.rs:649`). The offline path itself is very much live, through the
+callers named above.
+
+The strongest argument against the chosen mechanism, which I am accepting with eyes open: history
+restores what the authored history says existed, not necessarily what was actually dropped. An
+adopted view or an out-of-band `CREATE OR REPLACE` can leave the live object different from the
+retained query, and definition drift is deliberately invisible today (`apply/drift.rs` view
+equality ignores `definition`). A durable pre-drop catalog capture would be more faithful, but it
+requires capturing before execution, persisting the capture, and binding it to rollback integrity -
+none of which the live-lower proposal does either. Between the two mechanisms as posed, history is
+the sound one.
+
+STILL OPEN: the PG arm of the same e2e proof.
 
 ## F229 - the SQLite lock sidecar needs no downstream notice, and the pin I believed appbase was on was wrong
 
