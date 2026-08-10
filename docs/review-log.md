@@ -8990,6 +8990,37 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F254 - the cleanup that failed once, done by counting instead of sweeping
+
+Shipped 0060a4cb, closing #191.
+
+Thirteen host files each carried a byte-identical copy of the addon-path fallback. Once the
+freshness preload landed (F247) every copy was inert under `pnpm test:host` - thirteen blocks that
+LOOK like they resolve the addon, beside the one place that does.
+
+I attempted this once before and reverted it. That attempt edited NINETEEN files, four of which
+never carried the block, and deleted live imports - `import { test } from "node:test"` in two
+files, and `fileURLToPath` in a file whose very next line calls it. The reason it got that far is
+recorded in #191 and worth repeating: `tsc --noEmit` passes on an orphaned import, so it can prove
+you deleted TOO MUCH and never that you deleted enough. I ran it mid-way, saw RC=0, and read that
+as safety.
+
+The second attempt replaced the sweep with a count. For each of `HERE`, `join`, `dirname` and
+`fileURLToPath`, remove it only where the whole file mentions it exactly once - the import or
+declaration itself - and do it in dependency order, because deleting `const HERE` is what orphans
+`dirname` and `fileURLToPath` in the first place. After every pass the residue was re-reported
+rather than assumed. Three passes, 13 files, 153 deletions, nothing outside the 13.
+
+The blocks were replaced with an import rather than deleted, which keeps the check alive on the
+one invocation the preload does not cover: a single file run by hand. That is measured, not
+assumed - pointing the addon path at a file that does not exist and running one file directly
+reports `the host suite's addon is missing` instead of resolving whatever is on disk.
+
+The general lesson is about oracles rather than imports. A one-sided oracle answers one of the two
+questions you have, and the temptation is to treat its silence as an answer to both. When the tool
+cannot see the failure mode you care about, the substitute is not a more careful sweep - it is a
+check whose shape matches the question, here a per-symbol count.
+
 ## F253 - testing a command that never returns, without hanging the suite
 
 Shipped 3a4d66a9, closing #177. All three dialects now pin what happens to a rollback whose
