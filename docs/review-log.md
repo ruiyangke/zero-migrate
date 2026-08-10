@@ -8990,6 +8990,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F257 - the field a caller asked for, reporting the thing they did not know to ask for
+
+Closes #194. `GenArtifactsReply` gains `has_dialectal_ops: Option<bool>`.
+
+`genArtifacts` requires `dialect` with no default because the fold selects
+`Op::Dialectal` legs, so the same history yields a different column set per target.
+The reply never said whether that mechanism was in play, so a host supplying a
+constant was right or wrong silently. The downstream consumer hardcodes `"postgres"`
+at two call sites and asked for a guard.
+
+THE SHAPE THEY ASKED FOR CANNOT BE BUILT, and the reason is worth keeping: they
+proposed that `genArtifacts` reject a leg-carrying history folded under "a dialect the
+caller cannot justify". `GenArtifactsSource.dialect` is a `String`, so a hardcoded
+`postgres` and a derived `postgres` arrive as the same four bytes. The engine sees the
+VALUE and never the PROVENANCE. Any rule strong enough to catch their case would also
+reject the legitimate one covered by
+packages/zero-migrate-cli/tests/host/gen-artifacts-dialect.test.ts:118 and :167, where
+a MySQL project correctly folds its MySQL leg.
+
+THE PART NEITHER OF US ASKED FOR, and the whole reason this is not a one-line bool.
+The obvious field reports "a leg was selected". That is wrong in the case that matters
+most. `selected_dialectal_leg` (render/fold.rs) resolves own-leg-then-`default`, so a
+pg-only wrapper folded under SQLite matches neither, contributes zero ops, and the fold
+SUCCEEDS - already pinned by
+crates/zero-migrate/tests/dialectal_ops.rs:87-95, where the pg-only leg lowers to zero
+steps under SQLite and MySQL. That silent emptying is exactly the divergence the
+consumer fears for their SQLite dev tier, and a selection-shaped field would report
+`false` there. So the field reports PRESENCE: the history carries a `dialect()`
+wrapper, hence the dialect argument decided part of its content.
+
+Reached independently twice. I read it off the fold; a read-only codex pass reached the
+same conclusion unprompted and added three things I had not measured: `Option<bool>` so
+an older addon's absent field cannot satisfy a loose truthiness check (the consumer must
+test `=== false`); that no per-migration list is shippable, because `MigrationIr` carries
+a `name` but no version and `crates/zero-migrate-node/src/api.rs:170` concatenates every
+envelope's ops before the fold; and that `false` must not be sold as "dialect-independent",
+since the materialized enum/domain gates and identity/primary-key reuse rules key on the
+dialect too. All three are in the field's doc.
+
+The predicate is a top-level scan, which is complete rather than approximate: a leg
+cannot hold a wrapper, refused both by the validator and by `push_fold_op` returning
+`nested dialectal op reached fold`.
+
+MUTATION-TESTED, and this is what the arms are for. Re-implementing the field as
+selection - own-leg-or-default present for the folded dialect - failed exactly
+`an_unselected_dialectal_leg_still_reports_true` with `left: Some(false) right:
+Some(true)`, and nothing else. The three other arms passed under the mutation, so that
+one test is carrying the whole distinction.
+
+WHY IT SHIPPED WITH NO CALLER YET, having previously been parked for that reason. The
+consumer committed in writing to a named assertion at a named file, and said that if I
+declined they would instead scan their own migrations to assert the same property - a
+second producer of a fact this fold already computes, which is the shape that caused an
+earlier cross-repo confusion. Between "one additive optional field" and "two producers
+drifting apart", the field is smaller. It is also not unexercised: the four arms in
+crates/zero-migrate-node/tests/gen_artifacts_dialectal_report.rs assert every branch
+including the refusal, so it is not the F208/F211 unexercised-branch defect regardless of
+what the consumer does next.
+
+Two gate notes worth carrying. `pnpm --filter zero-migrate-cli test` exits 0 while
+running NOTHING - the script is `test:host`, and `--fail-if-no-match` guards the package
+filter, not the script name. A stage that reported green had never run. And the addon
+staleness gate from F247 fired correctly mid-verification: `cargo fmt` touched a test
+file after the addon build, and all 19 host files refused with the mtime message rather
+than testing a stale binary. Rebuild, then 135/135 with zero skips.
+
 ## F256 - the missing MySQL harness is a dependency fact, and the comment now says so
 
 Closed #176. One comment changed, at
