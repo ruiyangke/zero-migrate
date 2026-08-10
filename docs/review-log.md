@@ -8985,6 +8985,37 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F192 - the commit-message rewrite orphaned six citations in this log, which is the defect this log keeps filing
+
+Ruiyang called the commit messages invalid against CONTRIBUTING.md and asked for a rewrite. Measured
+against `CONTRIBUTING.md:101-200` over the 64 commits that had just reached origin: 44 subjects
+exceeded the stated 72 characters (23 exceeded 80), and 15 scopes were outside the documented
+vocabulary - `apply`, `review-log`, `fold`, `render`, `status`, `lower`, `drift`, `engine`,
+`validate`, `plan`, `pg`, `rename`, `fixtures`, `expand-contract`, `contributing`.
+
+The range `5956c30..HEAD` was rewritten and force-pushed. `git diff --stat` between the old tip and
+the new one prints nothing, so every tree is byte-identical and only messages changed.
+
+### The part worth recording
+
+Rewriting hashes broke six commit citations in THIS file: `255f6d0`, `6228cbc`, `a922445`, `ba70ac4`,
+`debd6f0`, `fa7bb58`. That is the same shape as #84, #104 and #124 - a citation that reads as
+authoritative and resolves to nothing - except this time the review caused it rather than found it.
+They are repointed to `6b05044`, `0ef6538`, `0651357`, `e43ecae`, `0ff2508`, `fc05ce2`, each verified
+reachable from `HEAD` with `git merge-base --is-ancestor`.
+
+A sweep of every seven-character hex token in this file now reports zero orphans. The detector is
+crude - it cannot tell a hash from any other hex token - so it over-collects and then filters by
+asking git, which is the right way round: a token that git resolves to a commit unreachable from the
+new tip is a citation that broke.
+
+### Not in scope, and stated rather than fixed
+
+The roughly 240 older commits in this review carry the same length and scope violations. They were
+left alone deliberately: they have been on origin far longer, and rewriting them would move hashes
+that another project may reference. `ab96f0a` - the commit appbase pins - is an ancestor of the
+rewrite base and was verified untouched.
+
 ## F191 - #171 shipped: the backfill was the one PostgreSQL session render that hand-rolled its timeouts
 
 #151 put the zero-timeout rule behind one resolver, `apply::timeout::resolve_timeout_ms`, on the
@@ -10155,7 +10186,7 @@ test comes before any fix.
 ## F172 - the declarative differ emits PostgreSQL DDL for a MySQL column change, and it is reachable
 
 #87. Both halves now established: the path is reachable, and the emitted text is measured. Pinned by
-`tests/mysql_alter_column_render.rs` (commit debd6f0). NOT fixed.
+`tests/mysql_alter_column_render.rs` (commit 0ff2508). NOT fixed.
 
 ### Reachable, unlike the last two dialect findings I traced
 
@@ -11352,7 +11383,7 @@ control.
 
 ## F156 - the object-scoped grants stop being decided by a witness that is not the target
 
-Closes #161 slice 2, the opening `a922445` marked rather than closed. That commit added an assertion
+Closes #161 slice 2, the opening `0651357` marked rather than closed. That commit added an assertion
 that the fixed-witness read is only used for `Global` knobs; three knobs would have tripped it, so
 their call sites were parked on a separately named helper documented as a known-open scope erasure.
 Naming the exception is what made this commit findable.
@@ -11440,7 +11471,7 @@ resolver that answers the wrong question would have been the wrong order.
 ## F155 - one question about what makes an index the same index
 
 Closes #162. The exact-name arm of the index pairing compared two facets by hand while the alias arm
-added in fa7bb58 asked a comparator built for exactly this. So a same-name index whose ACCESS METHOD,
+added in fc05ce2 asked a comparator built for exactly this. So a same-name index whose ACCESS METHOD,
 predicate, INCLUDE payload, storage parameters, ONLY or comment had moved returned a clean plan while
 the live index was a different index.
 
@@ -11722,7 +11753,7 @@ audited whether any charter on disk actually narrows this knob.
 
 ## F152 - two legal spellings of one index, reconciled without renaming either
 
-Closes #150. Step 1 (255f6d0) corrected the comments that promised a byte-for-byte agreement the
+Closes #150. Step 1 (6b05044) corrected the comments that promised a byte-for-byte agreement the
 differ does not implement; this is the behaviour change those comments pointed at, and it is
 deliberately NOT the change the ticket originally proposed.
 
@@ -12303,9 +12334,9 @@ filed to settle, and it settles in the code's favour.
 
 ### What did change, and it was not this
 
-6228cbc neither creates nor closes this gap. It improved the ALREADY-contended case: status returns
+0ef6538 neither creates nor closes this gap. It improved the ALREADY-contended case: status returns
 busy without reading, and resolve rejects that before selecting a version, so the operator gets
-"a deploy is running" instead of "unknown migration". ba70ac4 did not touch cli.ts at all.
+"a deploy is running" instead of "unknown migration". e43ecae did not touch cli.ts at all.
 
 No fix. One session across both halves would add serialization without improving journal or schema
 correctness.
