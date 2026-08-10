@@ -8990,6 +8990,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F220 - #19 is real, its fix names a function that does not exist, and the second question it never asked is the harder one
+
+Verified, not implemented. The gate wants a decision first.
+
+### Confirmed by reading
+
+The PostgreSQL rollback leaf opens a transaction unconditionally:
+`postgres/session.rs`, `rollback_one_transactional` (declared `:1351`), reaches
+`conn.batch("BEGIN").await?` at ~`:1394` with no branch on `m.flags.transactional` and
+none on the `down` text. Ahead of it sit only the irreversible check (`:1362-1368`),
+the line-1 guard over `down` (`:1379-1383`), and the quote seams.
+
+And `plan_rollback` gate (5b) keys on the flag alone - `if !m.flags.transactional`.
+So a migration declaring `transaction: true` whose `down` cannot run inside a
+transaction reaches the BEGIN and fails there, which is the outcome that error exists
+to prevent.
+
+### Refuted: the prescription
+
+The ticket says to "run the same `classify()` the apply path uses over the down text".
+
+    rg -n "fn classify" crates/zero-migrate/src/
+    schema/diff.rs:1584   fn classify_add_column
+    plan/manifest.rs:260  fn classify_mismatch
+
+Neither is related. There is no `classify()`. This is the third ticket in two sessions
+whose remedy cites an artifact by a name that does not resolve - after #16's supersession
+closure and #17's `pending_contract_shape` (which turned out to be real). The habit that
+catches all three is the same: resolve the cited name before believing the sentence
+around it.
+
+What DOES exist is the right model to copy: `validate_non_txn_idempotent`
+(`postgres/session.rs:509-531`) parses with `pg_query` and matches
+`NodeEnum::IndexStmt(idx) if idx.concurrent && !idx.if_not_exists`. It reads `m.up`
+only, and it answers idempotency rather than transactionality. Nothing anywhere parses
+`m.down`.
+
+### Not verified, and I am not going to assert it
+
+The ticket names SQLSTATE 25001 for `DROP INDEX CONCURRENTLY` inside a transaction. I
+did not run it against a server. Anyone quoting that in a message or an assertion
+should measure it first.
+
+### The two questions before any code
+
+Which statement kinds to refuse is not obvious, and it is wrong in both directions:
+too narrow leaves the defect, too broad refuses valid `down` SQL and makes rollback
+unusable. The candidate set is also version-sensitive - PostgreSQL 12 relaxed
+`ALTER TYPE ... ADD VALUE` inside a transaction - so the answer follows this project's
+PostgreSQL 18 floor rather than inherited folklore.
+
+The question the ticket never asks is the better one: should this REFUSE, or should the
+leaf run such a `down` outside the transaction, the way apply already handles a non-txn
+`up`? Refusal is fail-closed and simple; running it outside is what the forward path
+does, and symmetry has been the right instinct across this whole rollback surface. The
+ticket assumes refusal without arguing it.
+
+There is also a placement tension worth naming: `plan_rollback` is pure and
+dialect-neutral, and `pg_query` is PostgreSQL-only. Either the parse happens earlier and
+its verdict is threaded in - the shape the obligation gate now uses (F219) - or the gate
+lives at the leaf and gives up the "every refusal before any statement runs" property.
+
 ## F219 - the rollback that wedged a rename is refused, and the wedge was simpler than the ticket described
 
 Shipped 1e3b70f. `RollbackError::PendingContractOutstanding` refuses, during planning,
