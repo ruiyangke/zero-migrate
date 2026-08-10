@@ -8985,6 +8985,74 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F181 - #129 and #167 should NOT be built once: the same gap costs very different things
+
+The ticket says "SHARED WITH #167. Build once." Both halves reach the same PostgreSQL behaviour
+through the same missing check, so that reads sensibly - but the FAILURE the check would prevent is
+not the same failure, and only one of them is expensive. No code yet; this is the scoping the ticket
+asked for before implementing, plus a correction to its own citation.
+
+### The shared facts, now verified rather than single-sourced
+
+- The fold's `DropColumn` arm removes indexes and constraints by plain-column provenance
+  (`fold.rs:1573` onward). EXCLUDE elements contribute a name only when they are a plain `Column`;
+  an `Expr` element contributes nothing (`fold.rs:3331`, `:3362`). Generated columns and the `views`
+  map are never inspected. So an expression-only EXCLUDE reader, a generated column, or a view
+  survives the projected drop. Already pinned by `tests/fold_drop_column_exclusion_expression.rs`.
+- NO plan-time dependency refusal exists on either path. Reported as "none found" and consistent
+  with `expand_contract.rs:611-624`, which documents the drop stopping at PostgreSQL EXECUTION time.
+- NOTHING in production compares the projection against a live catalog afterwards; the only
+  comparison is `tests/fold_roundtrip_pg.rs:213-223`. A wrong projection is silently believed.
+- The oracle the gate would use is built and verified 10/10 -
+  `tests/pg_column_drop_dependency_oracle.rs` (F171).
+
+### The ticket miscites the field its own conclusion rests on
+
+#129 says a fold-side fix is impossible because "`exclusion_cascade_columns` keeps plain columns
+only". There is no such field. VERIFIED BY ME: the real one is `IndexSnapshot::expr_cascade_columns`
+(`model/snapshot.rs:665`), populated only by the PostgreSQL introspector (`apply/drift.rs:1168`) and
+`None` on author-built snapshots (`snapshot.rs:807`) - live-side provenance the fold never has.
+
+The conclusion survives, on better evidence. EXCLUDE is a CONSTRAINT, not an index, and
+`ConstraintSnapshot::definition` is empty for EXCLUDE by design (`snapshot.rs:825-826`: "PG
+canonicalizes exclusion definitions differently from the closed IR renderer, and drift tracks those
+constraints by name + kind"). The fold retains no exclusion body at all, so a fold-side check would
+have nothing to check. Worth correcting because the wrong name sends an implementer to index
+snapshots for a constraint-shaped problem.
+
+### Where the two tickets part company
+
+#129, a plain `dropColumn`: PostgreSQL refuses one statement, names the dependent, and the
+transaction rolls back. Nothing is left half-done. A plan-time gate buys EARLIER notice of an error
+the database already reports precisely.
+
+#167, a rename: the drop is step C2 of an expand-contract chain, and VERIFIED BY ME that each step is
+its own `Migration` with its own version and checksum (`expand_contract.rs:673`, step indices
+`EC_STEP_E1`..`EC_STEP_C2` with explicit `depends_on`). By the time C2 runs, E1 (add column), E2, E3
+(backfill) and C1 (drop the dual-write trigger and function) have ALREADY applied and journaled. The
+dependency failure therefore leaves the user mid-transition: both columns present, the dual-write
+trigger gone, the rename incomplete, and the repair a manual one. A plan-time gate prevents a partial
+state rather than merely relocating a message.
+
+So the value is lopsided. The same oracle serves both, and the same predicate; what differs is whether
+a gate is worth its risk. Every gate in this review carries the standing hazard of rejecting a
+migration that works today, and #129 spends that risk to move an accurate error earlier while #167
+spends it to stop a half-finished rename.
+
+### Recommendation
+
+Build the live-catalog preflight for #167 first, on the verified oracle, and judge #129 separately
+afterwards rather than as a free rider on it. Do NOT treat "the oracle is shared" as evidence that
+the gate is equally justified in both places - that is the same reasoning error F178 corrected, where
+one decision covered five ops and was right for three.
+
+### Provenance
+
+The fold-arm and no-comparison findings are a read-only codex pass, corroborated where they overlap
+what I read myself; the field correction, the `ConstraintSnapshot` evidence and the per-step
+`Migration` fact are mine. Subagent budget is still exhausted at 200/200, so this is one instrument
+plus my own reading, recorded the way F170 was.
+
 ## F180 - #166 shipped as the narrow refusal F179 decided
 
 Implements F179's decision. Nothing about the diagnosis changed on contact with the code, which after
