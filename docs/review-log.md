@@ -8985,6 +8985,73 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F191 - #171 shipped: the backfill was the one PostgreSQL session render that hand-rolled its timeouts
+
+#151 put the zero-timeout rule behind one resolver, `apply::timeout::resolve_timeout_ms`, on the
+argument that a single owner is what makes the rule hold on every path. `backfill_sql.rs` never asked
+it. `batch_session_sql` interpolated `cfg.statement_timeout_ms()` and `cfg.lock_timeout_ms()` straight
+into the session preamble, so a zero from either knob rendered as `SET LOCAL statement_timeout = 0`
+and the backfill ran with no limit at all - the exact state the refusal exists to prevent.
+
+That is the fifth instance this pass of the same shape: a convention implemented correctly at one
+site and missed at its sibling. The DML renderer two files over already made the call.
+
+### The RED, and what it actually proves
+
+The ticket asked for a live-PG backfill rather than an assertion on the rendered string, and that is
+what `a_backfill_refuses_a_config_timeout_that_truncates_to_zero` (`tests/pg_scenarios.rs:409`) does.
+It drives `PostgresBackend::run_backfill_step` against the live container with
+`pg.statement_timeout = Duration::from_micros(500)`, asserts `ApplyError::IndefiniteTimeout(_)`, and
+then asserts the target row still reads `seed` - so the refusal lands before any row is written.
+
+The control is the same table, the same `BackfillSpec` and the same call one line down under the
+default finite budget; it applies and writes `filled`. One variable differs, so the refusal is
+attributable to the budget and not to the fixture.
+
+RED reproduced by me, not inferred: with `backfill_sql.rs` restored to its committed state and the
+new test in place, `cargo test -p zero-migrate --test pg_scenarios
+a_backfill_refuses_a_config_timeout_that_truncates_to_zero` exited 101, panicking at
+`pg_scenarios.rs:467` - the `expect_err`. Pre-fix, a backfill with `statement_timeout = 0` SUCCEEDED.
+
+### The zero this catches cannot come from the loader
+
+`ExecutorConfig::statement_timeout_ms` is `Duration::as_millis` truncated to `u64`, so
+`Duration::from_micros(500)` is zero whole milliseconds. No IR is involved and no load gate can see
+it, which is the reason the rule lives at value resolution rather than only at load.
+
+### Severity: embedder-only, measured
+
+`grep -rn "statement_timeout\|statementTimeout" packages/zero-migrate-cli/src/*.ts
+crates/zero-migrate-node/src/*.rs` returns nothing, and the addon builds its `ExecutorConfig` with the
+defaults at `conn.rs:124-125` (60s / 3s). No CLI or addon user can reach a zero here today. The
+refusal is for a Rust embedder that sets the field itself - which is exactly the population #151's own
+module header names as the reason the rule is not a load-time check.
+
+### The sibling I expected to be broken is correct, which is what makes this a miss
+
+I went looking for the same shape on MySQL and did not find it. `mysql/backfill_sql.rs:274` calls
+`session::configure_data_session`, which resolves BOTH budgets through `resolve_timeout_ms`
+(`mysql/session.rs:569-594`) - and its doc comment names the sub-millisecond truncation as the reason.
+`postgres/session.rs:417` does the same for the PG DML step, with the same reason written out.
+
+So two of the three data-step renders already carried the rule and said why. The PG backfill was the
+one that did not, sitting next to a sibling in the same directory that does. That is the strongest
+form of this defect class: not an oversight nobody could have caught, but a convention with a written
+rationale that one site skipped.
+
+### What was NOT measured
+
+The refusal is asserted through `run_backfill_step`. I did not measure the initialize / batch /
+finish call sites separately - the test enters at the first of the three, so the other two are covered
+by the shared renderer and by the compile, not by their own case.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. Workspace 100 targets / 2429 passed / 0 failed / 0 ignored - exactly one above
+the 2428 baseline, matching the one test added. Addon crate 4 targets / 54 passed. Zero
+`LIVE-DATABASE COVERAGE SKIPPED` banners, and the new test is listed by name in the log rather than
+inferred from the count.
+
 ## F190 - #153 reconciled: the ticket's scoping reason is backwards, and the split found a hole in #151
 
 #153 says explicitly it "needs the dual opinion before implementing - it changes when a deploy fails,
