@@ -8990,6 +8990,55 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F226 - the MySQL rollback marker ships, and the test that already covered this path did not notice any of it
+
+Shipped 0f538add, on the decision settled in F225. A rollback marker is written before
+the `down` and cleared with the `rolled_back` row in one transaction, mirroring what
+apply does with its completed row and `clear_inflight`. Both paths fail closed on an
+unmatched marker.
+
+### The part worth recording
+
+`rollback_runs_down_then_appends_rolled_back_event` (`mysql/mod.rs:5041`) already
+covered this exact function. After adding a marker probe, a marker INSERT, a
+`START TRANSACTION`, a marker DELETE and a `COMMIT` to the path it exercises, it still
+passed - unchanged, first run.
+
+It asserts three things: session settings precede the `down`, the `down` ran, and the
+`rolled_back` INSERT has the right column shape. All true before and after. It holds the
+entire recorded SQL log and reads three slices of it.
+
+That is #187's tell exactly - *a test that renders or receives a rich artifact and
+asserts on a narrow projection of it* - found in my own change rather than in a survey.
+It is also the shape zeroship named in `ZEROSHIP-2026-08-10-182`: a stale mirror is not
+a broken test, it is a passing test that has quietly stopped covering something.
+
+So the change shipped with a second test that pins the ordering the marker exists for:
+probe before arm, arm before `down`, `down` before `START TRANSACTION`, append and clear
+both before `COMMIT`. Removing the bracket fails that one and only that one - 137 passed,
+1 failed.
+
+### Two comments that had gone false
+
+The module header said the rollback "append is best-effort-ordered after the `down`
+succeeds", and the trait impl said the append "is ordered after it (the same two-phase
+reality as apply)". Both described the behaviour I had just replaced. Updating them was
+not tidying: this review has spent days on comments that outlived their code, and
+leaving two more would have been writing tomorrow's finding today.
+
+### What it does not buy, said in the code
+
+A marker cannot make a MySQL rollback atomic. The `down` auto-commits statement by
+statement and nothing changes that. The module header now says so in as many words, so a
+later reader does not mistake the marker for a guarantee.
+
+### Left open
+
+No live-MySQL arm drives an interrupted `down` through the refusal. The recording test
+proves the SQL and its order; nothing yet kills a rollback midway against a real server
+and checks that the next apply and the next rollback both refuse. The host suite is where
+that belongs, beside the live rollback arm from bfed3d1.
+
 ## F225 - the MySQL rollback marker is decided, and apply turns out not to have the window rollback has
 
 Decision only; no code. Two independent opinions agreed on all four questions, which has
