@@ -9053,13 +9053,31 @@ the new one prints nothing, so every tree is byte-identical and only messages ch
 Rewriting hashes broke six commit citations in THIS file: `255f6d0`, `6228cbc`, `a922445`, `ba70ac4`,
 `debd6f0`, `fa7bb58`. That is the same shape as #84, #104 and #124 - a citation that reads as
 authoritative and resolves to nothing - except this time the review caused it rather than found it.
-They are repointed to `6b05044`, `0ef6538`, `0651357`, `e43ecae`, `0ff2508`, `fc05ce2`, each verified
+They are repointed to `6b05044`, `0ef6538`, `1a4f44d`, `e43ecae`, `d8d713f`, `c9447aa`, each verified
 reachable from `HEAD` with `git merge-base --is-ancestor`.
 
-A sweep of every seven-character hex token in this file now reports zero orphans. The detector is
-crude - it cannot tell a hash from any other hex token - so it over-collects and then filters by
-asking git, which is the right way round: a token that git resolves to a commit unreachable from the
-new tip is a citation that broke.
+The detector is crude - it cannot tell a hash from any other hex token - so it over-collects and then
+filters by asking git, which is the right way round: a token that git resolves to a commit
+unreachable from the new tip is a citation that broke.
+
+It cannot, however, tell a LIVE citation from a HISTORICAL one, and this entry is full of the latter.
+The six hashes named in the paragraph above are deliberately dead - they are the record of what the
+rewrite moved - so the sweep will keep reporting them forever. Four more predate this review
+entirely (`24a8118`, `2726339`, `2c201e3`, `4f7d348`, all from branches that no longer exist, and all
+carrying the phase vocabulary #10 was filed against). Ten reported, zero actionable: read the hits,
+never the count.
+
+### The repair rotted inside the hour, which is the finding
+
+A second message sweep followed this one and moved the same commits again, so three of the six
+replacements above were themselves orphaned before anyone read them. They now point at `1a4f44d`,
+`d8d713f` and `c9447aa`.
+
+Citing a hash inside a range that may be rewritten is a citation with a short half-life, and the cost
+is not confined to this repo: appbase pins a zero-migrate commit, and both rewrites orphaned the pin
+it held at the time - the second one landing while its re-pin was in flight. The rule that follows is
+not "check the pin" but "announce the range BEFORE the force-push", which is now committed to in
+`~/.claude/inter-projects.md` as ZERO-MIGRATE-2026-08-10-143.
 
 ### Not in scope, and stated rather than fixed
 
@@ -10238,7 +10256,7 @@ test comes before any fix.
 ## F172 - the declarative differ emits PostgreSQL DDL for a MySQL column change, and it is reachable
 
 #87. Both halves now established: the path is reachable, and the emitted text is measured. Pinned by
-`tests/mysql_alter_column_render.rs` (commit 0ff2508). NOT fixed.
+`tests/mysql_alter_column_render.rs` (commit d8d713f). NOT fixed.
 
 ### Reachable, unlike the last two dialect findings I traced
 
@@ -11435,7 +11453,7 @@ control.
 
 ## F156 - the object-scoped grants stop being decided by a witness that is not the target
 
-Closes #161 slice 2, the opening `0651357` marked rather than closed. That commit added an assertion
+Closes #161 slice 2, the opening `1a4f44d` marked rather than closed. That commit added an assertion
 that the fixed-witness read is only used for `Global` knobs; three knobs would have tripped it, so
 their call sites were parked on a separately named helper documented as a known-open scope erasure.
 Naming the exception is what made this commit findable.
@@ -11523,7 +11541,7 @@ resolver that answers the wrong question would have been the wrong order.
 ## F155 - one question about what makes an index the same index
 
 Closes #162. The exact-name arm of the index pairing compared two facets by hand while the alias arm
-added in fc05ce2 asked a comparator built for exactly this. So a same-name index whose ACCESS METHOD,
+added in c9447aa asked a comparator built for exactly this. So a same-name index whose ACCESS METHOD,
 predicate, INCLUDE payload, storage parameters, ONLY or comment had moved returned a clean plan while
 the live index was a different index.
 
