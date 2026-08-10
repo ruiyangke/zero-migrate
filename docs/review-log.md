@@ -8985,6 +8985,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F180 - #166 shipped as the narrow refusal F179 decided
+
+Implements F179's decision. Nothing about the diagnosis changed on contact with the code, which after
+two wrong calls on this ticket is worth recording as much as the fix.
+
+### The gate
+
+`IrAuthor::refuse_repeat_sqlite_rename_target` (`render/lower.rs`), called from `lower_steps` before
+any op lowers. It is a pure function of the op list - no per-envelope state to thread, no signature
+change, no new parameter through `lower_one_op`'s two call sites - because the shape it refuses is
+visible in the IR itself: on SQLite, two `renameColumn` ops naming the same table.
+
+New `IrLowerError::SqliteRepeatRenameTarget(String)`, whose message names the repair rather than the
+mechanism a user cannot act on:
+
+    table "people" is renamed twice in one migration, which SQLite cannot apply: each
+    rename rebuilds the table from its stored CREATE TABLE text, and the second rebuild
+    would still be built from the first one's. Split the renames across separate migrations.
+
+Compare what the author got before, mid-apply, after the first rename had already committed:
+
+    sqlite rebuild of 'people' failed: table people__zero_migrate_rebuild has no column named handle
+
+### Kept narrow on purpose, and the control proves it
+
+The predicate is NOT "two ops on one table". Two `addColumn`s on one table lower and apply today, and
+a gate that rejected them would be the failure mode this review has already reversed fixes for. The
+test carries the control inline: renames of columns on two DIFFERENT tables in one migration still
+lower, because each table's stored text is still its own. Without that half, the test would pass just
+as well for a gate that refused every multi-rename migration.
+
+The test also asserts the dedicated variant and the repair sentence, not merely that some error came
+back - an assertion on "is an error" would survive the message degrading into the unactionable one.
+
+### The bigger thing this does not do
+
+The general defect - other lowering arms read live structure an earlier op in the same envelope can
+invalidate - is untouched, and deliberately so. F179 has the enumeration. It wants its own ticket and
+its own measurements; folding it in here would have meant shipping a lowering-wide contract change
+under a two-rename bug report.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. Workspace 100 targets / 2427 passed / 0 failed / 0 ignored - unchanged,
+because the rewritten test replaces one that already existed. Addon crate 4 targets / 54 passed.
+Host suite 124 / 124 / 0 skipped with the addon rebuilt. JS gates green. Zero
+`LIVE-DATABASE COVERAGE SKIPPED` banners.
+
 ## F179 - #166 diagnosed to the exact carrier, and my "cheap narrow fix" call was wrong twice
 
 No code shipped. This records a diagnosis that took two wrong turns, because the wrong turns are the
