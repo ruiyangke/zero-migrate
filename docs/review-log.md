@@ -8985,6 +8985,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F185 - #103's predicate is not "paths that resolve" - three classes of path-like string are not citations
+
+Continues F184's population run to a classification. The predicate got simpler and then, at the last
+step, found the case that decides whether the gate can be installed at all.
+
+### Adding roots was the wrong direction, and stopping was the finding
+
+F184 ended at 30 unresolved after four roots. Adding a fifth (sibling crate / group root) took it to
+26. That is the shape of tuning a gate until the number looks acceptable, which F184 itself warned
+against, so I stopped adding roots and classified the remainder instead.
+
+### Three kinds of path-like string, only one of which a gate should read
+
+CLASSIFIED BY ME, checking each target against `git ls-files`:
+
+  - ROT - the target exists nowhere. `crates/zero-migrate/src/model/migration.rs` cited from
+    `model/load.rs` is one; I hit it myself today looking for `ChecksumInput`, which lives in
+    `crates/zero-migrate-ir/src/migration.rs`.
+  - UNDER-QUALIFIED - the target EXISTS, the citation just is not root-relative. `render/fold.rs`,
+    `tests/support/mod.rs` (three matches - ambiguous), `apply/backend/postgres/session.rs`.
+  - NOT A CITATION AT ALL - and this is the class that breaks a naive gate:
+      * `policy/root.toml` in `packages/zero-migrate-cli/tests/host/config.test.ts` is CONSTRUCTED at
+        runtime - `resolve(project.root, "policy/root.toml")` writes it into a temp fixture.
+      * `migrations/0007_split.ts` at `crates/zero-migrate-ir/src/validate.rs:408` is a prose EXAMPLE,
+        marked `e.g.`, of what a source-map location looks like.
+    Flagging either would push an author to mangle correct text to satisfy a checker.
+
+### The predicate that survives, and its number
+
+Check only citations already written ROOT-RELATIVE (`crates/...` or `packages/...`). Prose examples
+and runtime paths do not match it, under-qualified citations are out of scope by construction, and it
+covers exactly the shape #84 fixed.
+
+    root-relative citations   41
+    unresolved                 2
+
+Two is believable, which is what F184 said to look for.
+
+### And both of the two are CORRECT
+
+VERIFIED BY ME BY READING `crates/zero-migrate-ir/src/id.rs:11-13`:
+
+    //! The guard lives where the condition holds. zeroship vendors this crate alongside
+    //! its own `crates/core/src/typed_id.rs`, so both copies coexist there, and its
+    //! `crates/migrated/tests/typed_id_parity.rs` cross-decodes the two encodings.
+
+Those are CROSS-REPO citations, attributed in the surrounding prose to zeroship
+(`/home/ruiyang/Projects/appbase`). They describe files that exist - just not here. The same class
+#124 handled.
+
+So the surviving predicate has a 100% false-positive rate on its current findings, and the "fix" it
+would demand is to damage two accurate sentences. A gate installed today would fail at install, for
+the third distinct reason this ticket has now produced.
+
+### What that leaves
+
+A root-relative path is a claim about THIS repo only when it is not attributed to another one, and
+the attribution is prose a gate cannot parse. The options are to mark cross-repo citations
+mechanically (something like a `zeroship:` prefix, a convention change touching two lines today), to
+keep an exemption list (which the NUL gate's header explicitly refuses - "no allowlist ... if that
+ever stops being true, the right response is a deliberate decision recorded here, not a silently
+growing exemption list"), or to drop the gate.
+
+NOT DECIDED. It is a convention change for contributors, not a local implementation choice, and this
+ticket has already punished three confident predicates. No gate written, no citation edited.
+
 ## F184 - #103's resolution rule needs five roots, not two, and the population run says so
 
 #103 requires a FULL POPULATION RUN before installing, on the grounds that "a number you do not
