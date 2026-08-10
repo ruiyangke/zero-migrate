@@ -8990,6 +8990,59 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F222 - the non-transactional down gate ships, and the test that mattered was the one for the parser rather than the gate
+
+Shipped b65df459, on the decision settled in F221. Gate (5b) of `plan_rollback` now
+takes two inputs: the author's `transaction` flag, and what the dialect found in the
+reverse SQL.
+
+### The test that would have been easy to skip
+
+The gate test hands `plan_rollback` a verdict map built by hand. It passes whether or
+not the classifier can actually recognise anything - it proves the plumbing, not the
+detection. A green suite there would have meant nothing about whether an operator is
+protected.
+
+So the load-bearing test is the parser one, and it is worth its own note: the three
+CONCURRENTLY forms carry their flag three different ways. `CREATE INDEX` and
+`DROP INDEX` each have a struct field (`IndexStmt.concurrent`, `DropStmt.concurrent`),
+but `REINDEX` carries it as a `DefElem` in `params`. The guard crate already knew this -
+`def_elem_present(&r.params, "concurrently")` at `analysis/analyze.rs:378` - and had I
+followed the first two by analogy, the REINDEX arm would have compiled, never fired, and
+looked like coverage. Compiling proves a field exists, not that it is ever set.
+
+Six negative cases are pinned alongside, including `ALTER TYPE ... ADD VALUE`. That arm
+fails if the matcher ever keys on statement KIND rather than the CONCURRENTLY flag,
+which is the shape the over-broad version of this gate would have taken.
+
+### An unexpected corroboration
+
+The guard's own advisory text, written for an unrelated purpose, already says it:
+`analyze.rs:387` recommends "use REINDEX ... CONCURRENTLY (it cannot run inside a
+transaction, so author it as its own non-transactional migration)". The codebase had
+reached F221's scope conclusion before I did, in a file neither opinion consulted.
+
+### Parse failure is not fail-open, and that was checked
+
+The classifier returns "no objection" when `pg_query` cannot parse the `down`. That is
+only safe because something else rejects it: the line-1 guard parses the same text and
+errors on syntax (`guard/mod.rs:1196`, `:1276`,
+`pg_query::parse(sql).map_err(|e| ParseError::Syntax(...))?`), and it runs as gate (5c),
+immediately after this one. Verified rather than assumed, because "some other gate
+catches it" is exactly the sentence that is usually wrong.
+
+### A self-inflicted mess worth recording
+
+Removing two ellipses from my own added lines, I ran `perl -pe s/…/.../g` over the whole
+file. It rewrote 12 PRE-EXISTING lines - including a runtime error-message string - and
+they showed up as my additions. Reverting them, my anchor matched two similar strings and
+flipped one the wrong way, introducing non-ASCII into a line that had none.
+
+Two checks caught it, and both were needed: `git diff -U0 | grep '^-'` for pre-existing
+lines I had no business touching, and the added-lines ASCII scan for the over-correction.
+A whole-file substitution to fix two lines is never worth it; the blast radius is the
+file, not the edit.
+
 ## F221 - two opinions agreed on the shape of the non-transactional gate and split on its scope, and the split was settled by grepping rather than arguing
 
 Decision only; no code yet. F220 established the gap and named two open questions. Both
