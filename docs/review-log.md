@@ -8990,6 +8990,38 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F253 - testing a command that never returns, without hanging the suite
+
+Shipped 3a4d66a9, closing #177. All three dialects now pin what happens to a rollback whose
+project lock a peer holds.
+
+The PostgreSQL arm is the awkward one, and the awkwardness is the finding. MySQL acquires with
+`GET_LOCK(name, 10)` and returns a real error, so its arm is an ordinary assertion on a message.
+PostgreSQL acquires with `pg_advisory_lock`, which takes no timeout, so the command under test
+NEVER RETURNS. Awaiting it does not fail the test - it hangs the suite, which is a worse outcome
+than the defect being tested.
+
+So the deadline has to belong to the TEST rather than the command: the rollback is spawned with a
+6s budget and being killed mid-wait IS the observation. That inverts the usual shape - the pass
+condition is the absence of a result rather than the presence of one - and an absence is exactly
+what passes for the wrong reason most easily.
+
+Two controls stop it reading as an accident. Releasing the lock lets the IDENTICAL command finish
+with status 0, which separates "waiting on this lock" from "slow for some other reason". And the
+mutation: with the lock deliberately not taken, the arm fails on
+
+    the rollback should still have been waiting when the deadline hit; it exited with status 0
+
+rather than passing quietly. Without that second control the arm would still be green on a machine
+where the CLI simply took longer than 6s to start.
+
+The lock itself is taken by running the engine's own expression verbatim,
+`pg_advisory_lock(hashtext()::bigint)` with the project schema, so unlike the MySQL arm there is
+no derivation to drift at all.
+
+Both arms pin CURRENT behaviour and neither takes a position on which dialect is right. That
+question is #152, still blocked, and it now has a test on each side rather than an argument.
+
 ## F252 - a deliberate second source of truth, and the property that makes it safe
 
 Shipped 81ee7e94, closing the MySQL half of #177.
