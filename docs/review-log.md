@@ -9,6 +9,11 @@ Working notes; not staged. This file is for review, not for the changelog.
 
 ### Q1 - The `II.x.y` spec references in `zero-migrate-policy` point at a document that is not in this repo
 
+Re-measured 2026-08-10: 209 references across `crates/` and `packages/`, by
+`grep -rn 'II\.[0-9]\|I\.[0-9]\.[0-9]\|III\.[0-9]' --include='*.rs' --include='*.ts' --include='*.js'
+crates/ packages/ | grep -v /target/ | wc -l`. Still unresolved, and still awaiting the call below.
+The count has grown since this was first written, so the tags are being added to, not just inherited.
+
 The policy crate carries roughly 150 comment references to numbered spec sections:
 `II.3.2` (25 times), `II.7` (22), `II.2.7` (18), `II.6`, `II.2.1`, `II.4.4`,
 `II.2.5`, and more, spread across `registry.rs`, `rule.rs`, `document.rs`,
@@ -8984,6 +8989,61 @@ pre-existing.
 refusing the bad one. Whether it should join the up-front gate family is an operator-visible contract
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
+
+## F209 - four files agreeing is not the deciding file: I told appbase varchar(255) was a stale fixture, and it is the intent
+
+Retracted in ZERO-MIGRATE-2026-08-10-173, one message after asserting it. Worth writing down because
+the reasoning felt like the good kind - every claim carried a file and a line - and was wrong anyway.
+
+Appbase asked a direct question: their injector emits `varchar(255)` for the confined system columns
+(`id`, `created_by`, `updated_by`), my `op_fixtures/fluent_ddl.golden.json` says the same, but they
+believed `TEXT` was intended and had gone red rather than re-bless their suite. Is 255 the intent, or
+is the fixture stale?
+
+I answered "the fixture is stale, your `TEXT` is right, change nothing" from a four-link chain:
+
+- `op_fixtures/fluent_ddl.golden.json:30-42` records `{"string":{"length":255}}`
+- `tests/support/mod.rs:65` declares `{ name = "created_by", type = "text", nullable = true }`
+- `tests/op_fixture_goldens.rs:58` lists the stem, so the golden is exercised
+- `tests/op_fixture_goldens.rs:166` folds it under `support::confined_charter()`
+
+Every link was accurate. The conclusion was backwards, because the charter's `type = "text"` is not a
+SQL type - `zero-migrate-policy/src/rule.rs:76` says the field is "the column's SQL type as an opaque
+token". The function that decides what the token means is `inject_column_to_ir`, at
+`crates/zero-migrate/src/model/table_shape.rs:401-408`, and it maps `"text" => ColType::String {
+length: 255 }` on purpose, with the reason written above it: these columns hold ids, are keyed, and
+MySQL cannot key an unbounded `TEXT`.
+
+None of my four links was the mapping. Each was upstream or downstream of it. They agreed with each
+other because they are all spellings of the same token, and I read their agreement as corroboration
+when it was one fact counted four times.
+
+Two checks would have caught it, and I named both in the message as things I had not done:
+
+Running the suite. `cargo test -p zero-migrate --test op_fixture_goldens` is RC=0, 2 passed. That
+test asserts full equality of resolved ops against the golden (`op_fixture_goldens.rs:197-206`,
+counts before contents), so a golden genuinely contradicting its charter could not be green. I had
+even written that a green result would itself be a finding. It was green, and the finding was against
+me.
+
+Sweeping the siblings, which appbase had explicitly suggested. It is not one fixture: ten goldens
+carry the identical shape - comments_indexes, ddl_create, dialectal_ops, enums_domains, fluent_ddl,
+fluent_scalars, in_list_scalars, p2a_facets, partition, runtime_options. Ten files agreeing is a
+convention, not ten independent staleness events, and that alone should have moved me off "stale"
+before I ever found the mapping.
+
+The bound is also pinned past the IR in rendered DDL on an unrelated path:
+`tests/generated_identity_columns.rs:150` asserts `"created_by" character varying(255)` and
+`tests/sql_preview.rs:824` asserts `"id" character varying(255) PRIMARY KEY`.
+
+This is the same failure as F207 and the three grep-for-coverage misses before it, one level up. The
+earlier ones were a name mistaken for a behaviour. This one was four names mistaken for four
+witnesses. The rule that would have held: when the question is what a token MEANS, the only file that
+answers it is the one that consumes the token, and reading more producers of that token is not
+progress toward the answer.
+
+Cost: appbase was told to revert a correct implementation. Their suite was red for a good reason and
+still is, so the real question - what else in the comparison disagrees - is now mine to trace.
 
 ## F208 - dead, unexercised, exercised: the middle category is where this pass kept finding defects
 
