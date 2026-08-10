@@ -8990,6 +8990,85 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F219 - the rollback that wedged a rename is refused, and the wedge was simpler than the ticket described
+
+Shipped 1e3b70f. `RollbackError::PendingContractOutstanding` refuses, during planning,
+any selected version belonging to an outstanding online rename.
+
+### The wedge, corrected
+
+The ticket predicted two different failure modes: `resolve --commit` refused by the
+shape check, `resolve --rollback` failing later at a drop of a column that no longer
+exists. Only the first half is how it works. `engine.rs:1637-1669`:
+
+    let action_finished = match resolution {
+        Resolution::Applied => apply_finished,
+        Resolution::Aborted  => abort_finished,
+    };
+    if !action_finished {
+        let shape = pending.pending_contract_shape(exec_cfg, &obligation).await?;
+        let reason = if !shape.columns_compatible {
+            Some("both recorded columns must exist with the same declared PostgreSQL type, ...")
+
+Both resolutions pass through the same gate, so the abort arm never reaches a drop
+step - it is refused earlier, with the same message. The conclusion the ticket drew
+(wedged, unresolvable both ways) is right; its mechanism for half of it was not.
+
+`columns_compatible` is `false` by construction once the destination is gone:
+`journal.rs:1339` reads `if catalog.len() == 2 { ... } else { false }`, over a query
+selecting attributes `IN ($3, $4)` that are `NOT a.attisdropped`.
+
+I had flagged the ticket's phrase `pending_contract_shape` as possibly invented. It is
+real - `journal.rs:1310`, called from `engine.rs:1643` and `:2187`. The caution was
+right to record; the doubt was wrong.
+
+### Where the gate went, and two things it deliberately does not do
+
+`rollback_locked` reads the obligations under the same lock that already reads the
+journal, so both describe one moment, and passes them into `plan_rollback`. That keeps
+`plan_rollback` pure - no backend handle - which is what lets all eight of its gates be
+unit-tested without a database, and keeps every selection-time refusal in one place.
+
+It reads the planned `steps`, not the raw selection, so a version force-skipped as
+irreversible is not being rolled back and does not trip it.
+
+It matches `plan_version` and `contract_versions`, never `pending_version`.
+`journal.rs:251-266` documents that the latter is the deep expand sub-step id "that the
+plan-level supplied set never exposes", which is why `status` keys its orphan surfacing
+on `plan_version` too. A gate keyed on `pending_version` would have been dead code that
+read as protection - the test's fixture uses a deliberately unmatchable
+`pending_version` so that mistake would fail rather than pass.
+
+### Signature over wrapper, and what that cost
+
+`plan_rollback` gained a parameter rather than acquiring a `_with_obligations` sibling.
+The apply side has the wrapper pattern (`apply_plan_with_touched_and_depends`
+delegating to `_scoped`, `engine.rs:1265-1281`), so precedent existed. It was the wrong
+precedent here: a `plan_rollback` that still compiled while skipping a safety gate is
+exactly "a name describing a precondition may describe what the function DOES rather
+than what it REQUIRES". Fail-closed beat source compatibility, and there are no
+out-of-crate callers to break - all 18 call sites are in `executor.rs`.
+
+The 17 test call sites are covered by a shim in each test module that supplies `&[]`
+once, with the "no obligation here" premise stated where a reader meets it, rather than
+seventeen repetitions of an empty slice.
+
+A first attempt to rewrite the call sites by regex matched 12 of 17. Counting before
+applying is what caught it; a partial rewrite that compiled would have been worse than
+either extreme.
+
+### Mutation
+
+Disabling the gate body fails
+`outstanding_obligation_blocks_the_rollback` and the other 20 rollback tests still
+pass - load-bearing and scoped, not incidentally green.
+
+### Left open
+
+No live-PostgreSQL arm drives a real obligation through the gate. The refusal is proven
+pure, against a hand-built `PendingContract`; nothing yet applies an online rename to a
+live server and then tries to roll its expand half back.
+
 ## F218 - #16 is refuted by the comment one line above the function I measured, and its fix would make squash rollback impossible
 
 With rollback now reachable by operators (F217), the two filed refusals #16 and #17
