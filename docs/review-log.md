@@ -8990,6 +8990,50 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F242 - the dialect table now orders by code unit, and measuring first kept the claim honest
+
+Shipped b63e1d2f, closing #67.
+
+`gen-dialect-table.mjs` sorted its rows with `localeCompare` under a comment reading "Deterministic
+order: by (kind, variant) so the generated artifacts are stable regardless of sidecar row order."
+`localeCompare` consults the runtime locale and ICU build, so the comment promised something the
+comparator did not provide. The output is committed and a drift gate re-derives it, so two
+contributors could in principle generate two orderings from one sidecar and each read the other as
+drift.
+
+### Measured before claiming, and the measurement narrowed the claim
+
+The tempting write-up is "this produces machine-dependent output". It does not, today. Parsing the
+real 92 rows and sorting both ways:
+
+    rows parsed: 92
+    IDENTICAL for this data - the defect is LATENT, not active
+    en vs sv: same order for these keys
+
+The keys are camelCase ASCII with no digits, underscores or punctuation, so the one axis where
+`localeCompare` and code units disagree - case ordering, "a" before "B" versus after - never gets
+exercised. Confirmed after the change by regenerating: both artifacts came back byte-identical, and
+`git status` showed only the two source files.
+
+So this closes a GUARANTEE rather than fixing an output, and the commit says so. Worth the
+distinction: a fix described as repairing broken output, when the output was fine, teaches the next
+reader to distrust the log.
+
+### The test had the same weakness, and fixing only the generator would have been worse
+
+`tests/dialect-table-drift.test.ts` sorted with `localeCompare` too. Leaving it while changing the
+generator would have left a drift gate that can accuse a correctly generated file. Both now use the
+same code-unit rule.
+
+There is a subtlety the shared rule also fixes by construction: the generator compares `kind` then
+`variant` as separate fields, while the test compares them joined by a NUL separator. Those two
+orderings agree only because NUL sorts below every other code unit - a property code-unit comparison
+guarantees and `localeCompare` does not promise. Under the old code the two sides agreed by luck.
+
+GATES: `pnpm --filter zero-migrate test` - 221 pass, 0 fail, including "committed dialect-table.ts
+matches the sidecar rows". The generated Rust artifact is unchanged, so the cargo gate measured at
+`targets=107 passed=2466 failed=0` earlier this session still stands for this commit.
+
 ## F241 - the fix for F240 is decided, and the two things that make it hard are both wider than this ticket
 
 No code. The shape for #188 is settled and, more usefully, the two hazards that rule out the obvious
