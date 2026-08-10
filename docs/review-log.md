@@ -8990,6 +8990,55 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F216 - the operator can roll back now, and the two refusals the target rule needed were found by writing the test
+
+`zero-migrate rollback (--to <version> | --steps <n> | --all) --approve` exists, with
+`rollback()` in the library as the peer of `apply()`. Every layer #185 mapped is now
+joined: engine, addon verb, N-API entrypoint, CLI command.
+
+### What the tests caught that the code did not say
+
+Two of the four new host tests failed on first run, and both were real.
+
+`--steps=` reached `Number("")`, which is `0`, and `RollbackTarget::Steps(0)` is a
+documented no-op. An operator who fumbled the value would have got a clean exit 0 and
+an unchanged schema, reading as "nothing to roll back". The check now tests the digits
+before converting, so `--steps=`, `--steps=1.5` and `--steps=" 2 "` are all refused.
+
+The help-text assertion pinning "no down command and no clean command" failed, which is
+the gate doing its job: that sentence had become false the moment the command existed.
+Two neighbouring assertions on the same paragraph needed the same update, and only the
+first would have been caught if the paragraph had been reflowed less.
+
+### The target rule
+
+Exactly one of the three flags. Zero is refused because there is no safe default for
+how much of a schema to remove; two is refused because the operator meant one of them
+and picking would unwind the wrong amount. `rollbackTargetFromArgs` is pure and
+exported, so both rules are pinned without a database.
+
+`--approve` is required. The engine already refuses an unapproved rollback
+(`plan_rollback` step 1, `apply/executor.rs:2486`), but only after the lock is taken;
+the CLI answers it, and the missing-target case, before a session is opened. That
+ordering is what the "before touching a database" test measures: the URL it passes
+points at a closed port, so a refusal arriving first is the evidence.
+
+### What the CLI hands the addon
+
+The WHOLE authored set, not a prefix. Apply sends priors plus a current envelope
+because it is adding one migration; rollback is reversing migrations that are already
+applied, so there is no current one to distinguish, and a migration left out of the set
+has no reverse SQL. The engine reports that as `MissingFromSet` rather than skipping it
+(F214), which is what makes sending everything the safe default rather than a
+convenience.
+
+### Left open
+
+The command has no live-database arm. The four new tests cover the pure target rule,
+the two pre-session refusals, the flag scoping, and the operator lines; nothing yet
+applies a migration and rolls it back through the CLI against live PostgreSQL or MySQL.
+That is the last step of #185, and it is what largely dissolves #176.
+
 ## F215 - rollback reaches a Node host, and the target is a nested object because the alternatives are not siblings
 
 `rollback` (Postgres, MySQL, over the host driver) and `rollbackSqlite` (in-process)
