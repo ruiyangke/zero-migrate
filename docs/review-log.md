@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F237 - the dropped schema is reversible unless it cascaded, and the refusal is now the measurement rather than an argument
+
+Shipped 817b6933. Fourth op on #23, and the first that needed a refusal the earlier three did not.
+
+`Op::DropSchema` renders `CREATE SCHEMA <name> [AUTHORIZATION <role>]` from the recorded
+`SchemaObjectSnapshot`, under a THREE-part predicate rather than the usual two:
+
+    history has the schema  AND  !if_exists.unwrap_or(false)  AND  !cascade.unwrap_or(false)
+
+The cascade clause is the one that matters, and F233 measured why on the gate's PostgreSQL 18.4:
+`DROP SCHEMA s CASCADE` reports "drop cascades to table s.keepme", after which a plain
+`CREATE SCHEMA s` SUCCEEDS and leaves `pg_tables` empty for that schema. A rollback built on that
+would journal a clean success over a table and a row that are permanently gone. Without CASCADE the
+drop is RESTRICT, which PostgreSQL only permits on an empty schema, so re-creating it really does
+restore everything the drop removed.
+
+`SchemaObjectSnapshot` records `owner` and nothing else (snapshot.rs:1189) - it models the namespace,
+never its contents - which is the structural reason the cascade case can never be inverted from
+history no matter how much the fold retained.
+
+### The cascade refusal is load-bearing, measured
+
+Deleting the `&& !cascade.unwrap_or(false)` half:
+
+    test a_cascading_schema_drop_keeps_no_inverse ... FAILED
+    test rolling_back_a_dropped_schema_restores_it ... ok
+    a cascading drop must not be reversible - the contents are gone
+
+Only the test that covers the property fails, so the clause holds it and nothing else does. The
+guarded-drop mutation for the extension arm behaved the same way in F236. Three ops in, every
+refusal in this family has been mutation-proven rather than assumed.
+
+The cascading test seeds a real table inside the target schema out of band before the drop, so the
+refusal is protecting observable contents rather than an abstract flag. Authoring that table through
+the migration would have fought the schema confinement this test does not mean to exercise.
+
+### The RED shape keeps repeating, which is the useful part
+
+    rolling back the dropped schema must succeed: migration mig_7n42DGM5OwCsKXqX8a7ke1
+      ('drop_schema_...') is irreversible (down: None); rollback refuses by default.
+
+The cascading test passed BEFORE the change, because refusing was already the behaviour. Only the
+restore was failing. A RED where the safety test is already green is the right shape: it means the
+change adds capability without loosening a guard.
+
+GATES: `FMT_RC=0`, `CLIPPY_RC=0`, `TEST_RC=0`, zero skip banners,
+`targets=107 passed=2466 failed=0` against live PostgreSQL 18.4 and MySQL 8.4.11.
+
+REMAINING on #23: `DropTrigger`, `DropFunction`, `DropPolicy` - all three EXPENSIVE, because
+`SchemaSnapshot` has no map for any of them and each needs a new snapshot type plus fold arms before
+an inverse is possible. And `AlterSequence`, which is not a drop and needs its own decision: its
+inverse is the PREVIOUS settings, so it wants state captured BEFORE the alter rather than read from
+what the history holds after.
+
 ## F236 - the dropped extension is reversible, and the mutation proves the landmine F234 predicted was real
 
 Shipped f3884a7a, on the plumbing decided in F234 and through the four gates mapped in F235.
