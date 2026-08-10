@@ -8990,6 +8990,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F235 - a vendor op cannot be tested the way a table op is, and three separate gates say so before any assertion runs
+
+No code shipped. The `DropExtension` test was written and driven far enough to learn what a vendor
+op actually costs to exercise, then held out of the tree rather than committed half-finished. Every
+error below is real output from this repo against the gate's PostgreSQL 18.4, and each one is a
+harness fact the next attempt should not have to rediscover.
+
+### Gate 1 - the extension allowlist is deny-by-default
+
+`code.extension` is a StrSet whose emptiness IS the denial: "the allowlist IS the capability: empty
+= deny all (so no CREATE/DROP EXTENSION)" (crates/zero-migrate-guard/src/guard/mod.rs). The support
+module already has `no_inject_with_extensions(schema, &["citext"])` for this.
+
+### Gate 2 - the allowlist is not enough, because the PROFILE refuses first
+
+Granting the allowlist under a creator profile still fails, and the message is precise about why:
+
+    load gate (postgres): author this privileged migration under the operator/platform capability
+    set (which composes allowExtension), not the confined creator profile
+    [VENDOR_OP_DENIED op_index=0 dialect=postgres]: vendor PG primitive (op capability "extension")
+    requires the allowExtension capability, which the active (Confined creator) capability set does
+    not grant - the privileged zero-migrate primitives are unreachable from a confined migration by
+    construction
+
+`support::operator_charter(schema)` carries both the profile and `code.extension = ["citext",
+"pgcrypto"]`, so it is the right helper - not `no_inject_with_extensions`.
+
+### Gate 3 - the authority rides on the entry point, not on the policy
+
+Even with the operator charter, hand-rolling `load_ir_document(...)` + `lower_plan(...)` - the shape
+every earlier op's test used - reproduces the SAME refusal verbatim. The reason is that
+`load_ir_document` (crates/zero-migrate/src/model/load.rs:42) delegates to
+`load_ir_document_authorized(..., None)`, hardcoding away the authority argument. The production
+entries pass `Some(self.vendor_authority())` (lower.rs:2863). So a vendor-op test MUST go through
+`author.load_and_lower_guarded(...)` rather than assembling the steps itself.
+
+That is worth generalising: the table-op tests could hand-roll load+lower and stay faithful, because
+nothing they authored needed authority. Copying that harness to a privileged op silently drops the
+one argument that makes the op legal. The harness was never dialect-neutral; it was
+privilege-neutral only by accident of what it tested.
+
+`LoweredArtifact` has no `resolved` field either (only `plan`, `fragments`, `created_tables`,
+`touched_tables`, `depends_on`), so the accumulated history has to come from parsing the authored IR
+separately rather than from the artifact.
+
+### Gate 4 - per-schema isolation does not isolate an extension
+
+With the authority fixed, both tests then failed on each other:
+
+    apply the authored plan on PostgreSQL: migration mig_7n42DGM5T7dZwDTCD0w9uh failed to apply:
+    duplicate key value violates unique constraint "pg_extension_name_index"
+
+`pg_extension.extname` is unique per DATABASE. Every other op in this family is isolated by giving
+each test its own schema, and that isolation is simply not available here - two tests in one binary,
+running in parallel against one database, cannot both create `citext`. They need different
+extensions (`citext` and `pgcrypto` are both allowlisted), and dropping the extension in cleanup is
+not sufficient on its own because the tests overlap in time rather than in sequence.
+
+### What is NOT done
+
+The engine change was never started: `LiveSchema` still has no `extensions` field, and
+vendor.rs:302 still returns `down: None`. The test is held at
+`<scratchpad>/drop_extension_rollback_pg.rs.wip` mid-edit - its helpers are parameterised by
+extension name but the call sites are not updated, so it does not compile. It is a starting point,
+not a finished RED, and should be read as such.
+
 ## F234 - the guard check that works for views and sequences is DEAD on every vendor op, and copying it would have re-opened the ghost-object hole
 
 Still no code. The second opinion on the threading question answered a different, more important
