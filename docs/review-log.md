@@ -8990,6 +8990,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F211 - #24 shipped three states where its own agreed plan said four, and the fourth was the defect
+
+Recorded because a decision that already carried a second opinion was reversed. A silent reversal is
+worse than either choice: the next reader finds a ticket saying four and code saying three, with
+nothing saying which won.
+
+`AppliedPlan::rollbackable` is `every step has a defined down`. It answers whether reversing SQL
+EXISTS, and a host reading it as "safe to undo" is told yes about a migration that destroys data
+permanently. The agreed fix was an opt-in enum with four states:
+`Irreversible | StructurallyReversibleLossy | ProvenRestorable | Unknown`.
+
+`ProvenRestorable` was dropped. The reason is the ticket's own defect, one level down.
+
+At plan level the engine has exactly two signals: `PlanStep::has_down()` and
+`MigrationFlags.destructive`. `PlanStep::Ddl` carries a `Migration` holding rendered `up`/`down`
+strings, so the op list does not survive lowering and there is no way to ask an `AppliedPlan` which
+operation a step came from. That leaves `has_down && !destructive` as the only candidate condition
+for "restorable" - and on a raw `.sql` migration through `AppliedPlan::single_step`, which has no op
+provenance at all, that `false` means nobody declared a flag. It is absence of a declaration, not
+evidence of safety.
+
+So a four-state enum would have promised proof it could only manufacture by reading a default as a
+measurement. That is the same shape as `rollbackable` promising more than it computes, which is the
+entire reason #24 exists. It is also F208's dead-variant case: shipping a variant nothing can
+construct.
+
+The narrow second opinion reached the same conclusion independently and improved the aggregation.
+The first ask - classify all 56 `Op` variants - produced 525KB of file-reading and no analysis in 14
+minutes and was killed; re-asking two precise questions with the measured facts inline answered both
+in one pass. The lesson is about the question, not the tool: an agent given a large exploration
+budget spends it exploring.
+
+On aggregation it argued against any total order, and it is right. `Unknown` describes evidence
+coverage; `Lossy` describes a known outcome. Ranking `Unknown` above `Lossy` says an opaque step is
+more alarming than one known to drop a table; ranking it below hides that something was never
+measured. A plan can carry an irreversible step AND a lossy step AND an unassessed one, so any single
+verdict reports a winner and drops the rest. `RollbackAssessment` is therefore a product of three
+independent booleans, each folded with OR, and a later policy layer is free to collapse them into a
+prompt decision - the factual API must not.
+
+`Unknown` was renamed `Unassessed`: it names why there is no answer (nothing established one) rather
+than implying the answer is unknowable.
+
+`rollbackable` is unchanged and keeps every caller. Its doc now names the replacement rather than
+only warning that it is over-read.
+
+The load-bearing test is `an_undeclared_migration_is_unassessed_rather_than_assumed_clean` - exactly
+the case a `has_down && !destructive => restorable` rule would get wrong. Mutation-proven: disabling
+the `is_destructive()` branch in `PlanStep::reversibility` fails
+`a_dropped_column_reports_a_known_lossy_step` at `tests/plan_rollbackable.rs:78` and nothing else, so
+the branch is load-bearing rather than decorative.
+
+fmt 0, clippy 0; 102 targets / 2451 passed / 0 failed / 0 ignored, up exactly 3 from 2448, which is
+the number of tests added. Zero live-database skip banners.
+
+One honest note on the gate: the wrapping job reported exit 0 while `cargo fmt --check` inside it had
+returned 1. Only the per-stage `RC` echoes caught it. An `&&` chain or a trusted outer exit code would
+have committed unformatted code over a green-looking run.
+
 ## F210 - the bound's stated reason names MySQL, and MySQL was the one dialect nothing asserted
 
 `inject_column_to_ir` bounds the charter's system string columns at
