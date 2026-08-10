@@ -8990,6 +8990,45 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F229 - the SQLite lock sidecar needs no downstream notice, and the pin I believed appbase was on was wrong
+
+`cb1bcb59` (hexcafe, "fix(sqlite): take the project lock on a sidecar, not the database file")
+changes an operator-visible fact: `acquire_project_lock` now creates
+`.zero-migrate-<dev>-<ino>.lock` in the database's parent directory instead of locking the
+database file itself. Nothing removes it - there is no `remove_file` anywhere in
+`crates/zero-migrate/src/apply/backend/sqlite/mod.rs`, so the file persists after the apply.
+
+A new file appearing beside a consumer's dev database is the kind of change worth an unprompted
+notice, and appbase drives this exact path: `applyIrSqlite` at
+`sdks/vite-plugin/src/gen-types/dev-apply.ts:200`, described at `addon.ts:87` as the dev tier's
+schema authority. I measured the four ways it could reach them, and all four are closed:
+
+1. They already have the fix. Their committed gitlink IS `cb1bcb59` - `git ls-tree HEAD
+   third_party/zero-migrate` returns exactly that commit, and `git submodule status` reports it
+   clean. I had been carrying "pinned at e96aa5a, 68+ commits behind" from an earlier turn; that
+   is wrong and this entry exists partly to stop it being re-derived.
+2. The default sidecar location is gitignored. `devSqliteDir` returns `join(root, DEV_STATE_DIR)`
+   = `.zeroship/` (`dev-apply.ts`), and appbase ignores `.zeroship/` at `.gitignore:22`. So the
+   file is invisible to `git status` in the default configuration.
+3. Nothing asserts on that directory's contents - no `readdir` over the dev-state dir anywhere
+   in `sdks/`.
+4. The dev-server watcher is unaffected in any new way: the `.sqlite` file already changes in
+   that same directory on every apply, so a watcher that would loop on the sidecar would already
+   be looping on the database.
+
+Residue, stated rather than sent: a consumer who points `DATABASE_URL` at a custom
+`sqlite:` path gets the sidecar in that path's directory, which is not `.zeroship/` and may not
+be ignored. That is a consequence of their own configuration and self-evident to whoever sets it.
+
+Decision: no message. The rule is "harmed by not knowing", and a consumer who already has the
+commit, ignores the directory it writes to, and asserts nothing about that directory is not
+harmed. Worth recording that the answer was reached by measuring rather than by the default of
+staying quiet - the previous turns reached the same verdict without checking any of this.
+
+What I did NOT verify, and would have had to state had I sent it: I did not author this change
+and have not independently reproduced the macOS deadlock it claims to fix, nor checked how it
+behaves when the database's parent directory is read-only.
+
 ## F228 - all six narrow assertions are correct, and reading them took measuring the strings rather than counting the calls
 
 #187 closes with no code change. That is the answer, not an evasion: the six sites were a
