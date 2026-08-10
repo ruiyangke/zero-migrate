@@ -8985,6 +8985,55 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F200 - the dialect table is a runtime gate, and it disagrees with the engine about SQLite
+
+Filed while getting a second opinion on something else, then walked to its consumer rather than
+assumed. The walk is what made it a finding instead of a curiosity.
+
+### The table is not documentation
+
+`model/op_support.rs:38` calls `dialect_table::lookup` inside `pub fn support(op)`, whose doc says it
+is "the support matrix the authoring validator consumes for dialect and feature refusals before
+lowering". So a wrong row is a wrong runtime answer, not a wrong sentence.
+
+### Three sites, two of them saying supported
+
+```text
+dialect_table.rs:148-149   setColumnDefault base + containerOrJson: sqlite Portable
+op_support.rs render_mode  "Container / JSON column defaults are live-resolved on every dialect."
+lower.rs:4988              require_capability_for(NativeAlterColumn, "setColumnDefault")  -> SQLite: false
+```
+
+And nothing reconciles them: `support_cell` maps `Disposition::Portable` straight to `supported(..)`
+with no capability cross-check.
+
+### The contract says which side is meant to win
+
+From `op_support.rs`'s own header: "The supported/unsupported/vendor GATE is thus single-sourced from
+the generated table ...; only the render strategy and diagnostic wording - which are NOT dialect truth
+- remain in Rust."
+
+By that contract the capability gate in `renderer.rs` is holding dialect truth it is not supposed to
+hold. That does not settle which behaviour is right - the table may have promised something
+aspirational - but it does mean this is not a table typo. Two independent sources assert the SQLite
+case, one of them a code arm written specifically for it.
+
+The sibling row proves the table can express the refusal: `setColumnDefault`/`nextval` is already
+`Unsupported` for sqlite and mysql. So the omission is not a limitation of the format.
+
+### What is measured and what is not
+
+VERIFIED: all three sites, and that `support_cell` does not consult capabilities.
+
+NOT MEASURED: the user-visible consequence. I expect support/status to report the op as available on
+SQLite and deploy to refuse it - the inverse of F99 - but I have not run it end to end and captured
+both messages. The ticket says to do that before quoting the consequence, because "the validator says
+supported" is a claim about a code path I have read and not executed.
+
+Also worth carrying: the table is GENERATED from `dialect-support.toml` and guarded against
+hand-editing by `tests/dialect_table_faithfulness.rs`, so correcting the table means editing the TOML.
+A fix applied to the `.rs` would be reverted by the generator and caught by that gate.
+
 ## F199 - the second opinion killed my fix rather than sizing it, and #170 turns out to be a design change
 
 I asked whether an envelope-local column map beat updating the working snapshot. The answer was
