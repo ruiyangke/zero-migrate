@@ -8990,6 +8990,51 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F212 - the varchar(191) interop hazard is a non-event here, and the reason is two defences neither of which was designed for it
+
+Raised by the appbase exchange: their MySQL renderer emits the injected system columns as
+`VARCHAR(191)` with no collation clause, mine emits `VARCHAR(255) CHARACTER SET utf8mb4 COLLATE
+utf8mb4_0900_as_cs`. I told them the collation was the sharper half and that it "does not announce
+itself until a comparison disagrees". Both halves of that worry are wrong for this engine, and I only
+know because I walked it instead of leaving it as a plausible fear.
+
+Three things a divergent live column could do, and what each actually does:
+
+ADOPT SILENTLY - impossible on MySQL. `render::existence_probe::decide` has exactly three call sites
+at HEAD: `apply/backend/postgres/session.rs:653`, `:987`, and `apply/backend/sqlite/mod.rs:573`. There
+is no MySQL call site, so no guarded statement is ever probe-evaluated on that dialect. F65/F67 and
+ticket #79 measured the consequence against the live MySQL 8: a guarded `createTable` against an
+existing table returns `ERROR 1050 (42S01): Table 'notes' already exists` whether the live shape
+matches the declaration exactly or diverges. Adoption is not merely unsafe there, it is unreachable.
+
+EMIT AN ALTER that rebuilds a live primary-key index - nothing does. `DriftReport`
+(`apply/drift.rs:2833`) says so in its own doc: "it carries reports only, never DDL or a remediation
+plan." There is no repair or reconcile path turning a detected difference into emitted SQL.
+
+REPORT IT - yes, and both differing facts are genuinely compared. `ColumnSnapshot::data_type` is in
+the manual `PartialEq` (`model/snapshot.rs:409`) and MySQL introspects `COLUMN_TYPE`, which carries
+`varchar(191)` rather than a bare `varchar` - so unlike the Postgres length gap that #94 closed, the
+width difference is visible on ingest. `ColumnSnapshot::case_sensitive` is also compared
+(`snapshot.rs:415`) and on MySQL is derived from `COLLATION_NAME` by `case_sensitive_from_collation`
+(`apply/backend/mysql/drift_sql.rs:79`, applied `:226`), whose test at `:634` pins
+`utf8mb4_0900_ai_ci`, `utf8mb4_ja_0900_as_cs_ks`, `ascii_bin` and `None` AND asserts that an
+unrecognized collation returns `Err` rather than defaulting. MySQL 8's default `_ai_ci` is
+case-insensitive and my pinned `_as_cs` is case-sensitive, so the two differ on exactly the compared
+axis.
+
+The near-miss worth recording: `ColumnSnapshot::mysql_text_storage`, the raw charset+collation pair,
+IS excluded from `PartialEq` and `Hash`, and that looked like the hole. Its own doc at
+`snapshot.rs:157-163` explains why it is correct - it is introspection-only, author-built desired
+snapshots leave it `None`, so comparing it would phantom-drift every column. Collation is compared as
+portable INTENT, not as a server-specific name. I nearly filed a correct design as a defect.
+
+So the safety here comes from two mechanisms built for other reasons: an adoption gap that is itself
+a filed defect (#79), and a deliberate report-only boundary. That is worth naming rather than
+enjoying. If #79 is ever fixed by giving MySQL a real probe, the adopt path opens, and THAT is the
+moment this hazard becomes live. Whoever ships the MySQL existence probe should decide deliberately
+what a probe does with a matching-name, divergent-width, divergent-collation column - the answer must
+not fall out of whatever the probe happens to compare.
+
 ## F211 - #24 shipped three states where its own agreed plan said four, and the fourth was the defect
 
 Recorded because a decision that already carried a second opinion was reversed. A silent reversal is
