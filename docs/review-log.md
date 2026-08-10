@@ -9050,12 +9050,30 @@ createTable(t, ..)   then setColumnDefault(t, c, container)   snapshot has neith
 Both are correct migrations refused at lower. NOT YET REPRODUCED - this is a reading, and the RED
 that captures the exact error text comes before any fix.
 
-The fix is not the obvious one. "Keep `table_snapshots` current" would insert a column into the
-snapshot's `columns` without regenerating `stored_create_sql`, which is precisely the disagreement
-F180 was filed for: the SQLite rebuild's `CREATE` and its value-copy list moving apart. The narrow
-alternative is an envelope-local map of columns declared so far, consulted only when the snapshot
-lacks the column, touching no shared state and unreachable from the rename leg. That adds state to
-the lowering loop, so it wants a second opinion before it is built.
+The fix is not the obvious one, and my first statement of WHY was itself a name-shaped claim.
+
+I wrote that the rename leg "wants the stale value", on the strength of a comment calling
+`table_snapshots` the authoritative pre-rename shape. appbase had just named that costume - "the
+comment says so" - so I walked it instead. The comment is directionally right and my constraint was
+wrong.
+
+`lower_rename` reads the snapshot to find the `from` column, compare its live type against the
+authored one (`RenameTypeMismatch`), and run an unconditional `to`-collision guard. Both would be
+MORE correct with in-envelope state, not less: a `from` column added earlier in the same envelope is
+absent and the rename is refused with `RenameNeedsLiveColumn`, and a `to` that collides with a
+column added earlier in the envelope is invisible to the guard.
+
+The real constraint is narrower and sharper. `TableSnapshot` carries both structured `columns` and
+the byte-faithful `stored_create_sql`, and the SQLite rebuild renders from the TEXT while the
+value-copy list comes from the COLUMNS. F180's measured failure was exactly those two disagreeing:
+"the second rebuild kept the first rebuild's pre-rename `CREATE` while its value-copy list had moved
+on". So the danger is not staleness, it is INCONSISTENCY - updating one carrier without the other.
+
+That reframes the fix rather than forbidding it. An envelope-local map of columns declared so far,
+consulted only when the snapshot lacks the column, keeps both carriers untouched and cannot desync
+them. Updating `columns` in place cannot be done without regenerating the text, which is the thing
+the design says is not synthesisable. Still worth a second opinion, but the question is now
+"which carrier" rather than "current or stale".
 
 ### The method note is worth more than the measurement
 
