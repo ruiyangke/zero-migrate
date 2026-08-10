@@ -8990,6 +8990,59 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F233 - dropSchema is NOT a cheap inverse, and the reason is a cascade flag I would have missed by pattern-matching
+
+No code this entry. Two facts found while scoping the next op, both of which change how it should be
+built, and one of which would have shipped a data-loss-shaped bug behind a green rollback.
+
+### `dropSchema` can cascade, so `CREATE SCHEMA` is a false inverse
+
+F232 filed `DropSchema` and `DropExtension` together as "cheap - snapshot map exists, follow the
+sequence shape". That is right about the plumbing and wrong about the semantics, and the difference
+is visible in the ops themselves:
+
+    Op::DropSchema    { name, if_exists: Option<bool>, cascade: Option<bool> }   ir.rs:3520
+    Op::DropExtension { name, if_exists: Option<bool> }                          ir.rs:3544
+
+`DropSchema` carries CASCADE. `DROP SCHEMA foo CASCADE` destroys every table, view and sequence
+inside it. Synthesising `CREATE SCHEMA foo` as the inverse would restore an EMPTY schema and report
+the rollback as successful - the operator is told the drop was undone while all the contents are
+gone. That is worse than refusing, because refusing sends them to a backup and succeeding does not.
+
+Without CASCADE the drop is RESTRICT, which PostgreSQL only allows on an empty schema, so
+`CREATE SCHEMA` IS faithful there. So `dropSchema` needs a THIRD refusal on top of the two the view
+and sequence share: no inverse when `cascade` is true. Two refusals were enough for the first two
+ops; assuming they generalise is what would have caused this.
+
+`DropExtension` has no cascade field at all, so the drop is always RESTRICT and PostgreSQL refuses
+it while dependents exist. `CREATE EXTENSION` restores what `DROP EXTENSION` removed, and
+`ExtensionSnapshot` (snapshot.rs:1198) carries the one thing the create needs - `schema` - and
+derives `PartialEq` over it. That one really is cheap.
+
+INFERRED, NOT VERIFIED: I am reading PostgreSQL's RESTRICT/CASCADE semantics from the op shapes and
+from what the DDL means, not from a live experiment in this repo. Before shipping the schema arm,
+prove the cascade case on the live server: author a `dropSchema` with `cascade: true` over a schema
+holding a table, roll it back, and confirm the table does NOT come back. That measurement is what
+should justify the refusal, not this paragraph.
+
+### The vendor renderer's second caller constrains how the inverse gets threaded
+
+`render_vendor_op(op, eff_schema)` (vendor.rs:228) renders the extension and schema arms, and it has
+two callers:
+
+    crates/zero-migrate/src/render/lower.rs:5455     - the general vendor lowering path
+    crates/zero-migrate/src/render/renderer.rs:318   - inside `render_trigger_op`
+
+The second only ever routes TRIGGER ops. So adding a `live_schema` parameter would force that call
+site to pass something it has no use for, and the moment `DropTrigger` gains an inverse - it is one
+of the three remaining ops - that placeholder becomes a silent wrong answer rather than a compile
+error. The alternatives are to thread the parameter and leave a comment binding the trigger site to
+revisit it, or to keep the vendor renderer pure and attach the history-derived `down` in lower.rs
+where the history is already in scope.
+
+Not decided here. Recording it because the choice is not obvious from either call site alone, and
+discovering it mid-implementation is how a rushed answer gets picked.
+
 ## F232 - a dropped sequence is reversible now, and the survey says the remaining ops split two ways
 
 Shipped 132aaacb, plus edb0edb4 which added the PostgreSQL arm the view work owed.
