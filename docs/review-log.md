@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F259 - a dialect wrapper was a way to author a table the charter never saw
+
+Part of #80, second of six. Two of the six production non-descenders are now fixed.
+
+`resolve_create_table_policy` (model/table_shape.rs) turns the recorder's RAW author-only
+`createTable` into the shape the charter mandates: the injected system columns, the pinned primary
+key, the injected indexes. It looped the top level and `continue`d past anything that was not a
+`CreateTable`, so a create authored inside `dialect({ pg, ... })` never reached it - and the call
+at render/gen_types.rs:423 runs BEFORE the fold flattens, so the wrapper was still in place when
+resolution walked past it.
+
+The RED prints the size of it. One history declares the same author column twice, once at the top
+level and once inside the PostgreSQL leg, under the same confined charter:
+
+    left:  {"title"}
+    right: {"created_at", "created_by", "deleted_at", "id", "title", "updated_at",
+            "updated_by", "version"}
+
+Seven mandatory columns and the pinned key, missing from the wrapped twin. The injected shape IS
+the confinement the charter exists to impose, so this was not a cosmetic omission - a `dialect()`
+wrapper was a way to author a table the charter never resolved.
+
+THE RULE HERE IS THE OPPOSITE OF THE ONE F258 SHIPPED, which is the part worth remembering. The
+fold and the read-only walkers descend into the SELECTED leg, because an op in an inactive leg is
+one the target never runs. This walker must resolve EVERY leg, because it takes no dialect at all:
+its output is the resolved IR the checksum is folded over. Resolving only a selected leg would
+make one authored file resolve differently per target and carry a different checksum on each, so
+the same migration would have a different identity depending on which database it was authored
+against. Two walkers, two directions, and the deciding question is not "what does the fold do" but
+"is this output dialect-specific or is it identity".
+
+That distinction is also what made the test hard to write honestly. The artifact CANNOT show it: a
+table declared in the SQLite leg contributes nothing to a PostgreSQL fold, so it never appears in
+`schema.runtime.json` on any run the first two arms make. The third arm therefore calls
+`resolve_create_table_policy` directly and inspects the resolved IR.
+
+MUTATION-TESTED: resolving only the `pg` leg failed exactly
+`a_create_in_an_unselected_leg_is_resolved_too` and left the two artifact-based arms GREEN. That
+is the useful result - it proves the two obvious arms could not have caught it, and that the third
+arm is the one carrying the property. Had I stopped at the differential, the fix would have looked
+verified while the checksum hazard stayed open.
+
+The arms are a differential rather than a golden - the wrapped table's field set must EQUAL the
+top-level twin's - so the test says "the wrapper changes nothing" without hardcoding which columns
+this charter injects, and keeps its meaning if the charter changes. The control arm asserts the
+top-level table really is injected, so the differential cannot pass vacuously by both sides being
+bare.
+
 ## F258 - the artifact and the database disagreed about one table, and the walker set is six not two
 
 Part of #80, which stays open. One walker fixed, and the full inventory the ticket asked for
