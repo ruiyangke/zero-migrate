@@ -9004,15 +9004,19 @@ live_schema: &mut LiveSchema          full structure
 VERIFIED BY READING, the only production writes to the working `LiveSchema` during lowering:
 
 ```text
-Op::CreateTable    arm :4350  ->  live_schema.tables.insert(name)           :4428
+Op::CreateTable    arm :4350  ->  table_snapshots.insert(name, snap) :4427 AND tables.insert :4428
 Op::AddConstraint  arm :5178  ->  live_schema.table_snapshots.insert(..)    :5194
 Op::DropConstraint arm :5271  ->  live_schema.table_snapshots.insert(..)    :5304
 ```
 
-Three arms, and only two maintain STRUCTURE. `addColumn`, `dropColumn`, `alterColumn`,
-`renameColumn`, `createIndex`, `dropIndex` and the rest leave `table_snapshots` at its pre-envelope
-value. So an envelope whose first op is an `addColumn` and whose second reads `table_snapshots` for
-that table sees the shape without the new column.
+Three arms, all three maintaining STRUCTURE - `CreateTable` writes BOTH the name set and the
+snapshot. `addColumn`, `dropColumn`, `alterColumn`, `renameColumn`, `createIndex`, `dropIndex` and the
+rest leave `table_snapshots` at its pre-envelope value.
+
+I first recorded `CreateTable` as writing "names only", which is wrong and was committed. The grep
+that produced it split the method chain across lines, so `.table_snapshots` appeared without its
+`insert(` two lines below and I classified it by eye as a read. A chain-aware scan finds exactly
+three inserts: :4427, :5194, :5304.
 
 ### The reason this is not a gate yet
 
@@ -9047,8 +9051,28 @@ addColumn(t, c, ty)  then setColumnDefault(t, c, container)   snapshot has the t
 createTable(t, ..)   then setColumnDefault(t, c, container)   snapshot has neither
 ```
 
-Both are correct migrations refused at lower. NOT YET REPRODUCED - this is a reading, and the RED
-that captures the exact error text comes before any fix.
+REPRODUCED LOCALLY, and the reading was half wrong. The two tests are NOT in the tree yet - they are
+held as a patch until the fix lands, because a failing test does not belong on the branch and a log
+entry citing tests nobody can run is the citation rot this review keeps closing. Both drive
+`lower_steps`:
+
+```text
+createTable(carts, [id, tags json]) then setColumnDefault(carts, tags, {container: array})
+  -> LOWERS. Passes today.
+
+addColumn(carts, tags json) then setColumnDefault(carts, tags, {container: array})
+  -> UnsupportedOp("setColumnDefault container defaults need live column type")
+```
+
+The create case works because `CreateTable` writes the snapshot after all. Only the `addColumn` half
+is a defect, and the passing create case is the control that proves the fix must not be "make
+setColumnDefault stop needing the type" - the type is available and used whenever the snapshot has
+it.
+
+A first attempt at the second test failed at PARSE rather than at lower
+(`invalid type: map, expected a string`): `Op::AddColumn` carries `column: String` and a sibling
+`type`, not a column object. Recorded because a test that dies before reaching the code under test
+proves nothing, and the failure message looked enough like a real refusal to be quoted by mistake.
 
 The fix is not the obvious one, and my first statement of WHY was itself a name-shaped claim.
 
