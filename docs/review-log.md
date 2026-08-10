@@ -8985,6 +8985,57 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F189 - #152 item 3 does not do what it claims: the subscriber it depends on is opt-in by design
+
+Item 3 is the last open one on #152: "Observability instead of a timeout: `SET log_lock_waits = on`,
+and a contended-path diagnostic naming the holder from `pg_stat_activity`. Converts a silent hang into
+a diagnosable wait." Half of that is already built, and the other half cannot deliver the sentence.
+
+### Already built
+
+`session::project_lock_holders` (`apply/backend/postgres/session.rs:182-206`) already joins `pg_locks`
+to `pg_stat_activity` and returns pid, application_name, state and query for every holder of the
+project's advisory lock. `try_acquire_project_lock` (`postgres/mod.rs:105-122`) already calls it and
+returns `ProjectLockAcquisition::Busy(holders)`. So the holder diagnostic exists - on the NON-blocking
+path, which is what #155 shipped for status.
+
+What has none is the blocking apply acquire: `session::acquire_project_lock:64-77` execs
+`pg_advisory_lock` and waits, emitting nothing.
+
+### Why "just log it" will not convert the hang
+
+#152 item 4 said a log fix is invisible until a subscriber exists, and pointed at #156. #156 shipped
+one - and VERIFIED BY ME, it is deliberately OPT-IN: `diagnostics_subscriber()`
+(`zero-migrate-node/src/runtime.rs:74-83`) is `diagnostics_requested().then(|| ...)`, thread-scoped,
+stderr, `Targets` at WARN.
+
+The reasons are good and documented at `:62-72`: `lint`/`plan`/`status`/`history` each write ONE JSON
+document to stdout that callers parse, so a diagnostic there "is a corrupted reply, not a noisy one",
+and `tracing_core` says a library should not `set_global_default`.
+
+But it means the person experiencing the silent hang gets nothing. They would have to already have
+had diagnostics on, or re-run with them - and on a re-run the peer deploy may well have finished, so
+the condition does not reproduce. A warn on the contended path converts a silent hang into a
+diagnosable wait ONLY for someone who predicted the hang.
+
+### The half that does survive
+
+`SET log_lock_waits = on` is server-side. PostgreSQL then logs a waiter that has blocked past
+`deadlock_timeout` into the SERVER log, where a DBA can see it with no client-side opt-in and no
+dependency on our subscriber at all. That half is independent of everything above.
+
+It is also an operator-visible side effect on their log volume, applied to our session without being
+asked. Whether the engine should set it unilaterally is a judgement about someone else's logs, not a
+local implementation choice.
+
+### Not decided, deliberately
+
+Same reason as #103's convention question: this changes behaviour an operator observes, and the case
+for the client-side half just collapsed on inspection. Recording what each half actually buys is
+worth more than shipping the half that reads well and helps nobody.
+
+Nothing changed in code.
+
 ## F188 - #152 item 5 was not cosmetic: baseline held the only uncompensated acquire
 
 The ticket files this as "structural cleanup, near-zero blast radius". It is structural, and it also
