@@ -8990,6 +8990,45 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F223 - the SQLSTATE three tickets asserted is measured, and the gate's scope matches the server exactly
+
+No code change. Closing the one claim F220, F221 and F222 each carried forward without
+running it.
+
+Against the live PostgreSQL 18.4 in the dev compose
+(`PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1)`), each statement issued after a bare `BEGIN;`:
+
+    DROP INDEX CONCURRENTLY    ERROR:  25001: DROP INDEX CONCURRENTLY cannot run inside a transaction block
+    CREATE INDEX CONCURRENTLY  ERROR:  25001: CREATE INDEX CONCURRENTLY cannot run inside a transaction block
+    REINDEX INDEX CONCURRENTLY ERROR:  25001: REINDEX CONCURRENTLY cannot run inside a transaction block
+    ALTER TYPE ... ADD VALUE   ALTER TYPE / COMMIT        <- succeeds
+
+Three things settle at once.
+
+The original ticket's `25001` is CONFIRMED, and for all three forms rather than the one
+it named. It can now be quoted.
+
+The scope decided in F221 matches the server exactly: the three statements the
+classifier detects are the three PostgreSQL refuses. Neither over- nor under-broad, on
+this version, measured rather than reasoned.
+
+And excluding `ALTER TYPE ... ADD VALUE` is confirmed by the server, not just by the
+documentation both opinions cited. It commits inside the transaction. Had the broad
+list been adopted, that statement would have been refused in a rollback PostgreSQL
+would have run.
+
+One detail worth keeping: the server calls it `REINDEX CONCURRENTLY`, not
+`REINDEX INDEX CONCURRENTLY`. The classifier's label already matches, which is luck
+rather than design - it was written before this was measured.
+
+### Still not covered
+
+No automated test drives a CONCURRENTLY `down` against a live server through the
+refusal. This was a one-off measurement at a psql prompt, and the probe objects were
+dropped after. The pure classifier test (F222) runs the real PostgreSQL parser via
+`pg_query`, so what remains unautomated is only the server's half of the agreement -
+which is exactly what this entry records instead.
+
 ## F222 - the non-transactional down gate ships, and the test that mattered was the one for the parser rather than the gate
 
 Shipped b65df459, on the decision settled in F221. Gate (5b) of `plan_rollback` now
