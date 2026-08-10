@@ -8990,6 +8990,57 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F225 - the MySQL rollback marker is decided, and apply turns out not to have the window rollback has
+
+Decision only; no code. Two independent opinions agreed on all four questions, which has
+not happened before today - every earlier split turned on something one of us had not
+read.
+
+### Separate table, and the argument that settled it
+
+A rollback marker goes in its own table, not a discriminator column on
+`schema_migrations_inflight`. That table is an apply-side "started before `up`" artifact
+(`journal_sql.rs:535`) whose repair text assumes possibly-applied `CREATE`/`ALTER`
+(`session.rs:790`).
+
+The decisive point is one I had not made: a discriminator saves ONE TABLE but not the
+second recovery path, because rollback needs different diagnosis and different repair
+wording either way. So the column buys nothing and costs a field with two meanings.
+
+It also means `docs/troubleshooting.md` and `docs/operations.md` stay true unedited,
+which is a small point in the same direction.
+
+### Both sides fail closed
+
+Apply must not trust a net-applied journal row and run an `up` over a possibly
+half-reverted schema; rollback must not replay a partially executed, non-idempotent
+`down`. That mirrors apply's existing refusal to replay ambiguous work
+(`session.rs:781`).
+
+### The transaction split, and a fact that upgraded mid-reconciliation
+
+The pre-`down` marker write cannot share a transaction with the DDL - MySQL DDL
+auto-commits, so the marker has to be durable first, alone. But the post-`down`
+`rolled_back` append and the marker delete can share one InnoDB transaction, which
+CLOSES window (b) rather than narrowing it.
+
+The second opinion inferred that from apply's stated contract and said so honestly:
+"the permitted slice did not expose the actual `BEGIN`/`COMMIT`, so I observed the
+pairing and transaction contract - not the boundary itself." I had read the boundary,
+so the inference upgrades to measurement: `mysql/session.rs:868-895` runs
+`append_completed`, `insert_supersedes_edges`, `clear_inflight`, then `COMMIT` at
+`:895`, with `ROLLBACK` on error at `:885`. There is even a helper with exactly this
+contract already - `record_completed_in_transaction` (`journal_sql.rs:620`).
+
+That changes the finding's shape. Apply does NOT have window (b). The asymmetry is not
+"MySQL cannot do this", it is "rollback did not do what apply already does".
+
+### What the marker actually buys, stated so nobody over-reads it
+
+It cannot make MySQL rollback atomic. It converts a silent corruption window into
+durable ambiguity an operator can see and repair. That sentence belongs in the code, or
+a later reader will take the marker for a guarantee it does not give.
+
 ## F224 - the MySQL rollback ticket is the first today to survive verification unchanged, and I mis-corrected it on the way in
 
 Verified, not implemented. #18 says the MySQL rollback leaf has no transaction and no
