@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F247 - the remedy I said did not exist, arriving from another project
+
+Shipped 3c689cd8, closing the second half of #45.
+
+I had written to the sibling project that a stale build artifact cannot be gated because "there is
+nothing to diff: the stale copy exists only on a developer's disk". They answered with code: true
+that there is nothing to diff, false that drift is inexpressible. It is expressible as an
+ORDERING rather than an equality - was this artifact built after the code it is built from - and
+mtimes answer that on a machine where the only copy is the one lying around.
+
+That correction is the whole finding. I had reasoned about the remedy I knew (compare against a
+reference) and concluded from its unavailability that no remedy existed.
+
+They had not pointed the technique at a compiled napi artifact and said so, leaving it to me. It
+transfers, and it fired on a live instance before I wrote a line of the fix:
+
+    artifact  : 20:01:37  crates/zero-migrate-node/zero-migrate-node.linux-x64-gnu.node
+    newest src: 20:14:08  crates/zero-migrate-node/src/runtime.rs
+    RESULT: STALE - artifact predates its own source
+
+That was not contrived. I had edited `runtime.rs` thirteen minutes earlier for F246 and not
+rebuilt, so the binary the host suite would have loaded was older than its own source - hours
+after I wrote to them about exactly that failure mode. A rebuild flipped it to FRESH.
+
+So `tests/host/addon.ts` now resolves the addon and refuses one it cannot trust. Both branches
+are measured, not assumed: a missing path and a present-but-older path each produce a refusal
+naming the resolved path, both timestamps, the newest source, and the rebuild command.
+
+Two things I would not have arrived at alone. The second opinion pointed out the check must cover
+an explicitly supplied `ZERO_MIGRATE_ADDON_PATH` too, because a variable records intent and not
+freshness - a shell profile can point at a stale binary as easily as a default can, and the
+ticket had only asked about the fallback. And their own helper has a branch mine originally
+lacked: cannot-answer is not pass. If no sources are found the check now refuses rather than
+returning a cheerful FRESH, which is precisely the bug class this review keeps filing and which my
+first one-liner had.
+
+The honest limitation, which I sent back to them: mtime cannot distinguish a comment-only edit
+from a behaviour change. The commit that made my binary stale, 7d12e5cb, is doc comments only, and
+the rebuilt binary is functionally identical to the one it replaced. It fails safe, and "rebuild
+it" is always correct, but STALE does not imply WRONG - and a signal that is usually a false alarm
+is one people learn to mute.
+
+It runs as a `--import` preload rather than an import in each file, so it covers every host file
+including the ones that never carried the fallback. Host suite: 130 tests, 130 pass, 0 fail,
+0 skipped.
+
 ## F246 - a fifth error the gate could not report until the first four were gone
 
 Shipped 7d12e5cb, closing #190.
