@@ -8985,6 +8985,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F172 - the declarative differ emits PostgreSQL DDL for a MySQL column change, and it is reachable
+
+#87. Both halves now established: the path is reachable, and the emitted text is measured. Pinned by
+`tests/mysql_alter_column_render.rs` (commit debd6f0). NOT fixed.
+
+### Reachable, unlike the last two dialect findings I traced
+
+The existing-table branch of `diff` special-cases SQLite and FAILS CLOSED (`declarative.rs:5720`),
+with a comment saying it must never emit dangling PostgreSQL `ALTER COLUMN` DDL. There is no MySQL
+equivalent, so MySQL falls through to `render_alter_column_type` (`:7575`) and
+`render_alter_column_nullability` (`:7605`).
+
+VERIFIED BY ME BY READING that MySQL genuinely traverses this loop rather than being refused
+earlier: the CREATE TABLE arm at `:5546` is a full three-way `match self.dialect` with a real MySQL
+branch, and `:5529` computes MySQL inline-FK supporting indexes in the same loop body. Only
+`is_sqlite` is special-cased below.
+
+That matters because the two previous dialect findings I chased (#130, #133) both dissolved on
+reachability. This one does not.
+
+### MEASURED, and it corrected my own prediction
+
+    ALTER TABLE "app"."accounts" ALTER COLUMN "nickname" TYPE INT USING "nickname"::INT
+    ALTER TABLE "app"."accounts" ALTER COLUMN "nickname" SET NOT NULL
+
+MySQL has no `ALTER COLUMN ... TYPE`, no `USING` cast, and quotes identifiers with backticks.
+
+I had predicted from the source that the statement would MIX dialects - MySQL-qualified table, since
+`self.qualified` has a `SqlDialect::Mysql => mysql_qualified` arm at `:7498`, with double-quoted
+columns. The measurement says otherwise: the table is double-quoted too, so the statement is
+PostgreSQL end to end. Whatever that MySQL arm serves, this path is not it. Reading gave a plausible
+and wrong answer; that is why the test asserts on emitted text rather than on the renderer's source,
+and why the measured strings sit in its header.
+
+### The pin fails when the defect is fixed
+
+The test asserts what is emitted today AND `!alter.up.contains("MODIFY COLUMN")`, so teaching the
+renderer MySQL syntax turns it red with a message naming what happened. A pin that only asserted
+today's text would silently rot into agreement with a fixed renderer.
+
+### The tradeoff that does NOT apply here
+
+Three fixes in this review have been reversed by the rule that a check rejecting a working migration
+is worse than the gap it closes. It does not apply to this one: the emitted statement CANNOT execute
+on MySQL, so refusing it at render time replaces an invalid-SQL runtime error with a clear engine
+refusal. Nothing that works today would be rejected.
+
+Two options, still open on #87. Emit correct MySQL syntax (`MODIFY COLUMN`, no cast clause, backtick
+identifiers) - the real fix, and available because MySQL supports these ALTERs natively, unlike
+SQLite. Or fail closed the way SQLite does, which is strictly better than today and smaller, but an
+interim rather than an end state.
+
 ## F171 - the catalog oracle for the drop gate, verified 10/10 - and the obvious query is wrong
 
 F170 named this as the first thing to do before implementing: verify the `pg_depend` joins that
