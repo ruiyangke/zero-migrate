@@ -8990,6 +8990,43 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F251 - the guard was proven by breaking it, and it stopped a fabricated schema
+
+Shipped 39b9d7ad, 96344ae0 and db90e313, closing #193 except the extension arm.
+
+F250 shipped the rollback reconstruction with one arm behind it: a view, in-process against SQLite.
+Three arms now drive it over the real host-driver seam against live PostgreSQL - a sequence
+(portable), a schema (vendor-gated, under its own charter), and a guarded create whose rollback
+must be REFUSED.
+
+The first two are ordinary coverage. The third is the one worth recording, because it tests a
+refusal rather than a capability, and because I nearly did not write it.
+
+When I shipped the schema arm I described schema and extension as "the ones that matter" - they
+carry `if_not_exists`, so they can reach the second arm of `op_may_have_been_skipped`. Writing the
+arm showed that was only half true: it authors `schema(name).create({})` with no flag, so the
+guard returns false and the contributor is used. Coverage of the object KIND is not coverage of
+the GUARD, and the shape of the test invites exactly that conflation.
+
+So the fourth arm authors a guarded create, drops it, and asserts the rollback refuses:
+
+    zero-migrate: migration mig_7n42DGM5RdAxbzpxNl21X6 ('drop_schema_..._guarded') is
+    irreversible (down: None); rollback refuses by default. Prefer ROLL-FORWARD: author a
+    compensating migration.
+
+That message was read off a deliberate placeholder assertion rather than guessed - and it names
+the DERIVED per-op migration id, not the authored envelope name, which I would have got wrong.
+
+Then the mutation that makes it evidence. Forcing `op_may_have_been_skipped` to false and
+rebuilding the addon fails that arm ALONE - the rollback succeeds and rebuilds the schema - while
+the three arms beside it still pass. A create carrying IF NOT EXISTS can journal `completed` while
+the create was skipped, so its definition is not evidence the object was ever made that way, and
+without the guard the reconstruction invents a schema nobody created. That is the defect the guard
+exists to stop, observed rather than argued.
+
+The pattern across all four arms: each was mutation-tested by breaking the specific code it
+claims to cover, and each failed alone. A green suite proves nothing about which line earned it.
+
 ## F250 - the second attempt worked because the first one ran
 
 Shipped 5387396c, closing the DropView half of #188.
