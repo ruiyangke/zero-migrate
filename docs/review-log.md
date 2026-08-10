@@ -8985,6 +8985,74 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F207 - #29 had no available branch, and the same name search fooled me in both directions
+
+#29 asked to "enforce injected-index immutability or drop the claim". Neither was available, and
+finding that out took three separate name searches, two of which were misleading.
+
+### Neither branch exists
+
+ENFORCE: `CREATE INDEX` is a separate statement from `CREATE TABLE`, so a create can never carry
+proof of an index obligation, and the guard is per-statement by contract - the obligation spans two
+statements it never sees together. The one lever, stripping injects from the guard's policy, was
+already considered and rejected in an earlier entry, because the same `injects_for` feeds the
+column-shape and primary-key rules: the strip would also let a later migration drop `deleted_at` or
+the pinned key.
+
+DROP THE CLAIM: there was no claim to drop. `grep -rn "immutab"` over the policy crate,
+`model/table_shape.rs` and `docs/*.md` returned one hit beside "index", and it was this log.
+
+So the resolution was the third option the binary excluded: write the accepted loosening where a
+reader forms the expectation. `table_shape.rs`'s header said "injected indexes appended", accurate
+about resolution and silent about what follows. It now says appending shapes the table AT RESOLUTION
+and is not a standing guarantee, with the per-statement reason and the rejected lever recorded.
+
+### The name search that said a check existed
+
+`resolved_create_table_matches_inject` reads like a verification and returns `bool`. It has exactly
+one caller, `table_shape.rs:298`:
+
+    if resolved_create_table_matches_inject(columns, primary_key, indexes, inject)? {
+        return Ok(());
+    }
+
+That is an idempotency short-circuit, not a check. `Ok(())` on a match means SKIP WORK; a create
+missing an injected index falls through to the merge below and has it appended. Nothing refuses it.
+The name describes the question the function answers, not what the caller does with the answer -
+the sixth costume of "a name is not a behaviour", and the same trap as `__begin(_phase)` and
+`is_destructive` earlier in this pass.
+
+### The name search that said a check did NOT exist
+
+Then the mirror image, which is the more dangerous half. Verifying whether the raw-create rule is
+tested, I grepped the STRING `"RawCreateInInjectScope"` and found two hits - the constant and a doc
+comment - and briefly concluded no test pinned it.
+
+The tests reference the CONSTANT, not the string:
+
+    crates/zero-migrate-guard/tests/namespace_authority.rs:83,94,100,158,199,206
+        namespace_rule::RAW_CREATE_IN_INJECT_SCOPE
+
+Six assertions, invisible to the spelling I searched. And the rule is genuinely enforced, fail-closed,
+at `guard/mod.rs:1529-1538`: no declared shape, or a shape that does not `conforms_to` the covering
+injects, and it denies.
+
+Had I stopped at the string search I would have published "declared but never pinned" as a finding,
+in the same pass where I was being careful about the opposite error. One identifier, two spellings,
+two wrong answers in opposite directions.
+
+### What is now evidenced rather than implied
+
+Columns and the pinned key ARE enforced at the raw-create gate and pinned by six tests. Injected
+indexes are NOT, because a `CREATE TABLE` can prove its own columns and PK and cannot prove anything
+about a statement that has not arrived. The asymmetry is a consequence of what one statement can
+say about itself, not an oversight in the rule.
+
+Worth noting the shipped note deliberately does NOT claim this. It says the column and primary-key
+behaviour "has not been measured here" - my first draft asserted they were re-checked, which was
+inference from this log's phrasing. The measurement above came after, and agrees. Being accidentally
+right is not the same as having evidence, and a reader cannot tell the two apart from the text.
+
 ## F206 - the same guarded-create bug in four arms, and the sweep that found the last three
 
 F205 fixed `Op::CreateSchema` and `Op::CreateExtension`. Rather than return to the queue, I swept
