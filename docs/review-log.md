@@ -8990,6 +8990,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F236 - the dropped extension is reversible, and the mutation proves the landmine F234 predicted was real
+
+Shipped f3884a7a, on the plumbing decided in F234 and through the four gates mapped in F235.
+
+`Op::DropExtension` now renders `CREATE EXTENSION <name> [WITH SCHEMA <s>]` as its own `down`. The
+placement comes from the recorded `ExtensionSnapshot.schema` rather than the drop's effective
+schema, because `Op::DropExtension` carries no schema qualifier at all - `eff_schema` there would be
+an invention, not a fact.
+
+### The renderer stayed pure
+
+Option (B) held up. `render_vendor_op` is untouched and still takes `(op, eff_schema)`; the inverse
+is attached at the lower.rs vendor call site, which already has `live_schema` in scope:
+
+    let history_down = vendor_inverse_from_history(op, live_schema);
+    ... .map(|s| { let down = s.down.or_else(|| history_down.clone()); ... })
+
+So vendor.rs:14's "The render is pure (no DB, no live schema)" is still true, which matters because
+that module's output is the string the guard re-parses at this seam. The `or_else` also means an op
+that already renders its own down keeps it; only a `None` is filled.
+
+### The landmine was real, and the test catches it
+
+F234 predicted that reusing `existence_guard.is_some()` here would classify a guarded drop as
+unguarded. The arm instead matches the op's own field:
+
+    Op::DropExtension { name, if_exists } if !if_exists.unwrap_or(false) => { ... }
+
+Mutating that to ignore the guard - `Op::DropExtension { name, if_exists: _ }` - produces exactly
+the predicted failure, and only in the test that covers it:
+
+    test a_guarded_extension_drop_keeps_no_inverse ... FAILED
+    test rolling_back_a_dropped_extension_restores_it ... ok
+
+So the refusal is load-bearing AND the suite would have caught the bug had it been written the
+copied way. That is the useful outcome: the prediction in F234 was not just avoided, it is now
+guarded against regression.
+
+### What the RED looked like
+
+Before the change, against live PostgreSQL 18.4:
+
+    rolling back the dropped extension must succeed: migration mig_7n42DGM5S1ZOwIu28pwmjd
+      ('drop_extension_citext') is irreversible (down: None); rollback refuses by default.
+
+The guarded test already passed at that point, which is the right shape for a RED: only the
+behaviour being added was failing.
+
+### The two tests cannot share an extension
+
+Recorded in F235 and worth repeating where the code is: `pg_extension.extname` is unique per
+DATABASE. Per-schema isolation - which is what every other op in this family relies on - does not
+isolate an extension, so the restore test uses `citext` and the guarded test uses `pgcrypto`. Both
+are in `operator_charter`'s allowlist. Two tests in one binary running in parallel against one
+database cannot both create the same one.
+
+GATES: `FMT_RC=0`, `CLIPPY_RC=0`, `TEST_RC=0`, zero skip banners,
+`targets=106 passed=2464 failed=0` against live PostgreSQL 18.4 and MySQL 8.4.11.
+
 ## F235 - a vendor op cannot be tested the way a table op is, and three separate gates say so before any assertion runs
 
 No code shipped. The `DropExtension` test was written and driven far enough to learn what a vendor
