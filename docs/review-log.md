@@ -8985,6 +8985,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F186 - #103 REJECTED as filed: the unresolvable citations are the documentation working
+
+Third and last measurement pass. Reading the CONTEXT of every remaining candidate - not just whether
+the target exists - dissolves the ticket. And it corrects a claim I made two entries ago.
+
+### I called something rot that is not
+
+F184 wrote: "VERIFIED MISSING: `crates/zero-migrate/src/model/migration.rs`, cited from
+`model/load.rs` ... genuine rot." Too strong. Both citing sites read:
+
+    // Re-captured when the IR checksum domain-separator tag was set to
+    // `zero-migrate/of_ir/v1` (`model/migration.rs`): the hint-domain fold ...   (load.rs:617)
+    // domain-separator tag was set to `zero-migrate/of_ir/v1` (`IR_DOMAIN_TAG` in
+    // `model/migration.rs`): the tag is folded into `Checksum::of_ir` ...        (ir_checksum.rs:152)
+
+They cite a SYMBOL and give its file. The symbol `IR_DOMAIN_TAG` is correct and greppable; only the
+`model/` fragment is stale, left over from the extraction into `zero-migrate-ir`. A reader loses
+nothing. My existence check answered "does this path resolve", and I reported it as "is this citation
+wrong" - the two are not the same question, which is the error this review keeps finding in others.
+
+### Every remaining candidate is legitimate, and each in a different way
+
+VERIFIED BY ME BY READING each site:
+
+  - HISTORICAL, with the move stated: `model/ir.rs` at `model/op_support.rs:4` - "These were inherent
+    methods on `Op` in `model/ir.rs`. When the wire contract was extracted into the `zero-migrate-ir`
+    leaf crate ..."
+  - HISTORICAL, with a commit: `apply/ir_apply.rs` at `render/lower.rs:377` - "The last non-test call
+    site was `apply/ir_apply.rs`'s `apply_bundle_ir_sqlite`, removed in 8a212fb".
+  - CROSS-REPO, attributed: `crates/core/src/typed_id.rs` at `zero-migrate-ir/src/id.rs:12` -
+    "zeroship vendors this crate alongside its own ...".
+  - CROSS-REPO analogue: `crud/introspect_schema.rs` at `render/fold.rs:3639` - "This is the offline
+    analogue of `crud/introspect_schema.rs`'s runtime derive."
+  - PROSE EXAMPLE: `migrations/0007_split.ts` at `zero-migrate-ir/src/validate.rs:408`, marked `e.g.`.
+  - RUNTIME-CONSTRUCTED: `policy/root.toml` in `config.test.ts`, written into a temp fixture by
+    `resolve(project.root, "policy/root.toml")`.
+  - STALE FRAGMENT, CORRECT SYMBOL: the `model/migration.rs` pair above.
+
+Seven shapes. Every one is a path that does not resolve, and every one is the comment doing its job.
+
+### The rejection
+
+A path-existence gate cannot separate these from rot, because the distinguishing information is the
+PROSE AROUND the path - "were", "removed in", "zeroship's own", "e.g." - which no path checker reads.
+Any threshold that catches rot catches these, and the demanded repair is to delete accurate history,
+strip attributions, or mangle examples. That is a worse repo than the one with stale path fragments.
+
+This also answers the cost #103 raised and could not resolve - "the honest way to write X no longer
+exists is WITHOUT WRITING X". The repo already does the opposite, deliberately and well: it names the
+old path AND says it is old. The gate would forbid the better of the two styles.
+
+#103 is REJECTED AS FILED. Not "deferred": the predicate does not exist at any tuning, and three
+successive refinements each looked right and each failed on a class the previous pass had not seen.
+
+### What is NOT rejected
+
+#84's original sweep found 26 real dead citations, and those were a different shape - paths presented
+as CURRENT locations with no historical or cross-repo framing. That class is real and recurred twice.
+Catching it needs a reader who understands the sentence, which is what a review is. Recorded here as
+a hole rather than handed to a gate that would have to be switched off.
+
 ## F185 - #103's predicate is not "paths that resolve" - three classes of path-like string are not citations
 
 Continues F184's population run to a classification. The predicate got simpler and then, at the last
