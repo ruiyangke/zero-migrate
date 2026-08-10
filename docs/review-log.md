@@ -8990,6 +8990,62 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F228 - all six narrow assertions are correct, and reading them took measuring the strings rather than counting the calls
+
+#187 closes with no code change. That is the answer, not an evasion: the six sites were a
+query result, each needed judgement, and the judgement is that every one is right.
+
+Re-measured at HEAD, unchanged from the ticket's own figures:
+
+    enums_domains              contains=4  assert_eq=10
+    generated_identity_columns contains=2  assert_eq=22
+    type_id_value_format       contains=0  assert_eq=12
+    ulid_value_format          contains=0  assert_eq=10
+
+### enums_domains, four sites
+
+Counting told me nothing about whether anything was unread, so I put a deliberate
+placeholder in two of the assertions and read the left side of the failures:
+
+    CREATE TABLE `app`.`subscriptions` (`tier` ENUM('free', 'pro'), `period` INT NOT NULL DEFAULT 1 CHECK ((`period` >= 1)))
+    CREATE TABLE "subscriptions" ("tier" TEXT CHECK ("tier" IN ('free', 'pro')), "period" INTEGER NOT NULL DEFAULT 1 CHECK (("period" >= 1)))
+
+The two `contains` in each test cover the whole column list, which is what the tests are
+named for. The residue is the `CREATE TABLE <name> (` prefix. Converting to `assert_eq!`
+would buy the table name and cost a break on every unrelated rendering change.
+
+These use `support::no_inject`, which is the difference from the case that started all
+this: `generated_identity_columns.rs:258` rendered under an INJECTING charter, so three
+charter-injected columns sat in the string unread. Here there are none. The charter the
+helper composes decides whether a narrow assertion is leaving anything behind, and the
+call count cannot see that.
+
+### The residue was not nothing, and it checked out
+
+MySQL qualifies (`` `app`.`subscriptions` ``), SQLite does not (`"subscriptions"`). That
+asymmetry is deliberate: the dialect dispatch at `render/declarative.rs:7544-7546` has an
+explicit arm each, `:5567` records "SQLite DROP TABLE is unqualified (main IS the app
+file)", and `schema/fts_sqlite.rs` states the rule and pins it at `:284`. Documented,
+intended, asserted elsewhere.
+
+### generated_identity_columns, two sites
+
+Both isolate one identity detail for a clearer message, and the full string for each
+dialect is pinned by a sibling in the same file - PostgreSQL at `148`, `215` and `224`,
+SQLite at `247`, MySQL by the test 695d56d added. The ticket predicted this from the
+22-to-2 ratio and was right.
+
+### What the ticket got right that a sweep would have got wrong
+
+Its rule - "the question is whether the rest of the string is pinned SOMEWHERE, not
+whether this particular line is exhaustive" - is what makes all six legitimate. A
+bulk conversion would have traded six focused assertions for six brittle ones and called
+it coverage.
+
+The three instances found this week (F226's log slice, F227's copied list, and the
+original injected columns) were all cases where nothing else pinned the remainder. That
+is the discriminator, and it is only visible by reading what the value actually contains.
+
 ## F227 - the table I added yesterday was outside the collation gate, and the list guarding it had been copied twice
 
 Shipped 7f4a4579. Following my own change into its neighbourhood rather than stopping at
