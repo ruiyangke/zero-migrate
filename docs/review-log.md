@@ -8985,6 +8985,64 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F184 - #103's resolution rule needs five roots, not two, and the population run says so
+
+#103 requires a FULL POPULATION RUN before installing, on the grounds that "a number you do not
+believe is the tell that the predicate is not the one you meant". Ran it. The number was not
+believable, and the ticket's own rule is why.
+
+### What the ticket had
+
+It measured two roots - repo root and citing-crate root - after finding that a naive repo-root-only
+gate failed 13 of 13 crate-relative citations, 8 of which were correct. Installing on the naive form
+would have failed at install.
+
+### What the population says
+
+Extracted `(citing file, cited path)` pairs from 316 tracked `.rs` / `.ts` / `.toml` files under
+`crates/` and `packages/`, keeping only citations containing a `/` (a bare filename is not a path
+citation). 124 distinct pairs.
+
+    repo root          39
+    citing crate root  37
+    unresolved         48      <- what the ticket's two-root rule reports
+
+48 of 124 is not believable for a repo whose citations were swept in #84. READ THE HITS, and most are
+CORRECT citations against roots the ticket never modelled:
+
+    crate src/     13   `render/lower.rs` from crates/zero-migrate/tests/*.rs
+    citing dir      5   `mig/20260711000001_create_widgets.ts` from packages/.../tests/host/
+    unresolved     30
+
+A FIFTH root is still needed and is visible in the remaining 30: sibling-crate citations like
+`zero-migrate-node/src/runtime.rs` from another crate, and cross-language ones like
+`tests/support/mod.rs` cited from a `.ts` host test into the Rust crate. VERIFIED BY ME that those
+targets EXIST - `crates/zero-migrate-node/src/runtime.rs`, `crates/zero-migrate-policy/tests/compose_oracle.rs`,
+`crates/zero-migrate/tests/support/mod.rs` - so they are correct citations, not rot.
+
+### Real rot is in there too
+
+VERIFIED MISSING: `crates/zero-migrate/src/model/migration.rs`, cited from
+`crates/zero-migrate/src/model/load.rs`. I hit this one myself earlier today looking for
+`ChecksumInput` - it lives in `crates/zero-migrate-ir/src/migration.rs`. Also missing:
+`crates/core/src/typed_id.rs` and `crates/migrated/tests/typed_id_parity.rs`, cited from
+`zero-migrate-ir/src/id.rs` - neither crate exists here, the same appbase-fork class #106 removed.
+
+### The finding
+
+The ticket's warning generalises one level further than it states: the predicate is harder than the
+sentence, AND harder than the ticket's own corrected version of the sentence. Each round of
+measurement found another legitimate root. That is an argument for classifying the full remainder
+before writing any gate, not for adding roots until the number looks nice - a gate tuned until it
+passes is a gate that has stopped testing anything.
+
+### Not yet done
+
+No gate written, no citation fixed. The 30 remaining need classification into "needs a fifth root"
+versus "rot", and #103's other open decision is untouched: how to write "X no longer exists" without
+writing X, since otherwise every correction adds a violation and the gate teaches people to describe
+deletions vaguely.
+
 ## F183 - #167 shipped, and building it corrected the reason F181 gave for prioritising it
 
 The preflight F182 chose, on the oracle F171 verified. The RED also overturned the justification I
