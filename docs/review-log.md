@@ -8985,6 +8985,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F173 - expression defaults are admitted for MySQL and rendered unparenthesised, which MySQL rejects
+
+#53, re-scoped. Its two halves resolve in opposite directions, and the ticket did not separate them.
+
+### Ground truth, MEASURED BY ME (MySQL 8.4.11, fixture dropped)
+
+    datetime DEFAULT now()              accepted      datetime DEFAULT (now())      accepted
+    datetime DEFAULT CURRENT_TIMESTAMP  accepted      datetime DEFAULT (1+1)        accepted
+    datetime DEFAULT 1+1                REJECTED      datetime DEFAULT (UUID())     accepted
+    datetime DEFAULT UPPER('x')         REJECTED      datetime DEFAULT ('x')        accepted
+
+Bare is accepted only for literals and the datetime special case. Every other expression must be
+parenthesised.
+
+### The declarative path is fine, and the comment saying so is TRUE
+
+I flagged `declarative.rs:7525` last turn as a suspect mechanism-claim - "only ever emits IMMUTABLE
+literal defaults ... never `NOW()` / `gen_random_uuid()`" - because an unverified claim of that shape
+has been this review's recurring defect. It holds.
+
+VERIFIED BY ME BY READING `field_default_expr` (`declarative.rs:2591`): it renders `f.default`, a
+`serde_json::Value`, by TYPE. String via `sql_str`, numerics via `numeric_default_literal`, boolean
+as `true`/`false`, bytes via `inline_literal`, json/object/array via `json_container_default_expr`
+(already `(JSON_OBJECT())` on MySQL), and `_ => None`. No arm can produce a bare function call - the
+descriptor surface takes a VALUE, not an expression. The generated-column carrier goes through
+`GENERATED_PREFIX` and renders parenthesised.
+
+Recording that negative result deliberately, because I raised the suspicion in the open.
+
+### The IR path is a different story, and the chain is complete
+
+1. `IrDefault::Expr` exists (`zero-migrate-ir/src/ir.rs:800`), documented as a closed expression
+   default.
+2. `validate_default_expr` (`validate.rs:6182`) ADMITS it for MySQL. `Expr::FnCall` is accepted with
+   only `CurrentSetting` / `CurrentUser` refused; `UuidV4`, `UuidV7`, `BinOp`, `Case`, `Cast`,
+   `Between`, `Like` all pass. Crucially, `target_dialect` is threaded through EVERY arm of the walk
+   and used ONLY to construct error messages - VERIFIED BY ME by grepping the whole walk body for a
+   dialect comparison and finding NONE. The dialect never decides anything here.
+3. `render_ir_default` (`lower.rs:1904`) sends `IrDefault::Expr` straight to `render_expr_inline`
+   with no parenthesisation.
+4. `lower.rs:4877` uses that rendered string in a DEFAULT clause under `self.dialect`, with no MySQL
+   branch.
+
+So `.default(upper('x'))` or an arithmetic default targeting MySQL passes validation and renders
+bare, and the measurements above say MySQL refuses it.
+
+### What that changes about the ticket
+
+The title's second half - "stop calling them literals" - is now precise. The declarative comment is
+ACCURATE for its own path, so no wording fix belongs there. If anything reads as "literal" on the IR
+side, that is where to look.
+
+The first half is real but wants its shape stated carefully: the fix is not "wrap every default in
+parentheses", because `now()` and `CURRENT_TIMESTAMP` are accepted bare and a literal must stay bare
+(`DEFAULT ('x')` happens to be accepted, but `DEFAULT 'x'` is the natural spelling). It is a
+render-time question about which expression shapes need wrapping on MySQL.
+
+NOT MEASURED: I have not run an end-to-end MySQL apply of an expression default to see the server
+error. The chain is established by reading plus the standalone SQL measurements above; the failing
+test comes before any fix.
+
 ## F172 - the declarative differ emits PostgreSQL DDL for a MySQL column change, and it is reachable
 
 #87. Both halves now established: the path is reachable, and the emitted text is measured. Pinned by
