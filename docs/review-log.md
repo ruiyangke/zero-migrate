@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F213 - the rollback surface is a projection of a contract that already exists, not a new design
+
+`zero_migrate::rollback` shipped in 1cb04ab and is proven on SQLite and live PostgreSQL. Nothing
+outside Rust can call it: no `#[napi]` verb invokes it, and the CLI's `--rollback` is a flag on the
+`resolve` verb meaning "resolve an online rename and keep the old column"
+(`packages/zero-migrate-cli/src/cli.ts:1284`, refused elsewhere at `:331`). So `up` is reachable end
+to end and `down` is reachable from nothing.
+
+The near-miss is worth recording ahead of the decisions. I wrote a design brief asking for a verb
+name, a target model, and a force gate, and dispatched it. All three of the hard parts already
+existed:
+
+    RollbackTarget (apply/executor.rs:1869)
+      ToVersion(MigrationId)  roll back everything STRICTLY AFTER this version; the target is kept
+      Steps(usize)            the n most-recently-applied; Steps(0) is a no-op
+      All                     every net-applied migration
+    RollbackRequest::new(target) at :1898 REQUIRES a target
+
+    RollbackOptions (:1916-1927)
+      force                   cross a `down: None` migration by SKIPPING it. OFF by default; the
+                              documented posture is to refuse and direct the operator to roll forward
+      backup_acknowledged     "force is honored ONLY when this is also set"
+
+So the dangerous shape I was most worried about - a bare invocation meaning "roll back the last one" -
+was already designed out, and the irreversible path already demands two independent acknowledgements.
+The brief was killed and re-asked with those facts as constraints. This is the fifth instance of one
+pattern today and the first where it cost a dispatched agent rather than a claim: before designing a
+contract, read the one that exists.
+
+DECIDED, and the CLI projects these rather than inventing:
+- The verb is `down`. `rollback` is available as a concept but `--rollback` is already a resolve flag,
+  and a verb sharing a name with an unrelated flag is the ambiguity this codebase keeps paying for.
+  `down` also pairs with `up`, which is the vocabulary the product already uses.
+- The target is REQUIRED, mirroring `RollbackRequest::new`. No default target, so no accidental
+  invocation.
+- `force` and `backup_acknowledged` surface as distinct flags, both off by default, with `force`
+  inert unless the acknowledgement is also given - the engine's rule, not a new one.
+- The existing `--approve` gate applies, as it does to other destructive operations. Rollback does
+  not get a bespoke approval path.
+
+DEFERRED, and filed as its own decision rather than folded in: nothing currently gates a LOSSY
+rollback. `force`/`backup_acknowledged` cover `has_irreversible_steps`; `has_known_lossy_steps` and
+`has_unassessed_steps` are ungated, so rolling back a migration that dropped a column asks for no
+acknowledgement while rolling back one with no `down` demands two.
+
+A second opinion recommended requiring `backup_acknowledged` for the lossy case, and in the same
+breath corrected the framing in a way that undercuts it: a lossy down does not destroy data during
+the rollback, because the `up` already destroyed it - the down merely fails to restore it. That makes
+`backup_acknowledged` mean a backup from before the ROLLBACK on one path and from before the
+destructive UP on the other. One boolean, two meanings, which is the defect shape this review has
+found repeatedly. Left to Ruiyang with four options written out; the exposure work changes no gate.
+
 ## F212 - the varchar(191) interop hazard is a non-event here, and the reason is two defences neither of which was designed for it
 
 Raised by the appbase exchange: their MySQL renderer emits the injected system columns as
