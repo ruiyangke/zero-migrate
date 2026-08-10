@@ -8990,6 +8990,76 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F239 - AlterSequence stays irreversible, and a question I have NOT answered about the four ops already shipped
+
+### AlterSequence: leave `down: None`
+
+Decided, on a second opinion whose evidence I spot-checked. Three independent reasons, any one of
+which would be enough:
+
+- `restart` is never folded. The fold's alter arm does not bind or pass it (fold.rs, the
+  `Op::AlterSequence` arm), and `SequenceSnapshot` carries the CONFIGURED `start`, not the current
+  position or `is_called` (snapshot.rs:1109). Where this repo genuinely needs generator position it
+  models `last_value` and `is_called` separately (postgres/identity_sql.rs:36, :321). So an alter
+  carrying `restart` has no honest inverse at all.
+- `apply_alter_sequence_snapshot` overwrites increment, bounds, cache, cycle and ownership in place,
+  so once folded the prior values are gone.
+- The house style is NOT uniformly refuse, and the precedent points the same way. `setColumnNotNull`
+  synthesises `DROP NOT NULL`; `dropColumnNotNull` synthesises `SET NOT NULL`; `setColumnDefault`
+  synthesises `DROP DEFAULT` - note it drops rather than restoring a previous default.
+  `dropColumnDefault` returns `None` with a comment saying the previous default is absent, and
+  `setColumnType` returns `None` because reverse casts are lossy. The rule is: synthesise a simple
+  OPPOSITE clause when one exists, refuse when the inverse needs prior state. `AlterSequence` needs
+  prior state, so it refuses - the same call `dropColumnDefault` already made.
+
+Accepted cost, stated plainly: a restart-free alter of cache or cycle during a fresh deploy often
+DOES have an exact pre-op snapshot available, and refusing makes those benign changes irreversible
+too. That is a real loss, taken deliberately because distinguishing the benign case needs per-op
+pre-state the engine does not persist.
+
+### OPEN, and it touches the four ops already shipped
+
+The same opinion raised something I could not finish checking, and it would be dishonest to record
+this entry without it.
+
+VERIFIED: the rendered `down` is NOT stored in the journal. The rollback planner says so where it
+requires the migration to be supplied: "the `down` lives in the migration file, not the journal, so
+an absent file means the reverse SQL simply does not exist to run"
+(crates/zero-migrate/src/apply/executor.rs, the `MissingFromSet` gate). So at rollback time the down
+is RE-DERIVED by re-lowering the authored envelopes.
+
+VERIFIED: the addon's rollback verb reads a live catalog snapshot AFTER taking the lock
+(`backend.snapshot_schema(cfg)`) and hands it to
+`lower_ordered_envelopes_to_plans_for_apply(..., snapshot, ...)`
+(crates/zero-migrate-node/src/verbs.rs, inside `rollback_with_locked_backend`). That function
+initialises its live schema ONCE from that snapshot
+(`let mut live = live_schema_with_ownership(base_snapshot.clone(), ...)`,
+crates/zero-migrate-node/src/lower.rs:370) and then loops the envelopes (:374).
+
+NOT VERIFIED, and this is the question: whether `live` is ADVANCED per envelope in the happy path.
+I searched lower.rs:360-480 and found `live` assigned once at :370, cloned into `historical_live`
+only inside an error-recovery branch (:408), and a `fold_ops_onto` at :462 that advances
+`pending_ops` for the pending projection rather than the lowering `live`. I did not read the rest of
+the function, so I cannot say whether an advance exists elsewhere.
+
+WHY IT MATTERS. My four shipped inverses read the dropped object out of the folded history. If the
+envelope loop advances `live` by folding each envelope's ops as it goes, the authored `createView`
+re-adds the view (with its typed body) before the `dropView` envelope lowers, and the down is
+re-derived correctly at rollback time. If instead every envelope is lowered against the one static
+catalog snapshot, then at rollback time the dropped object is already absent from the catalog - and
+introspection cannot produce a typed `ViewQuery` anyway - so the down would come out `None` and the
+CLI rollback would refuse the very migrations the engine tests prove reversible.
+
+WHAT THE TESTS DO AND DO NOT PROVE. All eight tests pass `Vec<Migration>` built during apply
+straight into `rollback(...)`, so they prove the ENGINE renders and runs the inverse. None of them
+goes through `rollback_with_locked_backend`. That is precisely the "walk the chain from the entry
+point" gap: the engine behaviour is proven, the CLI path is not.
+
+NEXT, and it should come before any further op: read the rest of
+`lower_ordered_envelopes_to_plans_for_apply` and settle whether `live` advances. If it does not, the
+four shipped inverses are engine-only and the CLI story needs its own fix. Either way the answer
+belongs in a test that drives `rollback_with_locked_backend` rather than the engine API.
+
 ## F238 - dropTrigger's inverse is derivable after all, and a second-opinion dispatch that failed is not a second opinion
 
 Two small things, one of them a correction to how the remaining work is estimated.
