@@ -8985,6 +8985,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F206 - the same guarded-create bug in four arms, and the sweep that found the last three
+
+F205 fixed `Op::CreateSchema` and `Op::CreateExtension`. Rather than return to the queue, I swept
+every `down:` in `render/vendor.rs`, because F205's own conclusion was that making a dormant path
+reachable promotes every latent bug on it at once. The sweep found two more.
+
+### The third: a cluster-wide DROP ROLE (9b3c758)
+
+`Op::CreateRole` has no native `IF NOT EXISTS`, so a guarded create synthesises a probe
+(vendor.rs:362): `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ...) THEN CREATE
+ROLE ...; END IF; END $$`. Its down was an unconditional `DROP ROLE IF EXISTS`.
+
+Worse than the schema case, because a PostgreSQL role is CLUSTER-wide: not scoped to the schema, not
+even to the database. Dropping a pre-existing role reaches other databases and cascades through every
+grant and ownership it holds. The schema case destroyed data inside one project; this one leaves it.
+
+### The fourth: a RESET that discards someone else's pinned path (abd13d4)
+
+The same arm pushes a second statement, `ALTER ROLE ... SET search_path`, whose down was `RESET
+search_path`. My fix for the DROP left this one - I checked `statement[0]`, saw it correct, and moved
+on while `statement[1]` still carried a destructive down. The RED that caught it asserts over EVERY
+statement in the returned batch, which is the shape the earlier arms should have used.
+
+### Why the code looked right, and this is the part worth keeping
+
+vendor.rs:404-409 justifies the asymmetry deliberately:
+
+    NOTE the createRole-vs-alterRole asymmetry below: createRole's search_path push carries a
+    RESET `down` (its inverse is well-defined), whereas an alterRole is a one-way edit over a
+    possibly-already-customized role, so it journals `down: None`.
+
+"its inverse is well-defined" was TRUE when written. A role that did not exist a moment earlier
+cannot carry a custom search_path. The precondition stopped holding when guarded creates were
+allowed, and nothing revisited the comment.
+
+That is a different failure from the drift this log keeps finding. The text did not become wrong
+about its own case; the case set widened underneath it while the text stayed accurate about the
+original. Re-reading the comment does not catch that - only re-checking its precondition does. The
+same reasoning that made the comment correct is what makes it dangerous once `if_not_exists` exists.
+
+### The structural question, unreconciled
+
+Four arms had one shape. A fifth is a matter of time, and the compiler gives no help because a
+`VendorStatement { name, up, down }` literal is always valid.
+
+I dispatched a second opinion on the shape and the codex run was KILLED mid-exploration, so only my
+reading exists: a helper is opt-in and fails the same way, an enumerating test needs a hand-written
+variant list that drifts for exactly the reason the bug recurs, and only making the literal private
+behind a constructor that TAKES the guard puts the compiler in the loop. That option is not clean
+either - ops with no guard concept have nothing to pass, so it likely needs two constructors and
+reintroduces a choice.
+
+Not implemented on one opinion. The narrow fixes were taken first because they close live hazards and
+are not blocked by the design question.
+
 ## F205 - shipping the rollback driver turned a dormant synthesis bug into live data loss
 
 `render/vendor.rs` built `Op::CreateSchema` with a conditional up and an unconditional down:
