@@ -8990,6 +8990,45 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F246 - a fifth error the gate could not report until the first four were gone
+
+Shipped 7d12e5cb, closing #190.
+
+`RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items` exited 101.
+I found it while gating something unrelated, which is the only reason it was found at all.
+
+Four errors, all in `zero-migrate`, ending in `could not document zero-migrate`. Fixing them and
+re-running produced a FIFTH, in `zero-migrate-node`: `public documentation for runtime links to
+private item with_diagnostics`. Cargo stops at the first crate that fails, so that error had no
+way to be reported while `zero-migrate` was red. My ticket said "four rustdoc errors" because
+four is what the tool could show me. The same chain property #128 was rejected over - the crates
+form one chain, so Cargo cannot lint past the first failure - decides what a red gate is even
+able to tell you. A count read off a failing build is a lower bound, not a total.
+
+Three of the five were links to non-public items, and rustdoc says exactly what is wrong with
+them:
+
+    = note: this link resolves only because you passed `--document-private-items`,
+            but will break without
+
+So the links work under this gate's own flags and break for anyone running plain `cargo doc` on
+the crate. I un-linked all three and kept the names in prose. Making them public to satisfy a doc
+link would grow the API surface for a documentation convenience, and #105 already established
+that documenting private items here is deliberate, so weakening the flag was not on the table.
+
+The interesting one was `SynthFn::Now`, reported as "no item named `SynthFn` in scope". I wrote
+in the ticket that an unresolved link means the item was renamed or removed, and that deleting
+the link would lose whatever it became. That was wrong, and grepping took one command:
+`SynthFn` is alive at `crate::model::expr::SynthFn`, re-exported from the crate root, with `Now`
+a live variant used in `model/table_shape.rs:458`. Nothing had been renamed. The comment simply
+sits in a file that does not import it, so the fix was a path, not an investigation. Had I acted
+on my own ticket's framing I would have deleted a correct reference.
+
+The fourth was its mirror image: `[SchemaSnapshot](crate::model::snapshot::SchemaSnapshot)` was
+flagged as a redundant explicit target, which is rustdoc telling you the type IS in scope there.
+Two errors one line apart in kind, pointing in opposite directions, and only reading the imports
+distinguishes them.
+
 ## F245 - the comment warning about hand-copied lists was two files away from one
 
 Shipped 54493b1b, closing #189.
