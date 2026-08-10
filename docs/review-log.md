@@ -8985,6 +8985,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F198 - #170 measured on the writer side: three arms maintain in-envelope state, and one reader wants it stale
+
+#166's fix carried a deferral: "the wider question - that several other arms also read live structure
+an earlier op can invalidate - is its own ticket, not this gate." That is #170, and the ticket says
+to measure each consumer before building anything. Here is the writer half, which decides more of it
+than expected.
+
+### What the lowering loop actually maintains
+
+Two pieces of working state thread through every op:
+
+```text
+live_tables: &mut BTreeSet<String>    table NAMES
+live_schema: &mut LiveSchema          full structure
+```
+
+VERIFIED BY READING, the only production writes to the working `LiveSchema` during lowering:
+
+```text
+Op::CreateTable    arm :4350  ->  live_schema.tables.insert(name)           :4428
+Op::AddConstraint  arm :5178  ->  live_schema.table_snapshots.insert(..)    :5194
+Op::DropConstraint arm :5271  ->  live_schema.table_snapshots.insert(..)    :5304
+```
+
+Three arms, and only two maintain STRUCTURE. `addColumn`, `dropColumn`, `alterColumn`,
+`renameColumn`, `createIndex`, `dropIndex` and the rest leave `table_snapshots` at its pre-envelope
+value. So an envelope whose first op is an `addColumn` and whose second reads `table_snapshots` for
+that table sees the shape without the new column.
+
+### The reason this is not a gate yet
+
+The obvious repair - keep `table_snapshots` current as ops lower - would break a working path. The
+SQLite rename leg reads `table_snapshots` and its comment calls it "the authoritative PRE-rename
+table shape": the 12-step rebuild renders from the verbatim `sqlite_master.sql` text precisely so the
+rename can be handed to SQLite's own parser. That reader WANTS the stale value. F180 exists because
+the second rebuild in one envelope cannot be synthesised at all.
+
+So the readers do not share an answer, and the writer list alone cannot produce a correct fix. The
+next step is to enumerate readers and decide per reader whether it wants current or pre-envelope
+state. Recorded as unmeasured rather than guessed.
+
+### The method note is worth more than the measurement
+
+I got a wrong picture three times inside this one investigation, each from a name-shaped search, one
+day after writing F197 about exactly that.
+
+`grep live_tables.insert` returned nothing: `lower_one_op` rebinds it as `let live = live_tables;`
+with a comment explaining the rename. `grep "live\.<field>\.insert"` returned only test lines:
+production writes spell the variable `live_schema`. Both greps were reasonable, both were about
+spelling, and both produced a confident wrong answer - the first that nothing tracks tables, the
+second that nothing tracks structure.
+
+Only walking the op arms found the three writers. The lesson has now failed for me at three
+different granularities in two days: a symbol, a naming convention, and a local alias. The alias is
+the sharpest, because the code even documents the rename in a comment two lines above - and a comment
+is not something a grep reads.
+
 ## F197 - I propagated a wrong claim into another repo, and the instrument that produced it was a name search
 
 The worst finding of the day is one of mine. It reached appbase's tree, in a doc comment, with my
