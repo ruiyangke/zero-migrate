@@ -8990,6 +8990,35 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F244 - the fix for a bad error message was to stop pretending we could fix it
+
+Shipped 48fd8a3b, closing #93 as option (a).
+
+Both opinions landed on (a): document the required set, change no API. Codex argued it
+independently and reached the same two objections I had - (b) would have to reproduce the
+wrong-type messages napi already emits well, or it trades one bad message for two, and (c) adds
+an exported validator with no non-test caller, which is the dead-code shape this review keeps
+filing. The Opus half of the dual opinion did not run: the session's subagent limit was
+exhausted, so I did that legwork myself and say so rather than implying two independent models
+agreed.
+
+What decided it was the census, not the taxonomy. Every caller of `genArtifacts` in this repo is
+a test - ten untyped `.mjs` call sites and one TypeScript file that hand-declares its own local
+interface - and `genArtifacts` appears nowhere in `packages/zero-migrate-cli/src`. There is no
+shipped consumer to give a better message to. Widening the published signature to improve an
+error that only invalid test code reaches would have been paying a permanent cost for a caller
+that does not exist.
+
+So the change is one doc block on `GenArtifactsSource`, stating that both fields are required,
+that an absent one reports only the first and names nothing, and that a wrong-typed one reports
+better. It lands on the type rather than in a doc page because napi copies the comment verbatim
+into `index.d.ts`, which is committed, published, and what a consumer actually reads - the same
+file the drift gate compares. Regenerating it was the point, not a side effect.
+
+The thing worth keeping: "we cannot fix this" is a documentable fact, and writing down WHY at
+the place the reader meets the problem is a real fix for the reader even when the message stays
+identical. What made it honest was checking who reads it first.
+
 ## F243 - half the finding was false, and the binary said so in one run
 
 #93 says the addon's missing-field error "names no API and reports only the first missing field".
