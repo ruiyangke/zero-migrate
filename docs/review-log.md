@@ -8990,6 +8990,56 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F227 - the table I added yesterday was outside the collation gate, and the list guarding it had been copied twice
+
+Shipped 7f4a4579. Following my own change into its neighbourhood rather than stopping at
+the diff.
+
+`ensure_binary_identity_columns` (`mysql/journal_sql.rs`) exists so a migration version
+cannot match a version it is not: every journal identity column carries `utf8mb4_bin`,
+and bootstrap ALTERs any that does not. It covered four tables. The rollback marker from
+F226 declared the right collation and sat outside the set - correct by construction on a
+fresh create, unguarded if it were ever created any other way. Four verified, the fifth
+trusted, which is #138's shape introduced by me.
+
+### The list had two hand-copied mirrors and both were already wrong
+
+Adding the table to the production list turned six tests red, which was the gate working:
+the recording mock answered eight rows and bootstrap refused the ninth as missing. Fixing
+that mock was not the end of it.
+
+`legacy_journal_identity_collations_are_upgraded_to_utf8mb4_bin` iterates its OWN
+hard-coded eight pairs and contains-checks each. It passed throughout, because everything
+it names is still upgraded. Extending the production list does not extend that test - my
+new table's repair would have been asserted by nothing.
+
+And the full gate found a third copy I had not looked for, one crate out:
+
+    panicked at crates/zero-migrate-node/tests/mock_apply.rs:302:14:
+    empty MySQL journal status succeeds through the host bridge:
+      Journal(Backend("mysql journal: required identity column
+       schema_migrations_rollback_inflight.version is missing after bootstrap"))
+
+Three copies of one list, two of them silently missing the table, and the only reason I
+saw the third is that the gate runs the addon crate too. Running only the crate I edited
+would have shipped it red.
+
+So the list is now one `pub const BINARY_IDENTITY_COLUMNS` that the bootstrap, its own
+test, and the addon's mock all read. That is the fix; adding a fourth entry to three
+places was not.
+
+### The tell, three times in two commits
+
+F226 found a covering test that read a narrow slice of a rich log. This one found a test
+asserting over its own copy of a list rather than the list. Both are #187's shape and both
+were in code I had just touched. The pattern is not "tests are weak" - it is that a test
+which owns its own copy of the thing under test stops being a test of it.
+
+### What this did not need
+
+No mutation test. Adding the entry produced the RED by itself: six tests failed because
+the gate genuinely demands those rows. A check nothing consults cannot fail that way.
+
 ## F226 - the MySQL rollback marker ships, and the test that already covered this path did not notice any of it
 
 Shipped 0f538add, on the decision settled in F225. A rollback marker is written before
