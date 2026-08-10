@@ -8990,6 +8990,73 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F214 - the addon can roll back, and the plan it cannot represent is refused rather than under-rolled
+
+`verbs::rollback_with_locked_backend` now exists and runs. A deploy through the addon's own SQLite
+path creates `notes`; the verb, handed the same authored envelope and `RollbackTarget::All`, drops it.
+That is measured, not projected: `crates/zero-migrate-node/tests/rollback_sqlite.rs` reads
+`main.sqlite_master` before and after against a real temp-file database, and asserts the versions the
+verb reports unwound are exactly the ones the deploy journaled.
+
+### The step-0 question, and what reading the engine settled
+
+The verb has to hand `rollback_with_lock` a `migrations: &[Migration]`, and only a plan that lowered
+to ONE `PlanStep::Ddl` has a `Migration` for its journaled identity. A plan with several steps
+journals one identity per step, and its DML, backfill, identity-synchronisation and online-rename
+steps carry no `down` at all (`render/step.rs:210`). So flat-mapping the artifacts and keeping the
+`Ddl` steps would hand the engine a set that looks fully reversible while dropping exactly the steps a
+rollback must refuse to cross - defeating the `force` plus `backup_acknowledged` gate the whole design
+rests on.
+
+It cannot go unnoticed, and the reason is in `plan_rollback` at `apply/executor.rs:2513-2519`:
+
+```rust
+let Some(m) = by_version.get(record.version.as_str()) else {
+    return Err(RollbackError::MissingFromSet { version: record.version.clone() });
+};
+```
+
+`rollback_locked` (`:2729`) filters the journal to `Phase::Completed` (`:2747`) and passes the WHOLE
+completed set to the planner, unintersected with the supplied migrations. So a completed version the
+target selects and the set omits is REFUSED, by name, before a single `down` runs. The reason is
+stated at `:2504-2506`: the `down` lives in the migration file, not the journal, so an absent file
+means the reverse SQL does not exist to run.
+
+That makes omission safe, so the verb omits: a multi-step plan contributes nothing to the set. The
+second test pins the consequence - a rollback asked to unwind everything with no authored source
+refuses with `absent from the supplied set` and leaves the table standing.
+
+An opaque derived version is a poor thing to hand an operator, so the verb keeps a map from every
+journaled step identity of a skipped plan to the authored name that owns it, and rewrites the refusal
+to say which migration it was and why it cannot be reversed. The map is built from
+`PlanStatusManifest::from_applied_plan`, which is already the one walker that enumerates every step
+variant's journal identity - no new engine accessor.
+
+### Two things the compiler does not check, and one visibility change
+
+The verb acquires the project lock ITSELF, blocking, and passes `LockMode::AlreadyHeld` down. Blocking
+because rollback writes: it is a peer of the deploy it is undoing, not a reader that can decline and
+report busy the way `status` does since #155. Passing `Acquire` would double-acquire; skipping the
+verb-side acquire while passing `AlreadyHeld` would run the unwind unserialised. `LockMode` is a plain
+enum and neither mistake is a type error.
+
+The release is reconciled against the result in four arms, so a failed release is not swallowed by a
+successful rollback nor a rollback error lost behind a release error. Removing the release call makes
+`a_rollback_driven_through_the_verb_removes_the_table_the_deploy_created` fail on the lock assertion
+and nothing else - SQLite refuses a same-instance re-acquire, which is what makes the release
+observable in-process.
+
+`ExecutorConfig::guard_config` became public. `rollback_with_lock` takes its guard as an argument, so
+an out-of-crate driver has to be able to build the one the config implies; composing a `GuardConfig`
+by hand from the same charter would drop the host-selected mode and yield a guard that admits what the
+executor's own guard sites deny.
+
+### Left open
+
+The request DTO is NOT in this commit. It is decoded by `bridge.rs`, which does not exist yet, and a
+`#[napi(object)]` nothing constructs is the unexercised-branch defect twice paid for (F208, F211). It
+lands with the entrypoints.
+
 ## F213 - the rollback surface is a projection of a contract that already exists, not a new design
 
 `zero_migrate::rollback` shipped in 1cb04ab and is proven on SQLite and live PostgreSQL. Nothing
