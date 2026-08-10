@@ -8990,6 +8990,40 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F252 - a deliberate second source of truth, and the property that makes it safe
+
+Shipped 81ee7e94, closing the MySQL half of #177.
+
+Rollback takes the same project lock apply does, and nothing exercised the CONTENDED path on a
+network dialect. A second mysql2 session now takes the lock and the shipped CLI refuses:
+
+    zero-migrate: failed to acquire project lock: backend error: mysql
+    GET_LOCK('zero_migrate:<schema>') timed out after 10s - another apply holds the project lock
+
+The test derives that lock name itself, `zero_migrate:<project_id>`, mirroring
+`project_lock_name` in the engine. A hand-mirrored derivation is the defect class this log keeps
+filing, so it is worth being precise about why this one is acceptable: it cannot fail QUIETLY. If
+the name stopped matching, the test would hold the wrong lock, the rollback would ACQUIRE the
+real one and succeed, and the refusal assertion would fail. The mirror is checked by the thing it
+is used for.
+
+That is not an argument I trusted on inspection. Setting the name deliberately wrong and running
+it fails on `a rollback cannot proceed while a peer holds the lock` - the rollback succeeded -
+rather than on the message match. The safety property is measured, not asserted.
+
+The general form is worth keeping: a duplicated constant is dangerous when the copy is only READ,
+and much less so when the test's pass condition DEPENDS on the copy being right. Before accepting
+any mirror, ask which of the two it is.
+
+Two smaller things fell out. The first regex failed on one character: the engine joins the last
+clause with an em dash and I had written an ASCII hyphen. The message was read off a deliberate
+placeholder assertion, so the failure printed it verbatim; the fix matches in two pieces so the
+file stays ASCII while still pinning the lock name. And there is no PostgreSQL twin of this arm,
+for a measured reason: MySQL acquires with `GET_LOCK(name, 10)` and returns a real error, while
+PostgreSQL acquires with `pg_advisory_lock`, unbounded, so the same test there would wait forever
+rather than fail. A PG arm has to wrap its second attempt in its own timeout and assert the
+ABSENCE of completion - a weaker assertion, and exactly the asymmetry #152 is blocked on.
+
 ## F251 - the guard was proven by breaking it, and it stopped a fabricated schema
 
 Shipped 39b9d7ad, 96344ae0 and db90e313, closing #193 except the extension arm.
