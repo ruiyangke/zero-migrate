@@ -8990,6 +8990,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F240 - the four synthesised inverses are ENGINE-ONLY: the CLI rollback refuses every one of them, and F239's "resolved" was wrong
+
+F239 closed the re-lowering question by READING the envelope loop and concluding the inverse
+survives. It said, in as many words, that the reading was not a run and that a test through
+`rollback_with_locked_backend` was what would prove it. That test now exists, and it REFUTES the
+reading.
+
+### The measurement
+
+Added a fourth case to the addon suite: deploy `createView`, deploy `dropView`, then unwind one step
+through the verb - the real CLI path, not the engine API.
+
+    cargo test -p zero-migrate-node --no-default-features --test rollback_sqlite
+
+    test a_journaled_version_the_supplied_envelopes_do_not_describe_is_refused ... ok
+    test a_rollback_driven_through_the_verb_removes_the_table_the_deploy_created ... ok
+    test a_plan_with_a_data_step_is_refused_by_the_name_its_author_gave_it ... ok
+    test a_view_dropped_by_a_later_envelope_comes_back_through_the_verb ... FAILED
+
+    the verb rolls the dropped view back: "migration mig_7n42DGM5POTWmf8fO5HAYd
+    ('drop_view_active_users') is irreversible (down: None); rollback refuses by default."
+
+### Why, exactly
+
+I misread the advance in two independent ways. The real code (crates/zero-migrate-node/src/lower.rs:585-599):
+
+    let projected = fold_ops_onto(
+        &base_snapshot,      // the ORIGINAL catalog read - NOT the running `live`
+        &pending_ops,        // the PENDING projection - NOT the authored ops
+        ...
+    );
+    live = live_schema_with_ownership(projected, owner_app, &registry);
+
+F239 claimed it "folds each envelope's ops onto the running snapshot". It folds the PENDING ops onto
+the ORIGINAL snapshot. At rollback time every envelope is already applied, so nothing is pending,
+`projected` is effectively `base_snapshot`, and the `dropView` lowers against a catalog in which the
+view is already gone. `live_schema.views` has no entry, the arm renders `down: None`, and the
+planner refuses.
+
+So: `DropView`, `DropSequence`, `DropExtension` and `DropSchema` render correct inverses in the
+ENGINE and are proven to run there, and the CLI rollback verb cannot use any of them. That is a real
+gap in shipped work, not a theoretical one.
+
+### What this costs me to say plainly
+
+The four commits are not wrong - the renders are right and the engine tests are honest about what
+they cover. What was wrong is F239's conclusion that the CLI path inherits them. I wrote that
+conclusion from a careful read of the right function and still got it backwards, because I matched
+the SHAPE of an advance without checking its two ARGUMENTS. The entry-point walk has to reach the
+arguments, not just the call.
+
+The test is held at `<scratchpad>/rollback_sqlite.rs.with-view-test` rather than committed, because
+it is red and the tree stays green. It should land WITH the fix, the way every other RED in this
+family did.
+
+### Also settled, incidentally
+
+The addon suite runs under `cargo test -p zero-migrate-node --no-default-features` (.github/workflows/ci.yml:79).
+The default features pull the napi ABI, which cannot link standalone - `rust-lld: error: undefined
+symbol: napi_typeof`. That is why the file appeared unrunnable last turn; it runs fine with the CI
+flag, and the three pre-existing tests pass.
+
 ## F239 - AlterSequence stays irreversible, and a question I have NOT answered about the four ops already shipped
 
 ### AlterSequence: leave `down: None`
