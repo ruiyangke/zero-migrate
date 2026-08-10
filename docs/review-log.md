@@ -9055,10 +9055,32 @@ straight into `rollback(...)`, so they prove the ENGINE renders and runs the inv
 goes through `rollback_with_locked_backend`. That is precisely the "walk the chain from the entry
 point" gap: the engine behaviour is proven, the CLI path is not.
 
-NEXT, and it should come before any further op: read the rest of
-`lower_ordered_envelopes_to_plans_for_apply` and settle whether `live` advances. If it does not, the
-four shipped inverses are engine-only and the CLI story needs its own fix. Either way the answer
-belongs in a test that drives `rollback_with_locked_backend` rather than the engine API.
+RESOLVED, in the good direction. `live` IS advanced per envelope. The loop lives in
+`lower_ordered_envelopes_to_plans_inner` (crates/zero-migrate-node/src/lower.rs:353-613), and after
+each envelope it folds that envelope's ops onto the running snapshot and reassigns:
+
+    let projected = fold_ops_onto( ... );                                    (~lower.rs:585)
+    live = live_schema_with_ownership(projected, owner_app, &registry);      (~lower.rs:599)
+
+And `fold_ops_onto` (crates/zero-migrate/src/render/fold.rs:980) IS the fold, not a lighter variant:
+it clones `base.views` / `base.sequences` / `base.schemas` / `base.extensions` and replays the ops
+through the same `Op::CreateView` arm at fold.rs:2292 that now retains `authored_query`.
+
+So the chain closes. At rollback time the live schema starts from a catalog snapshot in which the
+dropped object is ALREADY GONE, but the authored `createView` in the earlier envelope is folded back
+onto it - with its typed body, because that is the arm doing the folding - before the `dropView`
+envelope lowers. The `down` re-derives correctly. The four shipped inverses are not engine-only.
+
+STATED PRECISELY, because the distinction is the whole point of this entry: I verified this by
+READING the chain end to end, not by RUNNING it. No test drives `rollback_with_locked_backend`; all
+eight pass `Vec<Migration>` into the engine API. The reading is now specific enough to be checked by
+anyone who doubts it, but a test through the addon verb is still the thing that would prove it, and
+it does not exist yet.
+
+Worth keeping the near-miss on record: the argument that raised this - that the journal does not
+store the `down`, so rollback re-lowers - is entirely correct, and it WOULD have been fatal had the
+envelope loop lowered every envelope against one static snapshot. The design survives because of an
+advance step I had not read when I shipped four ops that depend on it.
 
 ## F238 - dropTrigger's inverse is derivable after all, and a second-opinion dispatch that failed is not a second opinion
 
