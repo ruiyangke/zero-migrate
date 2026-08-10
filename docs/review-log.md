@@ -8985,6 +8985,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F199 - the second opinion killed my fix rather than sizing it, and #170 turns out to be a design change
+
+I asked whether an envelope-local column map beat updating the working snapshot. The answer was
+neither, and the useful part is WHY the map fails - not that it is too small.
+
+### My candidate was wrong, not narrow
+
+The map was to be consulted only when the snapshot LACKS the column. But a preceding `SetColumnType`
+leaves the column PRESENT with a stale type, so the fallback never fires and the wrong type is used
+anyway. A fix that cannot see a type change is not a smaller version of the right fix; it is a
+different, broken one. The `nextval` arm compounds it by downgrading its integer validation to
+optional whenever the lookup misses.
+
+### The reader set is about nine, and two are correctness rather than availability
+
+Most stale readers cost a false refusal - a correct migration rejected. Two do not:
+
+- SQLite limited `DELETE` derives a non-null PK/UNIQUE identity from the snapshot. After an
+  in-envelope drop of uniqueness that introduces duplicates, the STALE identity can make the outer
+  delete match MORE ROWS THAN THE REQUESTED LIMIT. The assembler trusts that proof.
+- MySQL `DropConstraint` chooses `DROP FOREIGN KEY` versus `DROP CONSTRAINT` from the snapshot, so
+  `AddConstraint(FK)` then `DropConstraint` in one envelope emits the wrong syntax.
+
+The rest - DML expression resolution, backfill cursor planning, rename reconciliation, composite FK
+support-index planning, typed-reference checks, SQLite FK rebuilds - fail closed or fail loudly.
+
+### The two-carrier constraint is confirmed by better evidence than I had
+
+I had been citing a comment. The type says it: `stored_create_sql` is EXCLUDED from `TableSnapshot`
+equality while `columns` is compared (`model/snapshot.rs:907`). A structured-versus-raw mismatch is
+therefore neither prevented by the type system nor detected by comparison - it can only be found by
+running the rebuild, which is how F180 found it.
+
+### The evidence that this is architectural rather than a bug
+
+`lower.rs:3795` already contains an ad hoc replay of earlier ops, for UNIQUE keys only, expressly
+excluding primary-key lifecycle. One reader has already grown its own private semantic replay. The
+recommendation is to stop that proliferating: one schema-qualified semantic state advanced per op for
+every semantic reader, and a SEPARATE SQLite physical state carrying the raw `CREATE` with an
+exact/unknown distinction, because after a native same-table mutation the future `sqlite_master.sql`
+is not knowable ahead of time.
+
+`fold_ops_onto` (`render/fold.rs:972`) is already a catalog-seeded logical replay over columns,
+types, nullability, defaults, constraints and indexes - the transition logic exists. But it mutates
+`columns` without regenerating the raw text, so its output must never reach SQLite rebuild planning.
+A distinct type, not a convention, is what stops that.
+
+### Why I am not building it
+
+Shipping the narrow fix would leave eight readers stale while the log records "in-envelope staleness
+handled" - the gate-that-looks-installed defect this review keeps filing against other people's code.
+The scope is a design change and wants a decision, not a commit. The RED stays as a patch.
+
+### One unrelated defect fell out
+
+The dialect table declares `setColumnDefault` portable on SQLite for both the base and
+container/JSON variants (`model/dialect_table.rs:148-149`), while lowering refuses it on SQLite at
+the first line of the arm (`lower.rs:4988`, `Capability::NativeAlterColumn`, which SQLite does not
+have). The neighbouring `nextval` row already marks itself Unsupported for SQLite, so the table can
+express the refusal and simply does not here. Filed separately; which side is wrong is a product
+decision.
+
 ## F198 - #170 measured on the writer side: three arms maintain in-envelope state, and one reader wants it stale
 
 #166's fix carried a deferral: "the wider question - that several other arms also read live structure
