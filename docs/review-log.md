@@ -8985,6 +8985,85 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F177 - #87 decided: refuse on MySQL. The second opinion overturned my leaning and my reachability claim
+
+Decision made, not yet implemented. Recorded now because it is settled and because it corrects two
+things I asserted earlier in this review.
+
+### I had the reachability wrong, and said so out loud
+
+Scoping this, I traced `DeclarativeAuthor::diff` up to its only caller, `MigrationEngine::plan_declarative`
+(`engine.rs:735`), found NO caller for it anywhere in `crates/*/src/`, and concluded the defect only
+reached a Rust EMBEDDER rather than a CLI user.
+
+That conclusion was wrong, and the codex read-only pass found the lane I had missed. VERIFIED BY ME
+BY READING: the same four renderers are also reached from the IR lane, which is exactly what the CLI
+and addon use:
+
+    lower.rs:4849  Op::SetColumnType       -> decl.lower_alter_column_type(table, &col)
+    lower.rs:4863  Op::SetColumnNotNull    -> decl.lower_alter_column_nullability(table, column, false)
+    lower.rs:4876  Op::DropColumnNotNull   -> decl.lower_alter_column_nullability(table, column, true)
+    lower.rs:4936  Op::SetColumnDefault    -> decl.lower_set_column_default(...)
+    lower.rs:4949  Op::DropColumnDefault   -> decl.lower_drop_column_default(...)
+
+Each is gated on `require_capability_for(Capability::NativeAlterColumn, ...)`, and MySQL answers
+`true` (`renderer.rs:113`). All five ops are authorable from the public DSL - `setColumnType`,
+`setColumnNotNull`, `dropColumnNotNull` are defined at `packages/zero-migrate/src/ops.ts:507-509`.
+
+So the blast radius is a normal MySQL user authoring a migration, not an embedder. My error was
+stopping at the first entry point I found instead of asking who else calls the renderer. Tracing UP
+from a leaf answers "is this path live"; it does not answer "is this leaf reached another way".
+
+### And the second opinion overturned the fix I was leaning toward
+
+I was leaning toward teaching the renderer `MODIFY COLUMN`, on the ground that MySQL supports these
+ALTERs natively and the data looked available - `render_alter_column_type` already receives a full
+`&ColumnSnapshot`.
+
+That is true of the DECLARATIVE lane and false of the IR lane, which is the one that matters most.
+VERIFIED BY ME BY READING `lower.rs:4779-4791`: `Op::SetColumnType` builds its snapshot with
+`add_column_snapshot(&eff_schema, table, column, to_type, None, None, None, None, None, None, None)`
+- seven `None`s - and the comment above it calls it "a one-field descriptor".
+
+MySQL's `MODIFY COLUMN` requires the COMPLETE column specification restated; every facet omitted is
+silently DISCARDED. Rendering `MODIFY COLUMN` from a one-field descriptor would therefore take an
+authored `setColumnType` and silently drop that column's default, its NOT NULL, its charset and its
+comment. That is far worse than today's failure, because today's failure is loud: the statement is
+rejected by the server as a syntax error and nothing is lost.
+
+Codex also noted the live side cannot supply the missing facets either - MySQL introspection does not
+select `COLUMN_COMMENT` (`apply/backend/mysql/drift_sql.rs:170`). I did NOT verify that one myself.
+
+### The shape of the fix
+
+Refuse, at render time, with an error naming the op and saying MySQL alter-column rendering is not
+implemented. NOT by flipping `NativeAlterColumn` to `false` for MySQL: its only readers are those
+five gates plus the user-facing support matrix (`model/support_matrix.rs:31`), and the capability is
+a claim about the DATABASE, which genuinely has `MODIFY COLUMN`. Publishing "MySQL: no native alter
+column" to fix our own renderer gap would be a false statement in a user-facing table.
+
+Both lanes converge, which keeps this small: `lower_alter_column_type`, `lower_alter_column_nullability`,
+`lower_set_column_default` and `lower_drop_column_default` (`declarative.rs:8319-8347`) are each
+one-line delegations to the matching `render_*`, and the declarative diff calls those same `render_*`
+directly. The refusal predicate gets ONE definition and is called from both lanes rather than being
+spelled at six sites - six hand-copied checks is the exact shape of the defect this ticket IS
+(`render_add_fk` got its `match self.dialect`, its two neighbours did not; see the F172 correction).
+
+### What this is not
+
+Not "fail closed the way SQLite does". SQLite does not fail closed here any more: the declarative
+path detects the change and emits a 12-step table REBUILD, and the `is_sqlite` branch beside the PG
+renderers is only an invariant fallback whose text says so ("internal: ... rebuild invariant
+violated"). Copying that shape onto MySQL would report a real capability gap as an internal bug.
+MySQL's refusal has to read as a deliberate, documented limitation.
+
+### Provenance
+
+One opinion, not two: the subagent budget is exhausted at 200/200, so the Opus half was unavailable
+and this is codex plus my own reading, the way F170 was recorded. Everything cited above with a line
+number I read myself except the `COLUMN_COMMENT` point, which is codex's and is marked as such. I
+have NOT yet written the refusal or run any gate.
+
 ## F176 - MySQL expression defaults are wrapped, and the two exemptions are stability not grammar
 
 #53's re-scoped question was never "should we parenthesise" but "WHICH shapes need it". Answered by
