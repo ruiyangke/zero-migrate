@@ -8985,6 +8985,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F195 - the plan-wide timeout refusal shipped, and the RED proved the half-applied state before it
+
+`engine.rs` now runs `preflight_plan_timeouts` over the whole plan, under the lock, immediately after
+the online-rename preflight and before the approval reconciliation. Every render-time
+`resolve_timeout_ms` call stays exactly where it was.
+
+### The RED showed the defect rather than describing it
+
+`a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps`
+(`tests/pg_scenarios.rs`) builds a plan by hand - the only route that reaches this state, since the
+lowering gate refuses a timeout override on any plan carrying a non-DDL step - shaped
+`[Ddl(run A), Backfill, Ddl(run B with lock_timeout_ms: Some(0))]`, and drives it through the public
+`apply_plan` against live PostgreSQL 18.4.
+
+Against the unfixed engine it exits 101:
+
+```text
+thread 'a_plan_with_a_late_zero_budget_applies_none_of_its_earlier_steps' panicked at
+crates/zero-migrate/tests/pg_scenarios.rs:5354:5:
+the refusal must land before the first migration commits, and did not
+```
+
+Note WHICH assertion failed. The error-type assertion above it PASSED on the unfixed code - the
+refusal did fire, and it did name `lock_timeout = 0`. A test that checked only the error would have
+been green against the defect. What separates the two worlds is whether run A's table exists
+afterwards, and on the unfixed engine it did.
+
+### The over-refusal control is the other half, and it was mutation-tested
+
+A gate that refuses too much is worse than the gap it closes, and the obvious wrong version of this
+one refuses every dialect. `sqlite_applies_a_zero_lock_budget_the_server_dialects_refuse`
+(`tests/apply_plan_sqlite.rs`) applies a SQLite plan carrying `lock_timeout_ms: Some(0)` and expects
+success: SQLite resolves neither budget, and zero there bounds a local file-lock attempt as "do not
+wait" rather than a server wait as "no limit".
+
+That control passes with or without the fix, so on its own it proves nothing. I mutated the exemption
+- replacing `SqlDialect::Sqlite => return Ok(())` with the PostgreSQL settings tuple - re-ran it, and
+it FAILED (exit 101 at `apply_plan_sqlite.rs:542`). Then restored `engine.rs` from a byte copy and
+confirmed the line back in place. The control discriminates.
+
+### Scope, stated rather than implied
+
+Judged: `Ddl`, `Dml`, `Backfill`, `AlterPrimaryKey`, `SynchronizeIdentity`, the SQLite rebuild
+migration, and both halves of a PostgreSQL expand-contract. `Dml` and `Backfill` have no override
+slot, so they are asked against the executor config alone - which is where the sub-millisecond
+truncation lives.
+
+NOT judged: any migration the journal already records as completed, so a retried deploy stays
+idempotent. STILL judged, deliberately: a migration whose precondition would make the executor skip
+it. Evaluating preconditions needs the live database, and a zero budget is invalid configuration
+whether or not this particular run would have reached it. That is a conservative choice and a
+behaviour change for that narrow shape; it is written here rather than left for someone to discover.
+
+### Gates
+
+fmt 0, clippy 0, doc 0, addon 4 targets / 54 passed. Workspace 100 targets / 2431 passed / 0 failed /
+0 ignored - exactly two above the 2429 baseline, matching the two tests added, both listed by name in
+the log. Zero `LIVE-DATABASE COVERAGE SKIPPED`.
+
+The first gate run failed clippy 101 on `field_reassign_with_default` in the new SQLite test. Recorded
+because a green summary that omits the red first attempt is the kind of tidy history this log exists
+to prevent.
+
 ## F194 - the second opinion agrees on the verdict and corrects three premises, one of which decides the RED
 
 The remaining half of the timeout-scan question - should the up-front refusal exist at all, given it
