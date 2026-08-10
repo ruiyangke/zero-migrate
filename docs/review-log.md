@@ -8985,6 +8985,53 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F188 - #152 item 5 was not cosmetic: baseline held the only uncompensated acquire
+
+The ticket files this as "structural cleanup, near-zero blast radius". It is structural, and it also
+closed the one place the grant compensation did not reach.
+
+### What it was
+
+`apply/baseline.rs` inlined the lock SQL instead of calling the seam:
+
+    conn.exec("SELECT pg_advisory_lock(hashtext($1)::bigint)", &[(&cfg.project_id).into()]).await?;
+
+Every other acquire routes through `session::acquire_project_lock`, whose `Err` arm calls
+`drop_grant_from_failed_acquire` (F187). Inlining bypassed that. So baseline was not merely
+duplicating a seam the module docs claim is confined - it was taking the project lock WITHOUT the
+compensation for a grant PostgreSQL recorded before failing the acquiring statement.
+
+That upgrades the ticket's own framing. "Duplicates a seam" is a tidiness argument; "is the only
+acquire that can strand a session-held lock" is a correctness one.
+
+### The change
+
+Both halves now go through the seam. `BaselineError` gains a `Lock(#[from] ApplyError)` variant,
+because the seam returns `ApplyError` and mapping it onto the existing `Db` variant would have been
+lossy for every non-Db case.
+
+That is an additive variant on a PUBLIC error enum, which F182 taught me to price rather than wave
+through. Priced: exhaustive downstream matches on `BaselineError` would need a new arm. Accepted
+because the alternative is keeping a lock-stranding path, and because the ticket records
+`baseline_one` as having no shipped caller - reachable from tests and embedders only.
+
+### What is NOT proven
+
+The behaviour difference appears ONLY on the acquire error path, in the grant-then-error race:
+PostgreSQL grants the session lock and still fails the statement. I could not induce that against the
+live container, and I did not add a test claiming to. What the gates prove is that routing through
+the seam broke nothing; the compensation itself is covered by the seam's own path and by F187's
+measurement that `pg_advisory_unlock` on an unheld key warns and returns false rather than erroring.
+
+Saying that plainly matters more than the change: an entry claiming a test for the race would be the
+kind of overstatement this log keeps catching.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. Workspace 100 targets / 2428 passed / 0 failed / 0 ignored - unchanged, as
+expected for a routing change with no new test. Addon crate 4 targets / 54 passed. Zero
+`LIVE-DATABASE COVERAGE SKIPPED` banners.
+
 ## F187 - #152's top open item is already shipped, and its unverified premise is now measured
 
 #152 carries a reconciled decision (leave the apply path blocking) and a five-item priority list.
