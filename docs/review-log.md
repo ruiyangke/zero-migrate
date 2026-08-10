@@ -8990,6 +8990,46 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F210 - the bound's stated reason names MySQL, and MySQL was the one dialect nothing asserted
+
+`inject_column_to_ir` bounds the charter's system string columns at
+`ColType::String { length: 255 }`, and the comment above it gives one reason: MySQL cannot key an
+unbounded `TEXT`. The Postgres rendering of those columns is pinned three times
+(`tests/generated_identity_columns.rs:150`, `:217`, `:226`) and the SQLite rendering twice. Nothing
+asserted the MySQL one.
+
+Sharper than "no test exists": that same file ALREADY renders MySQL, at `:258`, and asserts only
+``mysql.contains("`id` BIGINT AUTO_INCREMENT PRIMARY KEY")`` - on an AUTHORED bigint column. The
+injected system columns were in that rendered string the whole time, unread.
+
+Measured rather than assumed, by asserting against a deliberate placeholder and reading the real
+value off the failure:
+
+    CREATE TABLE `app`.`line_items` (`created_at` DATETIME(6) NOT NULL,
+      `created_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs,
+      `deleted_at` DATETIME(6),
+      `id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs PRIMARY KEY NOT NULL,
+      `qty` INT, `updated_at` DATETIME(6) NOT NULL,
+      `updated_by` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs,
+      `version` INT NOT NULL)
+
+So the bound holds on the dialect it exists for, and it carries a collation the comment never
+mentions. Pinned in `mysql_renders_the_injected_system_columns_as_bounded_varchar`, with a negative
+arm against `VARCHAR(191)` - the unbounded-text value these columns stay off only because the
+declared-length path runs first.
+
+The method is the transferable part. The ticket said explicitly not to assume 255 and write the test
+to match, and that instruction was load-bearing: 255 was what I expected, so a test written from the
+expectation would have passed and proved nothing about the collation, which I did not predict at all.
+Guessing the expected value and getting it right is indistinguishable from guessing and getting it
+wrong until something else breaks.
+
+It also corrected appbase. They had recorded their MySQL injector's `VARCHAR(191)` as "matching your
+renderer exactly, a nice independent convergence". It does not match - mine is 255 with a collation.
+That belief was a leftover of the same bad inference I had already refuted one message earlier, and
+neither side went back to re-check what the refuted premise had been used to conclude. A wrong
+premise outlives the argument that introduced it unless someone re-walks its consequences.
+
 ## F209 - four files agreeing is not the deciding file: I told appbase varchar(255) was a stale fixture, and it is the intent
 
 Retracted in ZERO-MIGRATE-2026-08-10-173, one message after asserting it. Worth writing down because
