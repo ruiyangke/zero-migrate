@@ -8990,6 +8990,50 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F256 - the missing MySQL harness is a dependency fact, and the comment now says so
+
+Closed #176. One comment changed, at
+crates/zero-migrate/src/apply/backend/mysql/mod.rs:1069.
+
+The ticket's remaining half was a coverage-shape question: `zero_migrate::rollback` is proven in
+Rust on SQLite and live PostgreSQL, and on live MySQL only from the host CLI suite. The obvious
+move was to add `skip_if_no_mysql!()` and a MySQL twin of `PgDevSession`. Re-measuring first
+turned that from a judgement call into a settled one.
+
+Three measurements, in the order that decided it.
+
+`grep -rln "ZERO_MIGRATE_MYSQL_URL\|skip_if_no_mysql" crates/zero-migrate/tests/` returns nothing,
+and `tests/support/mod.rs` has `pg_url()` at :261 and `skip_if_no_pg!` at :323 with no sibling. So
+the gap is real: no Rust test touches a live MySQL server. The three `mysql_*.rs` integration
+files are render tests.
+
+Then the chain from the entry point, which is where the ticket turned. The CLI owns the socket -
+`driver-mysql2.ts` is the host driver - so it would be easy to read the host arm as testing JS,
+not this engine. It is not:
+`crates/zero-migrate-node/src/bridge.rs:679` builds
+`zero_migrate::apply::backend::MysqlBackend::new_generic(&session)`, and so do :892, :1100 and
+:1216. The live host rollback runs THIS file's `GET_LOCK`, journal DDL and placeholder handling
+against a real MySQL 8. The engine path is covered; only the Rust harness is absent.
+
+Then the cost of adding one. `MysqlBackend` has exactly one constructor, `new_generic` over
+`SqlSession` (mysql/mod.rs:355-358), and `crates/zero-migrate/Cargo.toml` carries no MySQL client
+at all - `postgres = "0.19"` sits in `[dev-dependencies]` (line 151, section starting 124) solely
+so `PgDevSession` (tests/support/mod.rs:359, `impl SqlSession` at :728) can drive the PG
+scenarios. So the harness is not a test file; it is a new client dependency plus a second
+`SqlSession` implementation, written to re-prove what the shipped driver already proves. And it
+would sit between the test and the engine, where its own bugs read as engine bugs.
+
+So the ship is the reason, not the harness. The asymmetry against `pg_scenarios.rs` looks like an
+oversight to anyone who has not run those three greps, and this is the second time the question
+has come round. The comment now states the constructor, the absent dependency, the bridge that
+covers the same code, and the indistinguishable-bug argument, so the next reader can disagree
+with a decision instead of re-deriving it.
+
+One claim from the ticket re-verified while there: the same comment's assertion that live MySQL
+coverage "lives in the host CLI suite, gated on the `ZERO_MIGRATE_MYSQL_URL` env var" is accurate
+- the only Rust mention of that variable is this comment, and nine host files read it for real.
+In a review that keeps finding comments claiming coverage that does not exist, this one held.
+
 ## F255 - two tickets decided by asking, and neither answer was the one I expected
 
 Closed #175 as a no-ship. Recorded a consumer's demand on #194. No code changed, which is the
