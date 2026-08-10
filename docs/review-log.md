@@ -8990,6 +8990,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F231 - a dropped view is reversible now, and the test that first went green was passing against an input production never builds
+
+Shipped 6f5a45a4 on the decision settled in F230. `Op::DropView` renders `CREATE VIEW` as its own
+`down`, built from the body the history recorded at `createView`. No catalog read, identical on
+every dialect, and it survives the offline preview path.
+
+Four seams, following a precedent already in the struct rather than inventing one. `LiveSchema`
+carries `partitions` for exactly this reason - its own doc says child drops "need the child bound
+even when the drop is authored in a later migration than the createPartition op that established
+it". Views have the same shape, so they get the same treatment:
+
+- `ViewSnapshot` gained `authored_query` (typed `ViewQuery`) and `authored_schema`. `PartialEq`
+  still compares only `materialized` and `comment`, so nothing new enters equality and no text
+  difference can become phantom drift.
+- The fold keeps the authored query where it previously wrote `definition: None`.
+- `LiveSchema` gained `views`, populated from the folded snapshot.
+- The `DropView` arm renders the inverse, under two refusals rather than a best guess.
+
+BOTH REFUSALS ARE DELIBERATE. A guarded (`ifExists`) drop gets no down: it can journal `completed`
+with no `DROP` executed, so re-creating on rollback would conjure an object that never existed
+here. A view with no recorded body gets no down either - that is the adopted view and every
+catalog-introspected schema, since introspection cannot produce a typed query. Both keep today's
+behaviour: `has_down()` false, planner refuses.
+
+### The first green was a false green
+
+The e2e test went green before the engine deserved it, and the bug was mine. `apply_doc` built its
+live schema with `LiveSchema::from_tables(...)`, which carries table NAMES and nothing else, so the
+view body was never in scope and the test was exercising an input the deploy path never constructs.
+Rewired through `fold_ops` + `LiveSchema::from_catalog_snapshot` - the same pair
+`refresh_historical_live` uses at engine.rs:390-392 - it became a real proof. Worth keeping: a test
+can be end-to-end in its DATABASE and still synthetic in its INPUT, and only the second one was
+wrong here.
+
+The restore assertion compares `sqlite_master.sql` before the drop against after the rollback, so
+it proves the body came back, not merely that something named `active_users` exists.
+
+### The gate is load-bearing, measured
+
+Replacing the guarded-drop refusal with `if false` and re-running:
+
+    test a_guarded_drop_keeps_no_inverse ... FAILED
+    test rolling_back_a_dropped_view_restores_it ... ok
+    test result: FAILED. 1 passed; 1 failed
+
+The right test fails and the other does not, so the refusal is what holds the property.
+
+### One existing assertion changed on purpose
+
+`tests/views.rs` builds an expected `ViewSnapshot` and compares it to the fold output. Because
+`PartialEq` ignores `authored_query`, filling the new field with `None` would have kept that test
+GREEN while asserting the opposite of what the fold now does. The expectation now carries the real
+query AND a separate direct assertion on the retained body, because the equality check is
+structurally blind to it. This is the F228 tell in miniature: green next to an open question.
+
+GATES, each stage echoing its own RC, live PostgreSQL 18.4 and MySQL 8.4.11 exported:
+`FMT_RC=0`, `CLIPPY_RC=0`, `TEST_RC=0`, zero skip banners, `targets=103 passed=2458 failed=0`
+(from 102/2456 - one new suite, two new tests). Note the wrapping `nix develop` job reported
+`WRAPPER_RC=0` on a run where all three inner stages were non-zero, which is why each stage prints
+its own.
+
+STILL OPEN on #23: the PostgreSQL arm of this proof, and the seven remaining ops - `DropTrigger`,
+`DropFunction`, `DropPolicy`, `DropSchema`, `DropExtension`, `AlterSequence`, `DropSequence` - one
+at a time, each with its own end-to-end proof.
+
 ## F230 - #23's premise is wrong about where the inverse comes from, and the live catalog is the one source that cannot supply it
 
 #23 says the eight `down: None` ops are "fully recoverable from the live catalog the lowerer
