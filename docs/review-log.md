@@ -8985,6 +8985,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F196 - the pinned primary key is checked, not restructured, and the second opinion supplied the evidence I lacked
+
+Ruiyang asked whether inject supports primary-key injection. It does - `InjectSpec.primary_key` is
+applied at `table_shape.rs`, and the usual charter pins `["id"]` alongside an injected `id` column.
+What it did not do was require the pinned names to exist.
+
+MEASURED with a throwaway probe, since a claim about behaviour needs a run: a rule with
+`primary_key = ["tenant_id"]` and NO `columns` key composes cleanly, and resolving a `createTable`
+carrying only `title` returns
+
+```text
+Ok(MigrationIr { ops: [CreateTable {
+    columns: [IrColumn { name: "title", ty: Text, .. }],
+    primary_key: Some(["tenant_id"]),
+}]})
+```
+
+`PRIMARY KEY (tenant_id)` over a table with no such column. The database is the first thing to
+notice, at apply, after the policy sealed and the plan was approved.
+
+### The design question, and why the obvious fix was wrong
+
+Folding the key into the columns - a marker on `InjectColumn` - would make the dangling case
+unrepresentable rather than merely checked, which is the stronger form. Both instruments rejected it,
+and the second opinion supplied the evidence I had only reasoned my way to.
+
+I had argued from `owns_id_primary_key()`, which requires the pin to name `id` AND the inject to
+contain an `id` column, that the intended semantic is "the inject backs its own key". Codex showed
+that is too strong: that requirement is specific to the folded-`id` path, which is what unlocks
+author-`id`-folds-into-injected-slot semantics. A pin over an ordinary author-owned column
+deliberately does not get folded-ID treatment - it is a different, supported case. The direct schema
+renderer says so outright, keeping the table-level form so "a composite key, or a key over an
+author-owned column" stays representable, and a PK-only injection is deliberately treated as
+non-empty.
+
+So folding is not a defect repair. It is a policy-language breaking change that removes a documented
+capability, on top of breaking the seal encoding. Declined.
+
+### What shipped
+
+A membership check at the merge point, and an error that names the missing column and states which
+two sources are legitimate. It sits AFTER the injected and author-declared columns are merged,
+because that is the only point where a key spanning both is checkable at all. The policy loader is
+earlier and would have been wrong: it sees only the rule's own columns, so a subset rule there would
+reject the author-column key the renderer promises.
+
+### The controls are the part that took the thought
+
+Three tests, and the two that matter are the ones that PASS BEFORE the change as well as after: a pin
+naming an author-declared column, and a composite pin spanning an injected column and an author one.
+The RED run was 2 passed, 1 failed - the two capabilities already worked, and only the dangling pin
+was unguarded. A gate with no over-refusal control is how a check ends up wider than the defect, and
+#38 is the entry recording what that costs.
+
+### Gates
+
+fmt 0, clippy 0, doc 0, addon 4 targets / 54 passed. Workspace 100 targets / 2434 passed / 0 failed /
+0 ignored - exactly three above the 2431 baseline. Zero `LIVE-DATABASE COVERAGE SKIPPED`.
+
+### Not measured
+
+The check is unit-level, over the resolver. I did not apply a dangling-pin charter against live
+PostgreSQL to watch the server reject the DDL, because the refusal now prevents that DDL from being
+produced. The pre-fix invalid shape is recorded above from the probe output rather than from a
+server error.
+
 ## F195 - the plan-wide timeout refusal shipped, and the RED proved the half-applied state before it
 
 `engine.rs` now runs `preflight_plan_timeouts` over the whole plan, under the lock, immediately after
