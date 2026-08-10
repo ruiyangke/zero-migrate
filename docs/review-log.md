@@ -8990,6 +8990,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F221 - two opinions agreed on the shape of the non-transactional gate and split on its scope, and the split was settled by grepping rather than arguing
+
+Decision only; no code yet. F220 established the gap and named two open questions. Both
+are now answered, one of them against the second opinion.
+
+### Agreed: refuse, do not run the down outside the transaction
+
+Two independent reasons, and they are different reasons, which is why both are kept.
+`transaction:true` is an atomicity contract the author declared, so inferring execution
+mode from SQL text would change crash and journal semantics without their consent. And
+separately: running a `down` outside a transaction needs the ROLLBACK equivalent of the
+non-txn apply protocol - inflight marker, idempotency contract, recovery path. #18 is
+the open ticket saying that machinery does not exist for MySQL rollback, and I have not
+verified it exists for PostgreSQL rollback either. A crash mid-down with no marker is
+worse than a refusal.
+
+The refusal is asymmetric with apply, and the code comment should say so rather than
+leave a reader to notice.
+
+### Agreed: thread the verdict into `plan_rollback`
+
+`rollback_locked` asks the backend - dialect-dispatched exactly like the existing
+`validate_non_txn` (`backend/mod.rs:459`, implemented at `postgres/mod.rs:193`,
+`mysql/mod.rs:749`, `sqlite/mod.rs:617`) - then passes a per-version verdict into the
+pure planner. Same shape as the obligation gate in F219.
+
+The decisive evidence is the leaf's own comment at `session.rs:1361`: *"Panicking here
+would abort mid-batch, after earlier downs had already committed."* The code already
+knows why leaf placement is too late. The second opinion found that line; I had argued
+the same conclusion from the advertised contract, which is weaker evidence for the same
+claim.
+
+### Split: scope, and why I overruled the second opinion
+
+It proposed a broad list - VACUUM, CREATE/DROP DATABASE, tablespaces, ALTER SYSTEM,
+DISCARD ALL, CLUSTER, prepared-transaction verbs, several subscription forms - and was
+explicit that a text-only validator would have to accept false positives on the
+catalog-dependent ones.
+
+That is the part I reject. A false positive here refuses a *valid* rollback and strands
+the operator at the moment they most need the tool. Fail-closed is the right instinct
+for corruption risk; it is the wrong instinct for tool availability. So the gate covers
+only what is unconditionally non-transactional regardless of catalog state:
+`CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX … CONCURRENTLY`,
+`ALTER TABLE … DETACH PARTITION … CONCURRENTLY`.
+
+Both opinions independently excluded `ALTER TYPE … ADD VALUE`, since PG12+ permits it
+inside a transaction. Agreement reached separately is worth more than agreement reached
+together.
+
+### The part of my own counter-argument that did not survive
+
+I claimed the rest of that list was already denied by the line-1 guard, which the leaf
+runs over `down` at `session.rs:1379-1383` before the BEGIN. Checking it, that is only
+half true:
+
+    VERIFIED DENIED   guard/mod.rs:1898       AlterSystemStmt -> rule::ALTER_SYSTEM
+    VERIFIED DENIED   guard/mod.rs:1968-1971  CreatedbStmt | DropdbStmt -> rule::DATABASE_MANAGEMENT
+    NOT DENIED THERE  guard/mod.rs:2192-2193  VacuumStmt | ClusterStmt fall into an arm whose body is `{}`
+
+Whether VACUUM and CLUSTER are denied somewhere else I did not establish, and the ticket
+says so rather than rounding it to "the guard has it covered". I nearly shipped that
+rounding: the arm listing those two node kinds looks like a denial list at a glance, and
+it is not one. Reading the arm body rather than the match arm is the whole difference.
+
 ## F220 - #19 is real, its fix names a function that does not exist, and the second question it never asked is the harder one
 
 Verified, not implemented. The gate wants a decision first.
