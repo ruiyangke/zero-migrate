@@ -8985,6 +8985,64 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F202 - #20 asks to wire an orchestrator that does not exist, and two sibling tickets inherit that
+
+#20 reads "wire the rollback orchestrator onto `plan_rollback`". That phrasing presumes the
+orchestrator exists and is merely pointed at the wrong thing. It does not exist, so #20 is a build,
+not a wiring, and the difference decides whether it belongs in a review at all.
+
+### What is actually there
+
+`plan_rollback` is real production code, not a test helper: `apply/executor.rs:2477`, at brace-depth 0,
+above the `#[cfg(test)]` module that opens at `:2646` and below the one that closes before `:2391`. It
+is reachable as `zero_migrate::apply::executor::plan_rollback` through `pub mod apply` (`lib.rs:74`)
+and `pub mod executor` (`apply/mod.rs:4`).
+
+But nothing calls it. `grep -rn plan_rollback` returns no hit outside `executor.rs`, and every in-file
+call site sits at `:2731`+, inside tests. `RollbackPlan` (`:2397`) is constructed at `:2493` and
+`:2624` and read by nothing anywhere.
+
+The curated export list is the tell. `lib.rs:176-179` exports `RollbackError`, `RollbackOptions`,
+`RollbackOutcome`, `RollbackRequest` and `RollbackTarget` - the entire vocabulary of an executing
+rollback API - and exports neither `plan_rollback` nor `RollbackPlan`. The nouns ship; the verb does
+not.
+
+### The comment was right, which is worth noting on its own
+
+This session has repeatedly found comments that assert behaviour the code does not have. This one is
+the opposite, and it stated the whole finding before I did (`executor.rs:1852-1864`):
+
+    NO ORCHESTRATOR SHIPS. These types describe the request and the refusals a rollback
+    driver would make, but nothing in this crate consumes a `RollbackRequest`, and there is
+    no `MigrationEngine::rollback`. The only reachable rollback is the per-migration backend
+    leaf `MigrationBackend::rollback_one_transactional`, which appends the `rolled_back`
+    event for ONE migration and performs none of the selection-time gating named below.
+
+It then lists precisely what the leaf skips: irreversible refusal, non-transactional classification,
+the guard over the `down` SQL, and reverse-topological order. Measured against the code, all four
+hold. The lesson stands either way - I confirmed it against the call graph rather than believing it -
+but the honest version of "walk the chain" is that it sometimes ratifies the comment.
+
+### Why this stops here
+
+Building the orchestrator reverses a documented product position. `docs/operations.md` says
+zero-migrate does not provide a public high-level rollback command, and F201 (#22) just tightened the
+authoring side to match by refusing an authored `down()`. Shipping a rollback driver is a feature
+decision, and a review does not get to make it silently.
+
+### What inherits the decision, and what does not
+
+INHERITS - both are gates inside the uncalled planner, so implementing them hardens something nothing
+reaches: #16 (refuse rolling back a squash without its superseded closure) and #17 (refuse a version
+inside an outstanding rename obligation).
+
+DOES NOT - #24 is about `rollbackable`, which is reachable and user-visible: `render/plan.rs:194`
+declares it, `:237` computes `migration.down.is_some()`, and `zero-migrate-node/src/lower.rs:2602`
+reads `!first.plan.rollbackable` across the addon seam. A wrong value there reaches hosts whatever is
+decided about the orchestrator. #19 likewise touches the leaf, which is the path that does run.
+
+So the queue continues at #24 rather than stalling behind the decision.
+
 ## F201 - an authored down() was not ignored, it was silently replaced by a different rollback
 
 #22 was filed as "throw on an authored down() before the orchestrator ships". I checked the premise
