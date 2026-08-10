@@ -8985,6 +8985,70 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F187 - #152's top open item is already shipped, and its unverified premise is now measured
+
+#152 carries a reconciled decision (leave the apply path blocking) and a five-item priority list.
+Items 1 and 4 are #155 and #156, both closed. Item 2 was the next actionable one. It is done, and the
+ticket says otherwise in a way that would cost the next reader real work.
+
+### The ticket's "no compensation exists" is wrong
+
+It reads: "Today no compensation exists: executor.rs:654-656 is a bare `?`, and verbs.rs:241-244,
+:377-380, :471-474, :518-521 are the same shape."
+
+Those callers ARE bare `?`. The compensation is not at the callers - it is at the leaf, which covers
+all of them. VERIFIED BY ME at `apply/backend/postgres/session.rs:64-77`:
+
+    match conn.exec("SELECT pg_advisory_lock(hashtext($1)::bigint)", ...).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            drop_grant_from_failed_acquire(conn, project_id).await;
+            Err(error.into())
+        }
+    }
+
+Acting on the ticket as written would have added a duplicate compensation at five or more call sites
+- the "convention spelled at every site" shape that F178, F180 and F183 each had to avoid. There are
+20 `acquire_project_lock` call sites across the workspace; the leaf is the only place this belongs.
+
+### Its premise, which the ticket flagged as unverified, now measured
+
+#152 said: "REPORTED as safe because unlocking a lock you do not hold returns `f` with a WARNING
+rather than erroring - I have NOT run that; verify before relying on it."
+
+MEASURED BY ME against the live container (PostgreSQL 18.4):
+
+    SELECT pg_advisory_unlock(987654321) AS unlock_not_held;
+    WARNING:  you don't own a lock of type ExclusiveLock
+     unlock_not_held
+    -----------------
+     f
+    (1 row)
+
+Exit 0. It warns and returns false; it does not error. So the compensation cannot turn a failed
+acquisition into a worse failure, which is exactly what the code's own doc at `session.rs:101-103`
+already asserts - now independently confirmed rather than taken on the comment's word.
+
+### The scoping is also already correct
+
+`session.rs:107-109`: "PostgreSQL only, deliberately. MySQL's `GET_LOCK` grants nothing when it
+returns 0 or errors, and SQLite's project lock is a local file try_lock, so neither has a grant to
+compensate for and neither gets this call." I checked the MySQL leaf
+(`apply/backend/mysql/session.rs:231-251`): `GET_LOCK` returns 1/0/NULL and the 0 and error arms
+return without any grant to release, so the asymmetry is a fact about the two lock primitives rather
+than a missed sibling. That distinction matters because a missed sibling is what I have found four
+times today, and this is not one.
+
+### What is actually left on #152
+
+Item 3 - observability rather than a timeout (`SET log_lock_waits = on`, plus a contended-path
+diagnostic naming the holder from `pg_stat_activity`). Item 5 - `baseline.rs:152-165` inlines raw
+`pg_advisory_lock` SQL instead of going through `MigrationBackend::acquire_project_lock`, duplicating
+a seam the module docs claim is confined; the ticket calls it not urgent and near-zero blast radius.
+
+Nothing was changed in this entry. Correcting a ticket that would have produced duplicate work is the
+deliverable.
+
 ## F186 - #103 REJECTED as filed: the unresolvable citations are the documentation working
 
 Third and last measurement pass. Reading the CONTEXT of every remaining candidate - not just whether
