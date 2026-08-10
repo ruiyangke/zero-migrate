@@ -8985,6 +8985,86 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F201 - an authored down() was not ignored, it was silently replaced by a different rollback
+
+#22 was filed as "throw on an authored down() before the orchestrator ships". I checked the premise
+before acting on it, and the first measurement contradicted the obvious reading of the ticket.
+
+### The premise is not "down does nothing"
+
+`Migration.down` IS executed. `apply/executor.rs:2539` destructures it
+(`let Some(down) = m.down.as_deref() else {`), `executor.rs:830` branches on `m.down.is_some()`, and
+three backends render it: `sqlite/rollback_sql.rs:76`, `postgres/session.rs:1363`,
+`mysql/session.rs:953`. So the engine has a working rollback leg.
+
+The gap is between that leg and the DSL. Walking the authoring path from the entry point:
+
+- `internal/recorder.ts:140` `buildEnvelope` calls `resolveUp` then `recordUp`. There is no
+  `resolveDown` and no `recordDown`.
+- `IrEnvelope` (`recorder.ts:33`) has exactly three fields: `ir_version`, `name`, `ops`. There is no
+  slot an authored rollback could occupy.
+- `ops.ts:365` declared `__begin(_phase: RecorderPhase = "up")` with `RecorderPhase = "up" | "down"`.
+  The parameter was unused - the buffer it builds has no phase field - and the only caller passed
+  `"up"`.
+
+So the `down` the engine runs is the one it SYNTHESISES from the recorded ops (`render/vendor.rs:247`
+and `:286` build `DROP SCHEMA`/`DROP EXTENSION` inverses). An authored body was never a no-op: it was
+discarded, and a different rollback ran in its place. Nothing downstream could tell the two apart,
+because by the time the envelope exists the authored body is gone.
+
+That is the worse of the two failure shapes. "Your rollback did nothing" is visible on first use.
+"Your rollback ran, but not the one you wrote" is not.
+
+### What the surface was telling authors
+
+Five places invited the thing that was being discarded, which is why this counts as a defect rather
+than a missing feature:
+
+- `types.ts:1362`, the PUBLIC `Migration` interface, declared `down?(): void`.
+- `internal/recorder.ts:47` and `:49` declared `down?` on both accepted module shapes.
+- `index.ts:6` documented the module as `default { up, down? }`.
+- `ops.ts:410`, a user-facing error, said operations may be authored "inside up()/down()".
+- `writing-migrations.md:92`, `node-api.md:179` and `operations.md:584` each said a `down()` is
+  accepted and ignored.
+
+No fixture, example or scaffold anywhere in the tree actually authors one - `cli.ts:710` emits `up()`
+only - so the refusal breaks nothing that exists.
+
+### The fix, and the decision inside it
+
+`refuseAuthoredDown` (`recorder.ts:84`) throws `AUTHORED_DOWN_UNSUPPORTED` from `buildEnvelope`,
+after `resolveUp` so a module missing an `up()` still reports that first.
+
+The judgement call was whether to also remove `down?()` from the public `Migration` type. Codex's
+read-only opinion said remove it, keeping it only on the internal module shape, on the grounds that a
+public type should describe what may be authored today and #25 can re-add it additively once the
+envelope preserves it. I checked its three load-bearing claims rather than taking them: `Migration`
+is exported (`index.ts:128`), `public-surface.test.ts` does not pin its members, and nothing in the
+tree annotates `: Migration`. All three hold, so the member is gone from the public type and kept on
+`MigrationModule` - which now says in its own doc why, since deleting it there would blind the check.
+
+Removing the dead `RecorderPhase` and the unused `_phase` parameter is part of the same concern: that
+parameter is precisely what made the recorder look like it honoured a down phase.
+
+### Verified
+
+RED first: the two authored-down tests failed against unmodified source, the control passed. The
+control - a module carrying `down: undefined` on both shapes - was mutation-tested by widening the
+check to `"down" in mod`, which failed test 7 and only test 7.
+
+Gates: `cargo test -p zero-migrate -p zero-migrate-ir -p zero-migrate-guard -p zero-migrate-policy`
+gives targets=100 passed=2435 failed=0, unchanged, with zero skip banners - a JS-only change should
+not move it. The JS package goes 219 to 222 tests, exactly the three added. CLI host 124 and docs 2,
+both green, both after the surface changes.
+
+The committed `dist/embedded-recorder.js` did drift, and the drift gate is what caught it: the
+artifact bundles `ops.ts`. Rebuilt, and the regenerated diff is exactly the two intended edits.
+
+### Left open
+
+#25 still owns making an authored `down()` work. This change only stops the silent substitution in
+the meantime, and the refusal message names the synthesised inverse so the reason is on the screen.
+
 ## F200 - the dialect table is a runtime gate, and it disagrees with the engine about SQLite
 
 Filed while getting a second opinion on something else, then walked to its consumer rather than
