@@ -8990,6 +8990,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F241 - the fix for F240 is decided, and the two things that make it hard are both wider than this ticket
+
+No code. The shape for #188 is settled and, more usefully, the two hazards that rule out the obvious
+patch are general facts about this engine rather than quirks of the rollback verb.
+
+DECIDED: a rollback-only ordered lowering entry, changing one call site
+(crates/zero-migrate-node/src/verbs.rs:554). Same guarded resolver, same locked snapshot, plus a
+separate authored-prefix track appended only AFTER each envelope lowers, used ONLY to recover
+inverse state. The apply/status entry and its pending projection are untouched.
+
+Rejected, with reasons: adding a mode parameter to the shared
+`lower_ordered_envelopes_to_plans_inner` puts the one path that must not regress behind a boolean;
+precomputing schemas in the verb moves policy resolution, ownership advancement and journal
+interpretation into the verb layer and creates two implementations that can disagree about what was
+checksummed. Also a dead end: keeping the apply-time `Migration`s. `ApplyReply` returns version
+lists and contracts only (zero-migrate-node/src/wire.rs:301-315), and the journal stores
+version/name/checksum/actor/phase/outcome/kind with no `up` or `down`
+(crates/zero-migrate/src/apply/journal.rs:486-505). That route needs a durable authenticated plan
+store, which is a different product decision.
+
+### Hazard 1 - an inverse built from unselected history can launder the drift gate
+
+`plan_rollback` checksum-checks only the SELECTED versions
+(crates/zero-migrate/src/apply/executor.rs:2515-2551). Under `Steps(1)` the earlier `createView` is
+not selected. So an inverse synthesised FROM that earlier envelope can be changed by editing it,
+while the selected `dropView`'s checksum stays identical and the gate stays quiet.
+
+That is the exact attack the rollback planner already documents defending against - its gate (4)
+comment says rollback must not "launder the drift gate" by letting an edited migration's reverse SQL
+run. Synthesising from history re-opens it one envelope upstream unless every contributing artifact
+carries exact completed journal version+checksum evidence. The precedent to copy is engine.rs:306-371,
+which accepts a historical lowering only when every derived step has that evidence.
+
+Worth stating generally: ANY feature that derives behaviour for migration N from migration N-1
+inherits N-1's verification, and the existing gates verify only what the operator selected.
+
+### Hazard 2 - authored history is not executed history
+
+A naive prefix fold assumes every earlier envelope did what it said. Two documented cases where it
+did not:
+
+- an existence guard can journal `completed` while SKIPPING the `up` entirely
+  (crates/zero-migrate/src/apply/backend/postgres/session.rs:689-729) - the same `SatisfiedNoop`
+  behaviour that forced the guarded-drop refusal in F234;
+- baseline and squash journal entries explicitly mean the forward SQL never ran
+  (crates/zero-migrate/src/apply/journal.rs:79-88).
+
+So folding the authored prefix can FABRICATE a pre-state that never existed on that database, and
+the inverse built from it would be confidently wrong. The rollback entry has to reject
+conditional or non-executed contributors and fall back to `down: None` - less rollback availability
+in exchange for never restoring an object from a definition that was never applied.
+
+These two are why "just fold all the prior ops" is the wrong instinct even though it makes the
+failing test pass. The test would go green and the guarantee would be worse than before.
+
 ## F240 - the four synthesised inverses are ENGINE-ONLY: the CLI rollback refuses every one of them, and F239's "resolved" was wrong
 
 F239 closed the re-lowering question by READING the envelope loop and concluding the inverse
