@@ -8985,6 +8985,93 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F176 - MySQL expression defaults are wrapped, and the two exemptions are stability not grammar
+
+#53's re-scoped question was never "should we parenthesise" but "WHICH shapes need it". Answered by
+measurement on both sides, and shipped.
+
+### The RED, end to end through the real path
+
+`packages/zero-migrate-cli/tests/host/mysql-authoring.test.ts` authors a column default through the
+PUBLIC DSL - `t.string({ length: 64 }).notNull().default(lit("X").lower())` - and applies it to the
+live MySQL container via the addon and the `mysql2` driver. `lower` is in the DSL's
+`DEFAULT_SCALAR_FNS` allow-list (`packages/zero-migrate/src/ops.ts:1374`), so this is a shape a user
+can author, not a hand-built IR. Before the fix:
+
+    migration mig_7n42DGM5PvpEBbncQdk0GM failed to apply: You have an error in your SQL syntax;
+    ... near 'lower(_utf8mb4 X'58'))' at line 1
+
+A literal-default migration applies FIRST in the same test, against the same database, through the
+same helper. It differs in exactly one variable - the default - and it passed while the expression
+one failed, so the failure is attributable to the default rather than to the harness or the server.
+That control is the reason the RED means anything.
+
+### Where the rule went, and why not at the string
+
+`crates/zero-migrate/src/render/lower.rs:1912`, the `IrDefault::Expr` arm of `render_ir_default` -
+the one seam all three DEFAULT-clause consumers reach (`render_ir_default_for_type` for column DDL,
+the `SetColumnDefault` lower at `:4875`, and the fold's projected snapshot at `fold.rs:2019`).
+
+The decision is made on the IR NODE, never on the rendered string. Rendering first and then asking
+"does this look like a call?" would have to classify every literal spelling the renderer can produce
+- quoted text, bare numerics, `X'..'` hex, booleans - and get all of them right. The variant is
+already known one frame earlier, so the classification problem is avoidable rather than solvable.
+
+### The two exemptions, and the honest reason for each
+
+MySQL accepts the wrapped form for EVERY shape - measured, including `(CURRENT_TIMESTAMP(6))`. So
+neither exemption is required by the grammar. Both exist to avoid changing SQL that already applies:
+
+  - `SynthFn::Now` renders `CURRENT_TIMESTAMP(6)`, which MySQL accepts bare. Wrapping it would
+    rewrite the DDL every existing MySQL timestamp default emits, for no gain.
+  - `Expr::UuidV4` already emits its own parentheses at the leaf, with a comment at
+    `render/renderer.rs:542` saying exactly why ("Parentheses make this valid in MySQL's
+    expression-default grammar"). Wrapping again would nest a redundant second pair.
+
+### I got the first exemption's REASON wrong, and the second opinion caught it
+
+I originally justified the `now()` exemption on drift: MySQL stores the two spellings differently
+(MEASURED, both in one table - `CURRENT_TIMESTAMP(6)` bare, `now(6)` wrapped), so I argued that
+emitting the unwrapped bytes keeps the comparison against an older column exact rather than leaning
+on the fingerprint's `now`/`current_timestamp` folding at `render/value_format.rs:1540`.
+
+That reasoning is void. The codex read-only pass answered the question I had actually asked it - does
+anything text-compare a MySQL column default - with: `PartialEq for ColumnSnapshot` OMITS the
+`default` field. VERIFIED BY ME at `model/snapshot.rs:405-418`, and the field's own doc at `:35-40`
+says it outright: "The raw SQL is emission/diagnostic metadata and is NOT drift-compared ... only its
+narrow `id_default` projection participates in drift." A `now()` default on a timestamp column has no
+`id_default`, so no comparison of any kind reads that text.
+
+The exemption survives on the weaker, true reason: do not rewrite output that already works. The
+justification did not survive, and shipping the original wording would have planted exactly the
+defect this review keeps removing - a comment asserting a mechanism that does not exist. Corrected in
+the code comment, the test header, and here.
+
+Worth naming what made the catch possible: I asked the second opinion a question whose answer could
+contradict me ("does anything text-compare a default"), not one that would confirm me. The
+contamination is worth recording too - codex read the tree AFTER my edit had landed, so its answer
+about WHERE the parenthesisation lives is describing my own change back to me and is not independent
+evidence. Only its catalog-reading answer, formed from code I had not touched, is.
+
+That second one is the more interesting find: the convention ALREADY EXISTED, applied by hand at one
+expression leaf, and the general arm simply never got it. The defect was not a missing idea, it was
+an idea implemented in exactly one place.
+
+### What I did NOT do
+
+`declarative.rs:7646` renders `ALTER TABLE ... ALTER COLUMN ... SET DEFAULT` in PostgreSQL syntax on
+every dialect. Its DEFAULT body has the same paren problem, but the surrounding statement cannot
+execute on MySQL at all (#87 - the emitted statement is double-quoted PostgreSQL end to end).
+Parenthesising the body of a statement MySQL rejects for three other reasons would be a half-fix that
+makes #87 harder to see. Left for #87's sweep, deliberately.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. Workspace 100 targets / 2425 passed / 0 failed / 0 ignored - up 2 from 2423,
+which is two pins removed and four added. Addon crate 4 targets / 54 passed. Host suite 124 tests /
+124 passed / 0 skipped, with the addon rebuilt against this change. Zero
+`LIVE-DATABASE COVERAGE SKIPPED` banners.
+
 ## F175 - the apply path DOES validate before it lowers, so F174's open question closes
 
 F174 left one thing open and deliberately unfiled: whether any PRODUCTION caller reaches lowering
