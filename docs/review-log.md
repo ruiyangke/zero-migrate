@@ -8985,6 +8985,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F193 - #153's insertion point is decided, and not the way F190 left it: the plan gate does not always run
+
+F190 left one thing open: whether the up-front zero-timeout scan belongs inside
+`preflight_plan_approval` as the whole-plan gate, or needs its own pass. Read both sites. The answer
+is its own pass, and the reason is a fact rather than a preference.
+
+### The coalescing is real, and it is why a batch can half-apply
+
+VERIFIED BY READING `engine.rs:2237-2318`. The rich-plan loop takes the maximal run of consecutive
+`PlanStep::Ddl` and pushes it into one `batch`, then makes exactly one
+`apply_with_lock_backend(backend, exec_cfg, &batch, ...)` call for that run:
+
+```text
+while i < steps.len() && matches!(steps[i], PlanStep::Ddl(_)) { ... batch.push(m.clone()); i += 1; }
+```
+
+A run ends at the first non-Ddl step. So a plan shaped DDL, Backfill, DDL makes TWO apply calls, and
+the render-time refusal inside the second call fires only after the first has committed. That is the
+mechanism #153 describes, confirmed at the source rather than inferred from behaviour.
+
+### The gate F190 proposed to host the scan is conditional, not universal
+
+VERIFIED BY READING `engine.rs:2754-2759`. `preflight_plan_approval` opens with:
+
+```text
+if !steps.iter().any(|step| step.approval_scope_version().is_some()) {
+    return Ok(std::collections::BTreeSet::new());
+}
+```
+
+and VERIFIED BY READING `render/step.rs:172-205`, `approval_scope_version` returns `Some` for a
+`PlanStep::Ddl` ONLY under `m.flags.destructive || m.flags.requires_approval`, with a `_ => None`
+catch-all beneath. An ordinary non-destructive DDL migration yields `None`.
+
+So a plan made entirely of ordinary DDL - the routine deploy, the common case - never enters that
+function past its first line. Putting the timeout scan there would gate the destructive plans and
+leave the ordinary ones exactly as they are now. The gate would look installed and cover the shape
+least likely to need approval and most likely to be run unattended.
+
+### What this decides and what it does not
+
+DECIDED: the scan gets its own unconditional pass over `steps`, before the apply loop. Not inside
+`preflight_plan_approval`, and not two insertion points.
+
+NOT DECIDED HERE, and unchanged from F190: whether the up-front scan should exist at all. It changes
+when a deploy fails, which is operator-visible, and F190 already reconciled that half. This entry
+only removes one of the two candidate homes, on evidence.
+
+NOT MEASURED: I did not construct a mixed plan and watch the first batch commit before the second
+refuses. The claim above is a reading of the loop and the early return, not an execution. A RED that
+does exactly that is what the implementation should open with.
+
 ## F192 - the commit-message rewrite orphaned six citations in this log, which is the defect this log keeps filing
 
 Ruiyang called the commit messages invalid against CONTRIBUTING.md and asked for a rewrite. Measured
