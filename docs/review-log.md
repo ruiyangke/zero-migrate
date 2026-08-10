@@ -8985,6 +8985,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F194 - the second opinion agrees on the verdict and corrects three premises, one of which decides the RED
+
+The remaining half of the timeout-scan question - should the up-front refusal exist at all, given it
+changes when a deploy fails - went to a read-only second opinion. It agrees: add the plan-wide pass,
+and KEEP the render-time refusal at every seam as defense in depth, because direct executor and
+backend callers bypass the engine entirely.
+
+The agreement is worth less than the corrections. All three are VERIFIED BY ME BY READING, not taken
+on report.
+
+### The authored shape this was filed against is unreachable through the IR path
+
+`lower.rs:8598-8612`:
+
+```text
+let has_rich_step = steps.iter().any(|step| !matches!(step, PlanStep::Ddl(_)));
+if !has_rich_step { return Ok(()); }
+...
+("flags.timeout_ms", ir.flags.timeout_ms.is_some()),
+("flags.lock_timeout_ms", ir.flags.lock_timeout_ms.is_some()),
+```
+
+Any plan carrying a non-DDL step rejects a per-migration timeout override outright - not just a zero,
+any value - with `PlanMetadataUnsupported`. So "mixed plan, zero flag on a migration in the second DDL
+run" cannot be authored. What remains reachable is a CONFIG-sourced zero, or hand-built `Migration` /
+`PlanStep` values from an embedder.
+
+That decides the RED, and it is why the ticket's own suggested test would not have compiled into a
+meaningful case: it must drive the config-sourced route or construct the plan by hand, and it must
+say which, because the two prove different things.
+
+### A DDL batch is not one transaction, so the durable prefix can end mid-run
+
+`executor.rs:1115` loops `for &m in pending` and calls `backend.apply_one(...)` per migration. The
+coalesced batch is a unit of dispatch, not of atomicity. The prefix that survives a refusal is
+therefore run A, plus any backfill batches between, plus the migrations preceding the bad one INSIDE
+run B - not the clean "run A committed" I wrote in F193.
+
+One qualification the second opinion raised and I am narrowing: it does not follow for the
+config-sourced zero, which is the reachable case. A config zero resolves zero for EVERY step, and the
+intervening backfill resolves from config only, so the backfill refuses before run B is reached. The
+larger prefix belongs to the hand-built case alone.
+
+### The pass must be backend-aware or it will be wrong on SQLite
+
+`grep -rn "resolve_timeout_ms" crates/zero-migrate/src/apply/backend/sqlite/` returns nothing. SQLite
+never resolves these budgets, and its zero lock timeout means an immediate local lock attempt rather
+than an indefinite server wait. A scan that applied PostgreSQL and MySQL semantics to every dialect
+would refuse plans SQLite executes correctly today - a check that rejects a working migration, which
+is worse than the gap it closes.
+
+Two further limits on completeness, both read: `executor.rs:992` excludes completed and superseded
+migrations from pending work, and `executor.rs:1150` lets an unmet `OnUnmet::Skip` precondition bypass
+`apply_one`. So budget VALUES are fully knowable up front, but whether a given step will render is
+not. "Unconditional" means the pass always runs, not that it judges every supplied step.
+
+### Where this leaves the work
+
+Build it: a dedicated plan-time pass before the authored loop, backend-aware, covering the
+config-only DML and backfill budgets and the nested migrations inside an online rename, and skipping
+what the executor would skip. Keep `resolve_timeout_ms` where it is.
+
+NOT MEASURED, still: no mixed plan has been executed to watch a prefix commit before a later refusal.
+That remains what the RED must show, and it now has to pick its route deliberately.
+
 ## F193 - #153's insertion point is decided, and not the way F190 left it: the plan gate does not always run
 
 F190 left one thing open: whether the up-front zero-timeout scan belongs inside
