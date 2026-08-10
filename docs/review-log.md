@@ -8985,6 +8985,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F175 - the apply path DOES validate before it lowers, so F174's open question closes
+
+F174 left one thing open and deliberately unfiled: whether any PRODUCTION caller reaches lowering
+without validating first. If one did, the finding would have been "the render seam trusts its input",
+which would apply to EVERY validation rule rather than to one. Traced now. It does not.
+
+### The chain, VERIFIED BY ME BY READING
+
+    zero-migrate-node/src/verbs.rs:315 / :334  -> lower_ordered_envelopes_to_plans_for_apply
+    zero-migrate-node/src/verbs.rs:472         -> lower_ordered_envelopes_to_plans
+      both -> lower_ordered_envelopes_to_plans_inner       (node/lower.rs:353)
+      -> lower_envelope_to_plan_with_live_and_resolved_ir  (node/lower.rs:236)
+      -> author.load_and_lower_guarded(&resolved_bytes, ..) (node/lower.rs:284)
+      -> crate::model::load::load_ir_document_authorized    (render/lower.rs:2810)
+      -> validate_ir_authorized                             (model/load.rs:92)
+
+`load_and_lower_guarded` (`render/lower.rs:2791`) maps the `SqlDialect` to a `validate::Dialect` at
+:2800-2802 before that call, so the dialect the loader validates against is the deploy target rather
+than a default. The name is literal: it loads before it lowers.
+
+`model/load.rs:25-33` states the ordering as a security property - "deserialize, then `ir_version`,
+then `validate_ir` (for `target_dialect`), then finite timeout budgets, then ownership, then the
+checksum-hint compare", ending "lowering NEVER sees an artifact that failed any gate" - and
+`load.rs:192` carries a test named `load_runs_validate_ir_on_the_production_path`.
+
+### One trap avoided on the way
+
+I nearly stopped at the doc comment plus the test NAME, which point the right way. That is the same
+move that produced the ticket F174 withdraws: treating strong evidence for a NEARBY claim as proof of
+the claim actually needed. A doc saying the loader validates does not establish that every apply path
+reaches the loader. The call chain above does, and the intermediate function that closes it -
+`lower_envelope_to_plan_with_live_and_resolved_ir` - is one I had not read when I first raised the
+concern.
+
+### What this settles
+
+The withdrawn ticket was withdrawn for the right reason: `IrAuthor::lower_steps` sits BELOW
+`load_and_lower_guarded`, so a test calling it enters beneath a gate production traffic passes
+through.
+
+And #53 stands on firmer ground. Its defect survives precisely BECAUSE the shape passes validation -
+measured `Ok` for both dialects - so the loader admits it and the renderer's bare
+`DEFAULT lower(...)` is what a real deploy emits.
+
+Nothing changed. An open question is retired rather than carried, which is the point of recording it.
+
 ## F174 - one probe, two opposite verdicts: #53 survives it and my own #169 does not
 
 Filed #169 last turn off a real emission, then withdrew it this turn off a real measurement. Both
