@@ -8985,6 +8985,64 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F208 - dead, unexercised, exercised: the middle category is where this pass kept finding defects
+
+Sharpened in the appbase exchange (ZEROSHIP-2026-08-10-168), where the other side corrected an
+overstatement of mine and produced a better distinction than the one I had been using.
+
+I had been sorting code two ways: dead or live. That is not enough. Three categories:
+
+  - DEAD          the body ignores the input entirely. No branch exists.
+  - UNEXERCISED   the branch exists, is reachable, is wired to a real caller, and nothing has ever
+                  taken it.
+  - EXERCISED     something drives it.
+
+Only the third is a capability. The first two are indistinguishable to a grep and usually to a diff.
+
+### The pair that produced it
+
+Two `__begin(phase)` functions, same name, same arity, opposite substance.
+
+Mine (before `8bd526c`) took `_phase` - underscored, and the body ignored it: `ops: []`
+unconditionally, no branch. DEAD. That underscore is what made me suspect the down phase was never
+honoured, and walking it is how F201 was found at all.
+
+appbase's branches on it: `ops: phase === "up" ? deferredUpOps.map(...) : []`, with one production
+caller passing `"up"` and every test calling it bare, which defaults to `"up"`. So the `: []` arm has
+never executed. UNEXERCISED.
+
+I wrote to them that their fork was "ahead of upstream" on this. They corrected it, and they were
+right: a branch that has never run is not a capability, and first execution would arrive for both
+sides at the same moment. I withdrew the word in ZERO-MIGRATE-2026-08-10-169 rather than let it stand
+in a shared record where it would age into a fact.
+
+### The same shape, measured here
+
+The rollback leg is the local instance, and appbase spotted it before I did: a leg unreachable from
+the JS recorder can only ever have been driven by hand-built fixtures. Measured - every construction
+of a `Migration` carrying a `down` in the Rust suite is a hand-written string literal:
+
+    tests/sqlite_rollback.rs:44, :55
+    tests/pg_scenarios.rs:129
+    tests/guard_security.rs:1870
+    tests/ir_checksum.rs:57
+
+Five sites, no authoring path among them. That leg was "working" for its whole life on inputs only
+its own tests could produce. F203's orchestrator and F201's refusal both came out of pulling that
+thread.
+
+### Why this is worth keeping as a lens
+
+The costume list in this log is about names that promise behaviour. This is the same failure in the
+opposite direction: code whose SHAPE promises behaviour. A reachable branch reads as a working
+feature to anyone reviewing a diff, and it takes a caller census to tell the two apart - not a
+reading, not a grep.
+
+Every entry in this pass that started "X exists but nothing drives it" was an unexercised branch
+found by accident. F203 (a planner nothing consumed), F205 (a synthesised down nothing executed,
+until it did), the differential oracle in F-earlier, `render_ir_envelope_sql_statements`. The
+category was always the same; naming it should make the next one findable on purpose.
+
 ## F207 - #29 had no available branch, and the same name search fooled me in both directions
 
 #29 asked to "enforce injected-index immutability or drop the claim". Neither was available, and
