@@ -8990,6 +8990,51 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F217 - rollback is proven on all three dialects, and #185 closes with the gap it opened with gone
+
+The live arms pass on PostgreSQL and MySQL through the shipped CLI
+(`packages/zero-migrate-cli/tests/host/rollback-live.test.ts`, both ran, neither
+skipped: `# pass 2 # skipped 0`). The host suite is 130/130 with zero skips.
+
+Each arm applies a migration, rolls it back, and reads the live catalog: the table
+appears, goes, and comes back when the same file is re-applied, and the journal gains
+exactly one `rolled_back` row. The re-apply is the assertion that matters most - it is
+the only one that distinguishes a rollback from a delete, because it is the one that
+shows the version returned to pending rather than vanishing.
+
+That closes the last unproven path. SQLite was covered at the addon verb against a real
+temp-file database (F214), but SQLite runs in-process and never crosses the host-driver
+seam, so until now the `pg` and `mysql2` adapters, the dialect-native journal SQL, and
+the blocking project-lock bracket a write takes had no coverage on the rollback path at
+all.
+
+### What #185 is, end to end
+
+    zero-migrate rollback --all --approve
+      -> cli.ts runRollback           target + approval refused here, pre-session
+      -> index.ts rollback()          authors every envelope, opens the session
+      -> bridge.rs rollback           decodes, refuses force-without-backup
+      -> verbs.rs rollback_with_...   lowers, builds the set, takes the lock
+      -> zero_migrate::rollback_with_lock
+
+Five commits: 4c2f4de (verb), ac454b3 (entrypoints), 9233888 (command), bfed3d1 (live
+proof), plus the generated types regenerated with the entrypoints.
+
+### What this does NOT cover, and should not be read as covering
+
+A plan that lowers to more than one journaled step is still REFUSED rather than
+reversed (F214). That is deliberate and fail-closed, not an oversight: its DML and
+backfill steps carry no reverse SQL, and the alternative is a rollback that reports
+success while leaving data steps standing. Making those plans reversible is #25's
+territory, not this ticket's.
+
+The lossy-rollback gate is #186 and remains decision-blocked: nothing today
+distinguishes "the reversing SQL ran" from "the data came back", and a `dropColumn`
+rolls back cleanly with its values gone for good.
+
+`#176` (no live-MySQL arm for the orchestrator) is largely dissolved by the MySQL arm
+here, though it asked for coverage in the Rust suite rather than the host suite.
+
 ## F216 - the operator can roll back now, and the two refusals the target rule needed were found by writing the test
 
 `zero-migrate rollback (--to <version> | --steps <n> | --all) --approve` exists, with
