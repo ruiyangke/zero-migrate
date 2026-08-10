@@ -8985,6 +8985,62 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F182 - #167's refusal goes in a preflight, not a precondition: the cheap route costs a wire break
+
+F181 chose #167 to build first. This settles the mechanism, and rules out the one that looked cheapest.
+
+### The attractive option, and why it is not available
+
+The engine already has preconditions: engine-built, parameterized catalog checks evaluated against
+the live DB BEFORE a migration's `up` (`apply/precondition.rs`). Attaching one to E1 - the first step
+of the expand-contract chain - would refuse the whole rename before anything applies, reusing
+machinery instead of inventing a preflight. Timing confirmed: `execute_pending` calls
+`evaluate_preconditions` (`apply/executor.rs:1128`) and only reaches `apply_one` (`:1173`) on a
+non-skip verdict, and the default `OnUnmet::Halt` propagates and aborts the rest of the batch.
+
+Two costs kill it, and I did not find either by looking for reasons to say no:
+
+1. NO EXISTING VARIANT EXPRESSES IT. The structured set is `TableExists`, `TableNotExists`,
+   `ColumnExists`, `ColumnNotExists`, `RowCount` (`zero-migrate-ir/src/precondition.rs:48-77`), and
+   the evaluator is exhaustive over exactly those (`apply/precondition.rs:185`). `SqlBoolean` exists
+   but is the module's own untrusted escape hatch, which is not what a first-party dependency check
+   should ride on. So this needs a NEW variant.
+2. A NEW VARIANT IS A WIRE BREAK. VERIFIED BY ME: `Precondition` derives `Serialize` / `Deserialize`
+   / `JsonSchema` (`precondition.rs:44-47`) with NO `serde(other)` fallback - zero occurrences in the
+   file - and it travels inside `MigrationIr`, which is `#[serde(deny_unknown_fields)]`
+   (`ir.rs:332-333`) and whose `ir_version` is documented "bump on a breaking shape change". An older
+   reader cannot deserialize an envelope carrying the new variant.
+
+And a third cost I found before asking: preconditions are CHECKSUMMED. `ChecksumInput` carries
+`preconditions` (`zero-migrate-ir/src/migration.rs:310`) and folds them in at `:405`. Attaching one to
+E1 changes E1's checksum, so a rename chain already journaled by an earlier release would re-author
+with a different checksum - which is precisely what the drift gate exists to flag.
+
+So the cheap-looking route costs an IR version bump AND a checksum change, to move an error earlier.
+
+### Decision
+
+Build the refusal as a live-catalog PREFLIGHT in the deploy path, carrying no checksummed and no
+serialized content, on the predicate `tests/pg_column_drop_dependency_oracle.rs` already verifies
+10/10. It costs new plumbing rather than reusing the precondition surface, and that is the right
+trade when reuse means versioning the wire format.
+
+Note this is exactly what F181 said ("live-catalog preflight") before I got interested in the
+precondition shortcut. Worth recording that the shortcut was investigated and priced rather than
+skipped, so the next reader does not re-propose it.
+
+### Provenance
+
+The wire-format constraint and the variant enumeration are a read-only codex pass; I verified the
+derives, the missing `serde(other)`, and `deny_unknown_fields` myself. The checksum finding is mine.
+One instrument plus my own reading - the subagent budget is still exhausted at 200/200.
+
+### Still not established
+
+Whether an already-applied rename chain is in fact RE-AUTHORED on a later plan. I reasoned it is,
+from what the drift gate is for, but did not trace that path - and the checksum argument above
+depends on it. It does not change the decision, because the wire break alone is disqualifying.
+
 ## F181 - #129 and #167 should NOT be built once: the same gap costs very different things
 
 The ticket says "SHARED WITH #167. Build once." Both halves reach the same PostgreSQL behaviour
