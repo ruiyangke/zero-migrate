@@ -176,9 +176,11 @@ project and do not rename it after apply. Editing the operations or bound values
 of an applied migration keeps its identity but changes its checksum, so apply
 stops with checksum drift.
 
-`down()` is present in the type but is not used by the public Node workflow.
-There is no public rollback function. Module flags, dependencies, supersession,
-and preconditions are also not accepted by this migration-module format.
+A module that authors a `down()` is refused with `AUTHORED_DOWN_UNSUPPORTED`
+rather than built: the envelope carries no rollback slot, so the body would be
+discarded and rollback would run the engine's synthesised inverse instead. There
+is no public rollback function. Module flags, dependencies, supersession, and
+preconditions are also not accepted by this migration-module format.
 
 The structured preview returned in `plan().envelope` is:
 

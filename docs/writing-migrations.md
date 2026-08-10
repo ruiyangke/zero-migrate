@@ -89,10 +89,12 @@ export function up() {
 }
 ```
 
-Although a `down()` property is accepted by the JavaScript/TypeScript module
-shape, the current host does not run or save it, and the public Node API has no
-rollback command. Treat migrations as forward-only: back up before destructive
-work and prepare a new forward-fix migration when needed.
+Authoring a `down()` is refused: the recorder drains one op list, the envelope
+carries no rollback slot, and rollback runs an inverse the engine synthesises
+from the recorded ops. A body written there would never execute, so the build
+stops with `AUTHORED_DOWN_UNSUPPORTED` instead of discarding it. Treat migrations
+as forward-only: back up before destructive work and prepare a new forward-fix
+migration when needed.
 
 ## The end-to-end workflow
 
@@ -1201,7 +1203,7 @@ helpers. The runtime API remains ordinary JavaScript.
 | A default is treated as text | Strings are literals; use a structured helper rather than SQL text |
 | Null comparison is rejected | Use `isNull()` or `isNotNull()` |
 | A generated/index/check expression is rejected | Remove volatile functions, aggregates, and target-only helpers |
-| A rollback body is ignored | Authored `down()` and public rollback are not supported |
+| A rollback body is refused | Authored `down()` and public rollback are not supported |
 
 See [Troubleshooting](troubleshooting.md) for setup, validation, driver, policy,
 and recovery errors.

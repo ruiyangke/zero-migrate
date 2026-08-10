@@ -68,9 +68,10 @@ Working notes; not staged.
   inserted after capture (correct but surprising). Add loud docs and a
   post-backfill check that reports/counts rows beyond the captured boundary.
 
-- [ ] Rollback posture, documented explicitly. No public rollback; `down()` is
-  parsed but never run. State the roll-forward plus backup stance plainly in the
-  operations docs, and consider a reviewed reversal helper for the abort path.
+- [ ] Rollback posture, documented explicitly. No public rollback; an authored
+  `down()` is now refused at build time rather than parsed and dropped. State the
+  roll-forward plus backup stance plainly in the operations docs, and consider a
+  reviewed reversal helper for the abort path.
 
 ## Ecosystem and maturity (npm track, in progress)
 

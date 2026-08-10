@@ -581,8 +581,10 @@ apply and status work, but that view is not a complete structural-drift check.
 
 ## Rollback strategy
 
-zero-migrate does not provide a public high-level rollback command. A
-TypeScript `down()` function is not used by the public Node or CLI workflow.
+zero-migrate does not provide a public high-level rollback command. Authoring a
+TypeScript `down()` is refused at build time rather than accepted and ignored,
+because rollback runs an inverse synthesised from the recorded ops and would not
+execute the authored body.
 
 Prefer this order:
 
