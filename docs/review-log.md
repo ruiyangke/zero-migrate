@@ -9065,8 +9065,28 @@ over-promising.
 Still a product decision, and the cheap honest option remains: mark both SQLite cells `Unsupported`
 in `dialect-support.toml`, matching the sibling `nextval` row.
 
-Separable and worth doing either way: the message should not assert a missing snapshot when the
-snapshot is complete.
+### The message half shipped, since it is independent of that decision
+
+`0422bd5`. The variant is produced from two places with two different reasons:
+
+```text
+require_capability_for            this path does not rebuild this op shape - snapshot irrelevant
+.ok_or(..) on a snapshot lookup   the live snapshot really is missing
+```
+
+Its doc already said "or"; only the message said "and". The wording now states the alternatives, and
+the test supplies a complete snapshot including the target column and asserts the refusal does not
+demand one - so it cannot regress into naming a condition that was met.
+
+Worth noting what made this findable: the doc comment and the message disagreed with each other, and
+neither was wrong on its own terms. Reading either alone would have found nothing. The probe found it
+by producing the message in a state the message denied.
+
+Gates: fmt 0, clippy 0, doc 0, addon 4 targets / 54 passed. Workspace 100 targets / 2435 passed /
+0 failed / 0 ignored - one above the 2434 baseline for the one test added. Zero
+`LIVE-DATABASE COVERAGE SKIPPED`.
+
+The (a)/(b) decision on the support disagreement itself is untouched and still open.
 
 Also worth carrying: the table is GENERATED from `dialect-support.toml` and guarded against
 hand-editing by `tests/dialect_table_faithfulness.rs`, so correcting the table means editing the TOML.
