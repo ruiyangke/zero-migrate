@@ -9263,6 +9263,30 @@ PostgreSQL end to end. Whatever that MySQL arm serves, this path is not it. Read
 and wrong answer; that is why the test asserts on emitted text rather than on the renderer's source,
 and why the measured strings sit in its header.
 
+CORRECTION, made later while scoping the fix, because the sentence above miscites its own evidence.
+`qualified` does NOT have a `SqlDialect::Mysql` arm. VERIFIED BY ME BY READING: `qualified`
+(`declarative.rs:5261`) is three lines with no dialect branch at all - it calls `quote_ident`, which
+is itself dialect-free (`:75`, delegating to `escape_quote_ident`) and always double-quotes. Line
+`:7498` is not part of `qualified`; it is a match arm INSIDE `render_add_fk`, which computes its own
+`table_ref` locally:
+
+    let table_ref = match self.dialect {
+        SqlDialect::Postgres => self.qualified(table),
+        SqlDialect::Sqlite => quote_ident(table),
+        SqlDialect::Mysql => mysql_qualified(&self.project_schema, table),
+    };
+
+So the measurement was right and the prediction was wrong for a reason I had not identified: there
+is no shared dialect-aware qualifier being bypassed. The convention is that each renderer that cares
+hand-rolls its own `match self.dialect`, and `render_add_fk` (`:7495-7511`) does it correctly for
+both directions - `mysql_qualified` for the table, `mysql_quote_ident` for the constraint name, and
+`DROP FOREIGN KEY` rather than `DROP CONSTRAINT` on the down. `render_alter_column_type` (`:7575`)
+and `render_alter_column_nullability` (`:7605`) simply never got that match.
+
+That is the same shape as the defect F176 fixed one entry above: a convention implemented correctly
+at one site and missed at its sibling. It also means the template for #87's fix already exists in
+this file, three functions away, rather than needing to be designed.
+
 ### The pin fails when the defect is fixed
 
 The test asserts what is emitted today AND `!alter.up.contains("MODIFY COLUMN")`, so teaching the
