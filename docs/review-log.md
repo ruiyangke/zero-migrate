@@ -8985,6 +8985,82 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F179 - #166 diagnosed to the exact carrier, and my "cheap narrow fix" call was wrong twice
+
+No code shipped. This records a diagnosis that took two wrong turns, because the wrong turns are the
+useful part.
+
+### The ticket's stated cause is not what the code does
+
+#166 inferred "every op in one envelope is lowered against the same pre-envelope live snapshot".
+VERIFIED BY ME BY READING that this is false: `lower_op_into_steps` takes `live_schema: &mut
+LiveSchema` (`render/lower.rs:4058`), and two arms already write their result back so later ops in
+the SAME envelope see it - `createTable` at `:4334-4340` ("The just-created table is now live for any
+later intra-IR FK") and the SQLite addConstraint rebuild at `:5106`. The rename is called with that
+same running copy at `:4997` and never wrote back.
+
+### So I called it a one-line omission. That was wrong.
+
+I added the write-back, updating both maps the rename arm reads - `table_snapshots[].columns[].name`
+and the `sqlite_schemas` SDK Value key. VERIFIED BY PROBE that both took effect: at the second op the
+projection showed `snap_keys=[.., "handle", ..]` and `value_keys=["handle","city"]`.
+
+The test still failed, with a DIFFERENT error, so the write-back was necessary and insufficient.
+MEASURED by dumping the two lowered rebuild specs:
+
+    rebuild#0 create=CREATE TABLE "people__zero_migrate_rebuild"(.. "nickname" TEXT NOT NULL ..)
+              copy=[.., ("nickname","nickname"), ..]  renames=[("nickname","handle")]
+    rebuild#1 create=CREATE TABLE "people__zero_migrate_rebuild"(.. "nickname" TEXT NOT NULL ..)
+              copy=[.., ("handle","handle"), ..]      renames=[("city","town")]
+
+`rebuild#1`'s copy list is correct because of the write-back; its CREATE is still stale. Hence
+`table people__zero_migrate_rebuild has no column named handle`.
+
+### The third carrier, and why it cannot simply be updated
+
+`TableSnapshot::stored_create_sql` (`model/snapshot.rs:924-927`) - "**Introspection-only** verbatim
+`CREATE TABLE` text (`SQLite` `sqlite_master.sql`)". That is what the rebuild's CREATE comes from,
+and neither map I updated feeds it.
+
+It is byte-faithful ON PURPOSE. `SqliteRebuildSpec` (`render/plan.rs:144-150`) says the path "creates
+and copies the byte-faithful pre-rename shape first, then delegates the identifier rewrite to
+SQLite's own `ALTER TABLE ... RENAME COLUMN` parser so CHECKs, generated expressions, indexes, and
+triggers follow the rename without a lossy engine-side SQL rewrite". Rewriting that text inside the
+projection is exactly the lossy rewrite the design refuses. Clearing it instead would silently drop
+the guarantee for the second rebuild, and CHECKs and triggers are what the guarantee exists for.
+
+### The staleness class is lowering-wide, not rename-shaped
+
+A read-only cross-check answered the question I had NOT been able to settle: which OTHER arms read
+live structure an earlier op in the same envelope can invalidate. It found roughly eleven, including
+`DropIndex` (`unique_indexes`), `SetColumnDefault` for container/json/nextval (`columns[].data_type`),
+native and SQLite `AddConstraint`, both `DropConstraint` branches, the DML arms
+(`Insert`/`Update`/`Delete`/`Backfill`, projecting `columns[].name` for `ColRef` resolution), and the
+pre-loop FK/format validations at `:3142`, `:3249`, `:3473`, `:3509`. NOT verified by me line by
+line; recorded as its finding, and it is consistent with the two write-back sites I did read.
+
+That reframes the ticket. "Lower each op against what the previous ops produced" is not a rename fix;
+it is an invariant across every structural op's write-back and every consumer's read. Doing it
+half-way - one producer taught to write back while ten consumers still read whatever they happen to
+get - is worse than not starting, because it changes emitted SQL without making the shape work.
+
+### Decision
+
+Refuse the shape at lower, narrowly. NOT "two ops on one table", which would reject pairs that work
+today (two `addColumn`s are fine). The predicate is the measured one: a SQLite `renameColumn` whose
+table an earlier op in the SAME envelope has already rebuilt, because that is precisely when
+`stored_create_sql` no longer describes the table. The message names the repair: split the renames
+across migrations.
+
+The general invariant is worth its own ticket rather than being smuggled into this one.
+
+### What I reverted
+
+The write-back is correct as far as it goes and would genuinely help other consumers - a rename
+followed by an `Insert` would resolve the new column name. But it is unverified for those cases, and
+shipping an unverified behaviour change alongside a defect it does not fix is the half-measure above.
+Reverted to a clean tree; the refusal will be built from there.
+
 ## F178 - #87 shipped, and the gate I first wrote was too wide by two ops
 
 F177 decided "refuse on MySQL". Implementing it showed that decision was right for THREE of the five
