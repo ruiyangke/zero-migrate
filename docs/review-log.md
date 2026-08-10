@@ -8990,6 +8990,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F258 - the artifact and the database disagreed about one table, and the walker set is six not two
+
+Part of #80, which stays open. One walker fixed, and the full inventory the ticket asked for
+before any fix is now taken.
+
+`render_artifacts` builds its two projections from ONE op stream through TWO walkers, and only one
+of them expanded `Op::Dialectal`. `fold_to_field_defs` and `authoring_tables_from_ops` route
+through `flatten_dialectal_ops`, so COLUMNS authored inside a `dialect()` leg reached the
+artifact. `runtime_metadata_from_ops` (render/gen_types.rs:226) walked the raw list and let the
+wrapper fall through its catch-all `_ => {}`, so the runtime OPTIONS and plain INDEXES authored in
+that same leg did not.
+
+The emitted `schema.runtime.json` therefore described a table the database does not have. The RED
+prints it exactly: fields `id` and `body` present, `"indexes": []`, `"softDelete": false`, for a
+history whose PostgreSQL leg declares `notes_pg_idx` and sets `softDelete`. After the fix, the
+same history emits the index and `"softDelete": true`.
+
+The finding was NOT novel - the comment at gen_types.rs:498-503, above the sibling that does
+descend, already states it: "a table created only inside an `Op::Dialectal` leg emits its FIELDS
+but loses its runtime options and plain indexes. A hole, not a handoff." An accurate description
+had been sitting one function above the defect. What was missing was the fix.
+
+SELECTION, NOT UNION, and the two control arms exist for that. An index declared only in the
+inactive SQLite leg must NOT appear in the PostgreSQL artifact - naming it would describe an
+object the database does not have, which is the same defect pointing the other way.
+Mutation-tested by replacing `flatten_dialectal_ops` with a union over every present leg: exactly
+`an_index_authored_only_in_an_inactive_leg_stays_out_of_the_artifact` and
+`the_sqlite_artifact_carries_the_sqlite_leg_and_not_the_postgres_one` failed, and the two positive
+arms still passed. The mirror arm also kills a walker hardcoded to the PostgreSQL leg.
+
+THE INVENTORY, which is the part that changes the ticket. A read-only codex sweep classified every
+`Op` walker under `crates/`. The ticket had two known non-descenders; the real production set is
+six:
+
+  resolve_create_table_policy            model/table_shape.rs:273     policy-injected columns, indexes, pinned PK
+  validate_partition_recording           model/validate.rs:3298       partition parent/child + key coverage
+  runtime_metadata_from_ops              render/gen_types.rs:226      FIXED HERE
+  load_and_lower_guarded created_tables  render/lower.rs:2945         feeds the cross-file ownership registry
+  resolved_touched_tables (partial)      render/lower.rs:3012         bare-name DropIndex supplement only
+  refuse_repeat_sqlite_rename_target     render/lower.rs:4175         SQLite repeated-rename refusal
+
+Two more are incomplete but have only test callers in-tree - `validate_ir_resolved`
+(validate.rs:6763), whose nested DML never receives `live_columns`, and
+`migration_requires_approval` (policy_approval.rs:143), which resolves the wrapper's own policy
+object rather than each leg's. And `history_carries_dialectal_ops` (fold.rs:571, shipped in F257)
+does not descend BY DESIGN - it answers wrapper presence, not leg contents.
+
+The descending side is much larger and mostly healthy: the lowering path, the guard's
+`check_ir_data_security_policy`, the fold family, `Op::is_destructive`, `collect_touched_tables`,
+the canonical checksum image, and roughly twenty validators all select the leg correctly. So this
+is a scattering of missed walkers rather than a systemic omission, which is why each one has to be
+judged on what it computes rather than fixed in a sweep.
+
+Recorded rather than fixed in one commit, deliberately. Each remaining walker changes different
+output - ownership registry, partition validation, policy injection - and needs its own RED. The
+ticket now names the whole set, which is what it asked for before any of them are touched.
+
+One caveat on the inventory: the sweep read `runtime_metadata_from_ops` before this commit
+landed, so its entry describes the pre-fix state. Everything else in the list was current when
+measured and I have NOT re-verified the other five line-by-line myself.
+
 ## F257 - the field a caller asked for, reporting the thing they did not know to ask for
 
 Closes #194. `GenArtifactsReply` gains `has_dialectal_ops: Option<bool>`.
