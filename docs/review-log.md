@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F238 - dropTrigger's inverse is derivable after all, and a second-opinion dispatch that failed is not a second opinion
+
+Two small things, one of them a correction to how the remaining work is estimated.
+
+### `Op::CreateTrigger` carries a complete definition
+
+F232 filed `DropTrigger`, `DropFunction` and `DropPolicy` together as EXPENSIVE because
+`SchemaSnapshot` has no map for any of them. That is still true of the plumbing, but it says nothing
+about whether the DEFINITION exists, and for triggers it does. `Op::CreateTrigger`
+(crates/zero-migrate-ir/src/ir.rs:3685) carries every field the `CREATE TRIGGER` needs:
+
+    name, table, schema, timing, events, for_each, action, when
+
+That is a full, typed, dialect-neutral definition - the same shape that made `CreateView`'s `query`
+usable. So `DropTrigger` is not blocked on physics, only on a new `TriggerSnapshot` plus the fold
+arms to populate it. The cost is "one more snapshot type", not "the information is gone", and those
+are very different things to carry in an estimate.
+
+NOT checked yet, and it decides the real cost: whether the fold currently tracks triggers at all,
+and what `TriggerAction` contains on each dialect (a PostgreSQL trigger calls a function, a SQLite
+trigger carries a body, so the two legs may not restore identically). Read both before committing to
+this one.
+
+### The second opinion on `AlterSequence` did not happen
+
+The `codex exec` dispatch for the AlterSequence decision produced no opinion. It failed in the
+shell before reaching codex at all:
+
+    (eval):1: parse error near `>'
+    (eval):1: parse error in command substitution
+
+Recording it because the failure mode is quiet in the worst way: the job "completed" with exit code
+0 from the harness's point of view, and the output file contained two lines of shell error rather
+than an answer. A dispatch that returns SOMETHING is not a dispatch that returned an ANSWER, and the
+difference is invisible unless the output is actually read. The retry uses single quotes around the
+prompt instead of double, and drops the arrow and parenthesised option labels that most plausibly
+tripped the parse.
+
+So `AlterSequence` remains undecided, and the reason is a tooling failure rather than a hard
+question. It is still the one item in this family whose inverse is a diff against previous state
+rather than a recorded object, and it should not be implemented until that is settled.
+
 ## F237 - the dropped schema is reversible unless it cascaded, and the refusal is now the measurement rather than an argument
 
 Shipped 817b6933. Fourth op on #23, and the first that needed a refusal the earlier three did not.
