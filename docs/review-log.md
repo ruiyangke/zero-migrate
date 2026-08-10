@@ -8990,6 +8990,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F243 - half the finding was false, and the binary said so in one run
+
+#93 says the addon's missing-field error "names no API and reports only the first missing field".
+The second half is true. The first half is true for exactly one of the two ways a field can be
+bad, and the ticket had never separated them.
+
+The ticket's last open question was whether napi-rs offers an object derive that accumulates
+field errors, which would have made the expensive option cheap. It does not.
+`napi-derive-backend-5.1.1/src/codegen/struct.rs:223` reads each field with
+`get_named_property_raw(...)?` in declaration order, so the first absent field short-circuits and
+the rest are never read; `NapiStruct` (`ast.rs:84-94`) has no knob for it, and a grep for
+accumulate|collect_err|all_errors|multi_error across the backend returns empty. That was the
+answer I set out to get.
+
+Reading on for one more line changed the finding. `from_raw_required_field`
+(`napi-3.10.3/src/bindgen_runtime/js_values/object.rs:750`) takes a `struct_name` parameter and
+uses it on only one of its two paths: an absent field returns `missing_field_error(field)`, which
+formats `Missing field \`{}\`` with no struct name at all (`error.rs:452`), while a wrong-typed
+field goes through `decorate_field_error`, which appends ` on {struct}.{field}` (`error.rs:441`).
+
+So I ran the real binary rather than trusting the read:
+
+    {envelopes:[]}                                -> Missing field `dialect`
+    {envelopes:[], dialect:"postgres"}            -> Missing field `charterLayers`
+    {envelopes:[], dialect:42, charterLayers:[]}  -> Failed to convert JavaScript value
+        `Number 42 ` into rust type `String` on GenArtifactsSource.dialect
+
+A wrong-typed field already names `GenArtifactsSource`, which is a declared, exported, published
+interface (`crates/zero-migrate-node/index.d.ts:300`, with `"types": "index.d.ts"` in the
+package). The nameless first-only message is specific to an ABSENT field, and no rebuild can
+change that, because the absent path is never handed the struct name.
+
+That reprices the option the ticket was leaning toward. Loosening the parameter to a raw object
+and hand-validating would have to reproduce the wrong-type messages too, or it trades a bad
+absent-field message for a worse wrong-type one. The ticket had counted the `index.d.ts` and
+second-source-of-truth costs and not this one.
+
+Then the census, because a message only matters to whoever reads it. Every in-repo caller of
+`genArtifacts` is a test. Ten call sites are plain `.mjs` with no type checking
+(`crates/zero-migrate-node/__test__/gen_artifacts.mjs`, `gen_artifacts_typecheck.mjs:157`). The
+one TypeScript caller does not import `GenArtifactsSource` either - it hand-declares a local
+structural interface at
+`packages/zero-migrate-cli/tests/host/gen-artifacts-dialect.test.ts:49-56` because it loads a
+specific binary by path. There is no shipped production caller at all, and that file's own
+comment at :58-59 records why: the CLI re-exports the apply and status verbs but not the DB-free
+artifact emitter. So the runtime message is what in-repo callers actually meet, and there is no
+consumer path behind it - which argues the finding is real but small, rather than either false
+or urgent.
+
+I checked one thing that looked like a gate and is not. `gen_artifacts_typecheck.mjs` compiles
+the GENERATED `env.db.ts` against the authoring package (its header, :1-3). It does not
+typecheck the `genArtifacts` call, so it is no evidence that callers are checked.
+
+Not verified: the ticket's earlier claim that the downstream consumer switched to importing
+`GenArtifactsSource`. That project is outside this repo and I cannot see it from here.
+
+The lesson is the cheap one. I went to answer a yes/no question about an upstream feature, and
+the same function that answered it also refuted a claim the ticket had carried unexamined
+through three revisions - because the parameter it accepted was used on one branch and dropped
+on the other. Reading the callee's whole body rather than the branch I came for cost one screen.
+
 ## F242 - the dialect table now orders by code unit, and measuring first kept the claim honest
 
 Shipped b63e1d2f, closing #67.
