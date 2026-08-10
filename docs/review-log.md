@@ -9033,10 +9033,31 @@ slot, so they are asked against the executor config alone - which is where the s
 truncation lives.
 
 NOT judged: any migration the journal already records as completed, so a retried deploy stays
-idempotent. STILL judged, deliberately: a migration whose precondition would make the executor skip
-it. Evaluating preconditions needs the live database, and a zero budget is invalid configuration
-whether or not this particular run would have reached it. That is a conservative choice and a
-behaviour change for that narrow shape; it is written here rather than left for someone to discover.
+idempotent.
+
+STILL judged, deliberately: a migration the executor would have skipped. Writing this entry up for a
+downstream consumer forced me to read the skip site properly, and there are TWO routes to it, not the
+one I first named. `executor.rs:1164-1172`:
+
+```rust
+let skip = if had_inflight { ... } else {
+    dep_skipped
+        || matches!(
+            backend.evaluate_preconditions(cfg, m).await?,
+            PreconditionVerdict::Skip
+```
+
+An unmet `OnUnmet::Skip` precondition is one. A migration whose `depends_on` names something already
+skipped this run is the other, and I had not accounted for it. Either way the migration never
+rendered, so a zero budget on it was invisible and the deploy went green.
+
+That makes this a genuine new rejection rather than only an earlier one: **a plan carrying a
+zero-budget migration that would have been skipped now fails where it previously succeeded.** The
+choice is deliberate - preconditions need the live database, which a plan-time pass does not have,
+and a zero budget is invalid configuration whether or not a given run reaches it - but it is a
+behaviour change, and the sentence above understated it by naming one route.
+
+Sent to appbase as ZERO-MIGRATE-2026-08-10-145 rather than left for them to find in a red deploy.
 
 ### Gates
 
