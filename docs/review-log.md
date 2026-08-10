@@ -8985,6 +8985,66 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F183 - #167 shipped, and building it corrected the reason F181 gave for prioritising it
+
+The preflight F182 chose, on the oracle F171 verified. The RED also overturned the justification I
+wrote two entries ago, which is the part worth reading.
+
+### F181's stated reason was wrong
+
+F181 ranked #167 above #129 because its failure "leaves the user mid-transition: both columns
+present, the dual-write trigger gone, the rename incomplete". The RED shows that state is the DESIGN,
+not the damage. Applying the plan returned:
+
+    applied: [3 migrations]                     <- E1, E2, E3
+    pending_contract: [C1 drop trigger, C2 drop column]
+    opened_obligations: [PendingContract { table: "dep_rename_items",
+                         from_col: "qty", to_col: "quantity", ... }]
+
+Expand and contract are two separate deploys. Both columns present with a dual-write trigger IS the
+intended interval between them.
+
+What the dependency actually causes is narrower and worse: the expand half opens a contract
+OBLIGATION THAT CAN NEVER BE DISCHARGED, because C2 hits the same PostgreSQL refusal on every later
+attempt. The operator is not left with a broken schema - they are left with a permanent open
+obligation and no way to close it but by hand. The conclusion survives; the reason did not.
+
+### The gate
+
+`MigrationBackend::blocking_column_dependents` (`apply/backend/mod.rs`), defaulting to "nothing
+blocks it". That default is the honest answer rather than a stub: SQLite rewrites dependent
+expressions itself during its rebuild, and the MySQL leg authors no expand-contract renames. Only the
+PostgreSQL impl consults a catalog.
+
+The PostgreSQL query is the predicate `tests/pg_column_drop_dependency_oracle.rs` measured 10/10
+against a live server, with `pg_describe_object` rendering each blocker the way PostgreSQL's own
+error DETAIL does - so the refusal names what the server would have named.
+
+Called from `apply_plan_locked`, under the held project lock, before `ensure_journal` has done
+anything and before any step runs. New `ApplyError::RenameSourceHasDependents { table, column,
+blockers }`.
+
+### The assertion that carries the test
+
+`assert!(added.is_empty())` - the new column was never added. "An error came back" is equally true of
+today's mid-chain C2 failure, so only "nothing ran" separates a preflight refusal from the thing it
+replaces.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. Workspace 100 targets / 2428 passed / 0 failed / 0 ignored (2427 -> 2428, the
+one new test). Addon crate 4 targets / 54 passed. Host suite 124 / 124 / 0 skipped with the addon
+rebuilt against the changed trait. JS gates green. Zero `LIVE-DATABASE COVERAGE SKIPPED` banners.
+
+One clippy catch worth noting: `OnlineIntent` has a single variant, so my first `let ... else` was
+irrefutable. The lint caught what reading did not.
+
+### What this does not do
+
+#129 - the plain `dropColumn` case - is untouched, per F181. The backend method is now there for it,
+but whether that gate is worth its risk is a separate judgement, and a plain drop already fails
+cleanly with an accurate message and no obligation left open.
+
 ## F182 - #167's refusal goes in a preflight, not a precondition: the cheap route costs a wire break
 
 F181 chose #167 to build first. This settles the mechanism, and rules out the one that looked cheapest.
