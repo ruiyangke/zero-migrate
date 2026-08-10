@@ -8985,6 +8985,56 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F174 - one probe, two opposite verdicts: #53 survives it and my own #169 does not
+
+Filed #169 last turn off a real emission, then withdrew it this turn off a real measurement. Both
+came from the same technique, which is the point worth recording.
+
+### The probe
+
+Call `validate_ir` directly on the exact op, for each dialect, and read the verdict. It answers the
+question grepping could not: does anything upstream refuse this shape before the renderer sees it?
+
+    text + literal default, Mysql     -> Err "column \"label\" declares the literal default 'plain'
+                                          but renders as MySQL TEXT storage; MySQL refuses a literal
+                                          DEFAULT on TEXT, BLOB, JSON, and GEOMETRY columns"
+    text + literal default, Postgres  -> Ok
+    varchar(64) + literal, Mysql      -> Ok
+    varchar(64) + lower('X'), Mysql   -> Ok
+    varchar(64) + lower('X'), Postgres-> Ok
+
+### #169 withdrawn
+
+I filed it because the engine emitted `ADD COLUMN ... text ... DEFAULT 'plain'` and live MySQL
+answered `ERROR 1101 ... TEXT ... can't have a default value`. The emission was real; the conclusion
+was not. #43's rule EXISTS, refuses the right dialect, permits PostgreSQL, does not over-refuse
+VARCHAR, and names the whole BLOB/TEXT/JSON/GEOMETRY class I had worried a fix would miss.
+
+The invalid SQL appeared because my probe called `IrAuthor::lower_steps`, which sits BELOW the
+validation seam. A renderer will lower an op validation would have refused. That is a property of
+testing through a lower-level API, not a defect a user reaches.
+
+Left explicitly unchecked, and not re-filed as a smaller ticket: whether any PRODUCTION caller
+reaches `lower_steps` without validating first. If one does, the finding is "the render seam trusts
+its input", which would apply to EVERY validation rule rather than to this one - a different and
+larger question that deserves a deliberate audit of the validate-then-lower ordering, not a
+half-scoped ticket carved off this mistake.
+
+### #53 survives the same scrutiny, and is stronger for it
+
+The identical probe on an EXPRESSION default returns `Ok` for BOTH dialects. So validation admits it,
+the renderer emits `DEFAULT lower(_utf8mb4 X'58')` bare, and MySQL rejects that with `ERROR 1064`.
+Reachable through the validated path, unlike #169.
+
+That contrast is now in the test's own header, because "the validator admits this" is what separates
+a defect from an artifact, and a reader of the pin should not have to rediscover it.
+
+### The lesson, stated plainly
+
+An engine-emitted statement that a server rejects is NOT sufficient evidence of a defect. The
+question is whether the emission is reachable through the path a user actually takes. I filed one
+ticket before asking that, and the same probe that confirmed the neighbouring defect withdrew mine.
+
 ## F173 - expression defaults are admitted for MySQL and rendered unparenthesised, which MySQL rejects
 
 #53, re-scoped. Its two halves resolve in opposite directions, and the ticket did not separate them.
