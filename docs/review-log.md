@@ -8990,6 +8990,50 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F248 - a gate for a defect this repository does not have
+
+Shipped a36485d5.
+
+The sibling project hit a committed absolute path twice in one day: a `file:` dependency into a
+home directory, and a Playwright config setting a binary path to
+`/home/<user>/Projects/.../target/release/<bin>` with no existence check, so on any other checkout
+it spawned something that does not exist. They reported it; the class transfers even though the
+instance does not, so I swept here.
+
+    $ git grep -l "/home/ruiyang" -- .
+    ISSUES.md
+    docs/review-log.md
+
+Two files, both prose, both quoting commands as they were actually run. No `file:` or `link:`
+dependency anywhere, and no home path in any tracked `.rs`, `.ts`, `.mjs`, `.js`, `.toml`, `.yml`,
+`.nix` or `.json`. Clean.
+
+So there was nothing to fix, and a gate went in anyway. That is worth stating plainly because it
+inverts the usual order here: almost every gate in this log was written after something got
+through it. This one is written while the tree is clean, on the strength of another project's
+measurement rather than my own defect.
+
+The design question was the scope, and it is the part worth keeping. My two hits are in prose;
+theirs were in code. Scoping by extension rather than by filename is what makes that a rule
+instead of an exemption list - in prose a path is a CITATION, and rewriting a transcript to be
+portable makes it a worse record, while in code or config it is a DEPENDENCY that resolves or does
+not. No file is exempt by name. If a `.md` ever becomes load-bearing for a path, that is a
+decision to record rather than a filename to add, which is the same discipline the NUL-byte gate
+already states for its own lack of an allowlist.
+
+Both arms mutation-tested, because a gate nobody has watched fail is a gate nobody has tested. A
+planted path reports `packages/zero-migrate/src/ops.ts:4980: /home/ruiyang/`, and raising the
+enumeration floor above the real count reports `only 409 files enumerated, below the 9000 floor`
+rather than passing. That second arm is the cannot-answer branch for the third time in this log: a
+scan that enumerates nothing and a scan that enumerates everything and finds nothing are
+indistinguishable from outside, and the floor is the only thing that separates "clean" from "did
+not look".
+
+What it deliberately does not catch: a machine-specific path that is not under a home directory,
+and a path assembled at runtime. It pins the spelling that actually occurred twice rather than the
+concept, because "machine-specific" has no bounded spelling and a gate that tried would reject
+`/usr/bin/env`.
+
 ## F247 - the remedy I said did not exist, arriving from another project
 
 Shipped 3c689cd8, closing the second half of #45.
