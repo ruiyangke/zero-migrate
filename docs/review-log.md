@@ -8990,6 +8990,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F319 - asking what the fix would break found a second defect on the dialect that was supposed to be the control
+
+F318 measured the MySQL view-drop refusal and named three hazards for the fix, the sharpest being
+that `CreateView` never consults `replace`, so populating MySQL's views map could start failing legal
+`replace: true` migrations. Read the arm to confirm the hazard, at
+`crates/zero-migrate/src/render/fold.rs:2317`:
+
+    Op::CreateView {
+        name, schema, columns, query, materialized,
+        ..                       // `replace` is swallowed here
+    } => {
+        if tables.contains_key(name) { return Err(FoldError::DuplicateTable(name.clone())); }
+        if views.contains_key(name) { return Err(FoldError::DuplicateView(name.clone())); }
+
+It is real. And it carries an implication the hazard framing had hidden: PostgreSQL ALREADY populates
+its views map, so PostgreSQL should already be failing this. Measured, and it is:
+
+    failed to project pending schema after envelope "view_replace": fold: view `view_drop_active` already exists
+
+`replace` is the documented way to change a view's body, it is on the public surface as
+`view(name).create({ replace: true })`, the renderer emits `CREATE OR REPLACE VIEW`
+(`render/renderer.rs:566`), and `dialect-table.ts:73` marks the base variant portable on all three
+engines. An author following the documented surface is refused at planning.
+
+### The pair, which is the actual finding
+
+    dropView across deploys      MySQL FAILS (#207)    PostgreSQL works
+    createView replace across    MySQL works           PostgreSQL FAILS (#208)
+
+Each dialect has exactly one of the two, and MySQL is right about `replace` only by accident of being
+wrong about the catalog: its map is empty, so the missing `replace` check costs nothing. Populating
+that map to fix #207 converts the MySQL replace arm into the PostgreSQL failure. So #208 has to land
+first or in the same change - fixing #207 alone trades one defect for another on a dialect that
+works today.
+
+That coupling is why both dialects' arms sit in one file rather than in a MySQL test and a PostgreSQL
+test. Split apart, each file looks like a single-dialect quirk and the constraint on the fix
+disappears.
+
+### The method note
+
+F318 recorded the hazards as things to handle WITH the fix. Going one step further - asking not "what
+might this break" but "what does this predict about the dialect that already has the fixed state" -
+turned a speculative hazard into a measured defect. The control arm from F318, PostgreSQL, was the
+one carrying it. A dialect used as a control is not thereby verified; it is just untested in a
+different direction.
+
+### The probe that measured nothing
+
+The first attempt came back with:
+
+    ownership violation: op 0 targets table "view_drop_items" owned by <unregistered>
+    (deploying app is "app_mysql_view_drop"); an app may only migrate tables it owns
+
+which is the ownership gate, not the fold - the replacing migration's SELECT targets the table, and a
+second deploy carries no adoption for it, so an empty registry is refused before the fold runs. A
+rejection is not evidence for the rejection you were looking for. The kept tests pass an explicit
+registry naming both objects.
+
+VERIFIED by running: both error texts, both dialects on both authored migrations, and the ownership
+trap. VERIFIED by reading: the fold arm, the renderer line, the dialect-table row. Host suite 144
+tests / 144 pass / 0 fail / 0 skipped, zero skip banners.
+NOT VERIFIED: SQLite on either operation - untested, and the dialect table calls both variants
+portable there, so it plausibly carries the PostgreSQL behaviour on `replace` and needs checking
+before either fix is called complete. Whether the `replace` fix belongs in the fold or a layer above.
+
 ## F318 - the MySQL view drop is measured, and the two control arms are what turn it from a symptom into a diagnosis
 
 F317 predicted, from reading four sites, that dropping a view an applied migration created would be
