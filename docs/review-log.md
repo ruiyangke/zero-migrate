@@ -8990,6 +8990,38 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F262 - one function that descended legs in its base and not in its supplement
+
+Part of #80, fifth of six. Five fixed, one open.
+
+`IrAuthor::resolved_touched_tables` (render/lower.rs) builds the pending-contract interlock set in
+two parts. The base, `MigrationIr::touched_tables`, descends `Op::Dialectal` and always has. The
+supplement bolted on after it - which resolves a `dropIndex` that omits its owning table, either
+to the live owner or to a fail-closed unknown sentinel - matched `Op::DropIndex` at the top level
+only. So the two halves of one function disagreed about whether a leg counts.
+
+RED, a differential between the same op at the top level and inside a leg:
+
+    left:  []
+    right: ["\0__zero_migrate_touches_unknown__"]
+
+NO DIRECTION TO CHOOSE HERE, which is what makes it the easiest of the six. The function is an
+associated `fn(ir, live)` with no dialect parameter, so selecting a leg is not expressible. The
+base it extends already claims every leg's tables, and over-claiming a touched table costs a
+conservative interlock while under-claiming loses one. Structure and failure direction agree.
+
+The oracle is a differential rather than the sentinel's spelling, which keeps the test off a
+`pub(crate)` constant and off any assumption about how an unresolved owner is represented - it
+only asserts the wrapper changes nothing. The RED's printed sentinel is incidental; the assertion
+never names it.
+
+DEFENSE-IN-DEPTH, stated plainly rather than dressed up. The function's own doc records that a
+bare-name `dropIndex` is already rejected at validate on the production path, so this arm serves
+callers that lower without the validator. Fixed because a function whose two halves disagree is
+the shape that later gets copied, not because a user is reaching it today. Five walkers in, that
+is the third instance of the same shape: F260 had the load gate and the registry disagreeing,
+F262 has one function disagreeing with itself.
+
 ## F261 - a safety refusal a wrapper walked past, and a test that passed for the wrong reason
 
 Part of #80, fourth of six. Four fixed, two open.
