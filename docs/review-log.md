@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F364 - DECISION on #60: the live path becomes the only architecture, and the lint moves onto it first
+
+Both opinions reconciled - one codex read-only pass and my own reading plus the measurement in F363.
+They agree on the gap and on the direction.
+
+DECIDED: option (b), STAGED. Repeated `admit` becomes the sole architecture and `docs/policy.md` is
+rewritten around `effective_policy_from_charter_layers` - but the creatable-escape check moves onto
+the live path BEFORE any of the trusted algebra is deleted, not after.
+
+### The ordering is the decision, not the destination
+
+Deleting first would remove a check that production has already lost, and F363 measured that loss as
+reachable. So: land the live check, then the docs, then removal.
+
+### The live-path error variant already exists and is dead
+
+VERIFIED BY ME: `ComposeError::CreatableEscapesMandatoryInject` (compose.rs, in the ComposeError enum)
+is documented as "The DRAFT's `core.create_table` granted scope is NOT `⊑` a mandatory charter
+inject's scope" and is constructed NOWHERE in the workspace. Only its `FinalizeError` twin is
+constructed, and only from `finalize_charter`.
+
+An error variant written for the live path, never constructed, sitting beside a comment saying the
+check was "moved here from admit" - the orphan corroborates the move. It is also the obvious home for
+the restored check, so the repair does not need a new error shape.
+
+### What the second opinion added that I did not have, and had verified
+
+Do NOT port only this lint. `finalize_charter` also runs (1) all-pairs inject/inject conflict checks
+and (2) inject-vs-validate contradiction across the MERGED layers (compose.rs:1114, :1138). Live
+`admit` runs `check_inject_collisions(&charter_injects, &draft_injects)` (boundary.rs:82) - charter
+against DRAFT.
+
+VERIFIED BY ME that those are the two shapes. NOT MEASURED, and I am not asserting it: whether that
+difference leaves a second real gap. Folding layers through `admit` compares each new layer against
+the accumulated charter, which covers layer-against-layer transitively; the case it plainly does not
+cover is a conflict WITHIN one layer, most importantly the root, which never passes through `admit`
+as a draft at all. That is an audit item with a named suspicion, not a finding.
+
+### Why not the other two options
+
+  - (a) adopt the documented algebra: `overlay` may LOOSEN, while production promises every later
+    layer is narrow-only. Adopting it would change product semantics to fix a docs problem.
+  - (c) keep both and document which is live: preserves two security architectures side by side, and
+    that split is precisely what let a check move off the live path unnoticed.
+
+### Not built here
+
+The turn ended at the decision. Nothing was implemented, and the tree is clean. The repair sequence
+is: live check using the dead `ComposeError` variant, a regression through
+`effective_policy_from_charter_layers` using F363's charter verbatim, then docs, then audit the two
+finalize-only checks, then removal.
+
 ## F363 - #60 is not a docs divergence: a safety lint was moved onto a path production never calls
 
 #60 was filed as "the docs recommend a composition path the product does not use". That is true, and
@@ -9005,7 +9057,11 @@ it is the smaller half. Verifying its premises turned up a REACHABLE gap.
   - The `CreatableEscapesMandatoryInject` lint's only test really does restrict a charter against
     ITSELF - `restrict(root.as_trusted(), root.as_trusted(), &reg)` at compose_oracle.rs:1224 - and
     its own comments admit the real precondition could not be constructed. #60 recorded this as
-    reported-not-verified; it is now verified.
+    reported-not-verified; the SHAPE is now verified.
+    CORRECTED by F364: calling that test's proof "manufactured", as this entry first did, overstates
+    it. The bad root parses successfully on its own, and restricting it against itself preserves both
+    the create grant and the mandatory inject, so the finalizer does observe the real bad condition.
+    The test's surrounding prose is wrong; its assertion is sound.
 
 ### What the lint actually guards, and the comment that gives the game away
 
