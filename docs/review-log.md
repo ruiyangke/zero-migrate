@@ -8990,6 +8990,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F271 - eleven green runs leak nothing, and two of my own claims from an hour ago were wrong
+
+Correction to F270, below, written one turn earlier. The method it proposed was right; the two
+leads it asserted were not, and executing the method is what showed it.
+
+F270 ended with a specific instruction: "run each PG test target individually with the count before
+and after, and record the delta per target ... that is ~30 cheap runs and it converts this from a
+32-file refactor into a named list." Done. The list is empty.
+
+TEN PG TARGETS, each run alone with the schema count taken immediately before and after:
+
+    declarative_require_rls_pg      85 -> 85   delta=0   (5 passed)
+    fts_index_name_truncation_pg    85 -> 85   delta=0   (1 passed)
+    index_exact_name_shape_pg       85 -> 85   delta=0   (4 passed)
+    index_name_scheme_alias_pg      85 -> 85   delta=0   (4 passed)
+    pg_declarative                  85 -> 85   delta=0   (2 passed)
+    pg_project_lock_grant           85 -> 85   delta=0   (6 passed)
+    pg_scenarios                    85 -> 85   delta=0   (45 passed)
+    pg_status_project_lock          85 -> 85   delta=0   (2 passed)
+    timeout_budget_pg               85 -> 85   delta=0   (7 passed)
+    truncated_identifier_pg         85 -> 85   delta=0   (1 passed)
+
+Then the CLI host suite, 135 tests against live PostgreSQL and MySQL: 85 -> 85, delta 0.
+
+Seventy-seven Rust tests plus 135 host tests, eleven measurements, every delta zero.
+
+=== THE TWO CLAIMS OF MINE THAT THIS KILLS ===
+
+FIRST, the lead. F270 said the proj_/meta_ pair is 65 of the 85 and "the 36 proj_ entries match the
+session's growth exactly", then named `token()` and the ten files that copy it. The arithmetic was
+right and the conclusion was wrong: those ten targets are exactly the ones measured above, and not
+one of them leaks. I had reasoned from the SHAPE of a name to the identity of its producer, which
+is the same move as reading a heading instead of a body.
+
+SECOND, and worse, a measurement I never took. F270 states the count "grew by 36 - during a session
+in which every suite run was GREEN". I never measured the count at the start of this session. The
+49 comes from the ticket, recorded at commit f0613c9 in an earlier session; the 85 is mine from
+today. Everything between those two points is unobserved, and I wrote it up as though I had watched
+it happen. That is an inference wearing a measurement's clothes, in the entry where I was
+criticising exactly that habit.
+
+=== WHERE THIS LEAVES #50, honestly ===
+
+CONFIRMED: 85 schemas exist that nothing cleans up.
+NOT REPRODUCIBLE from any green run tested - eleven of them, covering every target that builds the
+dominant proj_/meta_ name shape plus the whole host suite.
+UNKNOWN: when they accumulated and from what.
+
+The remaining hypotheses, none tested: red or interrupted runs (the ticket's original panic idea,
+still unrefuted and now the strongest survivor); targets not in the ten; or accumulated debris from
+INVESTIGATION rather than from suites. The ticket's own evidence supports the third more than I
+credited - `s1`-`s5` "holding rename fixtures", `zm_manual_probe2_migrations`,
+`zm_show_mslua0qk_migrations` do not look suite-generated, and the ticket already records that a
+#111 investigation agent created `chk_probe_a1`/`chk_probe_a2` by hand. If most of the 85 is
+agent debris from sessions like this one, then the suites are largely innocent and the fix is a
+habit rather than a Drop guard.
+
+WHAT WOULD SETTLE IT, and is cheap: take the count at the START of a session and again at the end.
+One number at each end distinguishes "the suites leak" from "investigation leaks" without touching
+a line of test code. I did not have the first number today, which is precisely why this entry
+exists.
+
 ## F270 - the schema leak is real, still growing, and not the shape the ticket describes
 
 #50 re-measured and re-scoped. No fix yet, and the reason the fix did not ship is that the
