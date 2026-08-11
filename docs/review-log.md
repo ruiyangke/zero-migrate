@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F263 - the last walker, and the one where my leading candidate was wrong
+
+Closes the fix half of #80. Six of six production non-descenders now descend.
+
+`validate_partition_recording` (model/validate.rs) replays a migration to check partition
+parent/child state, key coverage by PK/UNIQUE/exclusion indexes, collapse nullability and bound
+totality. It walked the top level only, so a `createPartition` authored inside `dialect({ ... })`
+was never recorded and never checked - the load gate passed a migration it had not validated.
+
+THE RULE TOOK A SECOND OPINION, and my leading candidate was refuted. I had proposed validating
+EVERY leg SEPARATELY under its own dialect, on the grounds that `validate_dialectal_op`
+(validate.rs:3858) is the in-file precedent and does exactly that. A read-only codex pass showed
+why that precedent does not transfer: `validate_dialectal_op` has no history accumulator. It
+establishes "every authored inner op is locally legal", not "every leg is a valid recording".
+Partition recording is stateful across the whole migration, and the closer precedents are the
+other stateful walkers - and the lowerer itself, which creates one `PartitionLowerState` before
+the root loop and passes it through the selected leg's inner ops (lower.rs:3305, :4104, :4111).
+
+So the answer is the SELECTED leg, replayed INLINE through the same accumulator. Three properties
+force it together, and the third is the one that killed my candidate:
+
+  - Legs are MUTUALLY EXCLUSIVE, so pooling every leg into one accumulator compares siblings no
+    target creates together. False refusal on overlapping bounds; false accept when two legs
+    jointly supply a totality no single target has.
+  - The dialect is ALREADY load-bearing here, not decorative: an unknown parent is tolerated on
+    PostgreSQL and refused elsewhere (validate.rs:3443).
+  - A top-level parent must remain visible to a child inside a leg. Fresh per-leg state loses it,
+    and then PostgreSQL silently drops a malformed child while SQLite refuses a valid one. Even
+    cloning the prefix per leg is not enough, because later top-level ops can complete a
+    collapse's totality.
+
+Implemented as a prelude that resolves each root op to its effective slice while carrying the
+OUTER op index, so the ~200-line match body is untouched. That index is not cosmetic: it keys the
+`ts_locations` diagnostics AND is stored in the recording state, so flattening and re-enumerating
+would have mislabelled every partition error.
+
+TWO-SIDED PROOF, both env-gated so no file was reverted:
+  restoring the top-level-only walk failed exactly the two arms that need descent - the
+    selected-leg orphan, and the top-level-parent-plus-leg-child pair;
+  unioning every leg failed exactly the control that pins SELECTED - the unselected-leg orphan.
+Four arms, each failing under one mutation and not the other.
+
+The fixtures took three corrections before they were honest, each a real rule I did not know:
+`PartitionBoundValue` is an internally tagged enum so `[1]` is not a bound; a SQLite partitioned
+table needs `collapse: true`; and a collapse-affirmed list parent needs a DEFAULT child or the
+recording is not total. Each failure named the rule and the repair, which is what let a fixture
+that started wrong end up exercising the real path rather than being asserted around.
+
+WHAT #80 STILL HAS OPEN: two functions incomplete in the same way but with only test callers
+in-tree - `validate_ir_resolved` (validate.rs:6763), where nested DML never receives
+`live_columns`, and `migration_requires_approval` (zero-migrate-ir/src/policy_approval.rs:143),
+which resolves the wrapper's own policy object rather than each leg's. Both are
+production-compiled public API, so they are real for an embedder even with no in-repo caller.
+
 ## F262 - one function that descended legs in its base and not in its supplement
 
 Part of #80, fifth of six. Five fixed, one open.
