@@ -8990,6 +8990,64 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F288 - the collation drift I filed twice is a shipped feature with a passing suite I never opened
+
+#192 REFUTED and closed, no code change. It was filed as "a live COLLATE column reports drift no
+authored IR can clear", carried a decided fix shape, survived one severity correction from me
+yesterday, and is wrong at the premise. The check that would have refuted it at filing time was
+`ls crates/zero-migrate/tests | grep collation`.
+
+`crates/zero-migrate/tests/collation_introspection.rs` already exists and already asserts the exact
+report the ticket said had never been observed. Run just now, both dialects, live server:
+
+    running 2 tests
+    test postgres_exact_collation_is_introspected_drifted_and_rejected_for_composite_fk ... ok
+    test sqlite_exact_collation_is_introspected_drifted_and_rejected_for_composite_fk ... ok
+    test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.18s
+
+with zero "LIVE-DATABASE COVERAGE SKIPPED" banners. The PG arm (lines 240-250) asserts
+`AlteredObject { object: "column parent_tenant", field: "collation", expected: "pg_catalog.C",
+actual: "pg_catalog.POSIX" }`; the SQLite arm (143-150) asserts `expected` empty against `RTRIM`.
+
+Three things that kill the finding, in the order they matter.
+
+The expected side is a LIVE snapshot, not an IR projection. Both arms take it from the catalog
+before an out-of-band change and compare against the catalog after - `snapshot_schema(&session,
+&schema)` on PG, `backend.snapshot_schema_sqlite()` on SQLite. In that model, which is what the
+differ is built for, expected is `pg_catalog.C` and clears exactly. The ticket assumed the expected
+side must be IR-derived and reasoned from there.
+
+An IR-derived expectation is NOT always empty either. `render/lower.rs:7196` and its fold twin
+`render/fold.rs:2955` do `col.collation = metadata.collation` from `value_format_column_metadata`,
+whose `bytewise_catalog_collation` (`render/value_format.rs:1744`) returns
+`Some(ColumnCollationSnapshot { schema: Some("pg_catalog"), name: "C" })` on PostgreSQL and `None`
+elsewhere. The UUID pair at `lower.rs:7153` / `fold.rs:2936` is the same channel. So a value-format
+column's authored expectation already carries the `C` the ticket said nothing could produce. The
+sub-claim that `IrColumn` has no collation field is true, and `ir.rs:1498`'s `collation` is a
+per-INDEX-ELEMENT collation rather than a column one - but neither supports the conclusion, because
+the value reaches `ColumnSnapshot` from the value format rather than from a column field.
+
+The field is load-bearing, not inert. `render/lower.rs:3872` refuses a composite foreign key whose
+local and target column collations differ - "position {} exact catalog collation differs
+({local_collation} local vs {target_collation} target)" - on production lowering, reached from a
+live-derived `LiveSchema::from_catalog_snapshot`, which the addon performs at `verbs.rs:298`. The
+comparison the ticket called a defect is the mechanism protecting composite-FK storage contracts.
+`model/backfill.rs:35` states the design in one line: "intentionally catalog-facing rather than a
+portable collation hint."
+
+So decided fix shape (a) - an authorable `collation` on `IrColumn` and on the policy inject column -
+is not built. It would add an authoring surface to a field that is deliberately catalog-facing, and
+half of what it proposed (the `COLLATE "C"` rendering and its normalisation) already ships.
+
+What survives is narrow and is not this ticket: a plain `t.string()` given an explicit COLLATE out
+of band has no authoring spelling, which is the adopt story #79 and #94 already carry.
+
+On how this got two days: I filed it from a traced chain, corrected its severity yesterday from a
+reachability grep, and never once looked for a test named after the feature. The reachability
+correction was itself reasoning on top of an unchecked premise, which is why it read as rigorous and
+still pointed the wrong way. Grepping the call graph proves what calls a function; it does not prove
+what the function is for. The test corpus answers that, and it is cheaper to read.
+
 ## F287 - the masked-sentinel gap is unreachable from the engine, so it closes without a fix
 
 #90 CLOSED, no code change. The ticket wrote its own deciding test - "if only an out-of-band edit
