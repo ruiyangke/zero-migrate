@@ -8990,6 +8990,53 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F293 - #129's corrected rule is refuted by the case it was written for: the blocking exclusion is AUTO, not NORMAL
+
+#129's last open first step was "verify the pg_depend joins that name the three blocker classes".
+Running it refutes the rule the ticket had already recorded as its CORRECTED formulation. Measured
+against the live PostgreSQL 18.4 at 5434, six fixtures, each drop attempted inside a transaction that
+is rolled back:
+
+    case                          deptype  dependent                              DROP COLUMN
+    1 generated column            n        default value for column derived       BLOCKS
+    2 view selecting the column   n        rule _RETURN on view vw_v              BLOCKS
+    3 EXCLUDE, expression only    a        index ex_expr_lower_excl               BLOCKS
+    4 EXCLUDE, plain column       a        constraint ex_plain_note_excl          succeeds
+    5 EXCLUDE, plain + expression a, a     constraint AND index                   succeeds
+    6 nothing depends on it       (none)   -                                      succeeds
+
+`n` is DEPENDENCY_NORMAL, `a` is DEPENDENCY_AUTO. The refusal text for case 3, verbatim:
+
+    ERROR:  cannot drop column note of table ex_expr because other objects depend on it
+    DETAIL:  constraint ex_expr_lower_excl on table ex_expr depends on column note of table ex_expr
+
+THE RULE THE TICKET CARRIED: "refuse only when the dependency is the blocking kind (pg_depend NORMAL,
+which blocks a RESTRICT drop) AND no automatic path (AUTO/INTERNAL) to the same dependent exists."
+
+Case 3 is the defect this ticket exists for, and its dependency is AUTO with no NORMAL row at all. A
+rule keyed on NORMAL returns "safe to drop" for it - a FALSE NEGATIVE on precisely the case being
+guarded. And deptype cannot be rescued by inverting it either: cases 4 and 5 are also AUTO and do
+NOT block. Every exclusion case in this table is AUTO; deptype does not separate them at all.
+
+WHAT DOES SEPARATE THEM, offered as a hypothesis consistent with these six rows rather than as an
+established rule: the CLASS of the dependent object. Case 3's only dependent is the INDEX. Case 4's
+only dependent is the CONSTRAINT. Case 5 has BOTH. So a column that reaches an exclusion only
+through the index - which is what an expression-only element produces, because the expression lives
+in the index - blocks, while a column the CONSTRAINT itself names is auto-dropped with the whole
+constraint. That reading also explains case 5 without a special case: the constraint row is present,
+so the constraint goes, and the index goes with it.
+
+I am NOT promoting that to the rule. Six fixtures on one server version is enough to refute the
+NORMAL-keyed rule and not enough to establish its replacement - the F168 splits it would also have to
+explain were not re-run here, and INTERNAL dependencies do not appear in this table at all.
+
+WHY THE ORIGINAL RULE LOOKED RIGHT. It was derived from the correct observation that case 5 drops
+cleanly, and from the reasonable-sounding principle that PostgreSQL blocks on NORMAL and cascades on
+AUTO. That principle is true of what NORMAL means and false as a way to predict this refusal, because
+the exclusion's dependency on its own index is AUTO regardless of whether dropping the column can
+take the index with it. The ticket's own instruction - verify the joins before building - is what
+caught it, one step before code that would have shipped a guard blind to its motivating case.
+
 ## F292 - #129's placement rests on one of its two reasons; the other is SQLite-scoped and cannot bear on a PostgreSQL-only defect
 
 #129 asked for exactly this before any code: "re-check the placement claims above, which no second
