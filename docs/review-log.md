@@ -8990,6 +8990,55 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F321 - the guard everyone would reach for first does not work either, and a consumer had been told it was untested
+
+Three entries running have closed with `ifExists` listed as unchecked, and it was named as untested
+in both messages to zeroship - once as a candidate workaround. Measured now:
+
+    failed to project pending schema after envelope "view_drop_guarded": fold: view `view_drop_active` does not exist
+
+Identical to the unguarded refusal but for the envelope name. The guard changes nothing.
+
+The reason is the same shape as the `replace` defect in F319. `crates/zero-migrate/src/render/fold.rs:2348`
+destructures with `..`, which swallows `existenceGuard` exactly as the create arm swallows `replace`:
+
+    Op::DropView { name, .. } => {
+        if views.remove(name).is_none() {
+            return Err(FoldError::MissingView(name.clone()));
+        }
+    }
+
+A layer above does exist to absorb a guarded op the fold refused
+(`crates/zero-migrate-node/src/lower.rs:628-644`), and it hardcodes `NotSatisfied` for MySQL, so
+there is no second chance on this dialect. Two independent reasons, either sufficient.
+
+### Why this was worth spending an iteration on
+
+It closes a loop rather than opening one. `ifExists` was offered to a downstream consumer in
+ZERO-MIGRATE-2026-08-11-028 as workaround (3), explicitly flagged as untested, with an offer to
+measure it if it mattered. Leaving it flagged indefinitely would have been the same as recommending
+it: a reader in a hurry takes the list and tries the cheapest item. It is now withdrawn in -030 with
+the measurement attached.
+
+The general form: an unverified item repeated across enough entries stops reading as a caveat and
+starts reading as a footnote. Three repetitions was already too many.
+
+### The area as it stands
+
+                                      MySQL          PostgreSQL     SQLite
+    dropView across deploys           FAILS (#207)   works          works
+    dropView ifExists across deploys  FAILS          not tested     not tested
+    createView replace across         works          FAILS (#208)   FAILS (#208)
+
+The guarded row is measured on MySQL only. PostgreSQL and SQLite have no defect for the guard to
+rescue there, so the cells are uninteresting rather than merely unrun - but they ARE unrun, and if
+the #207 fix ever changes the guarded path they become worth filling.
+
+Host suite 146 tests / 146 pass / 0 fail / 0 skipped, zero skip banners.
+
+NOT VERIFIED: the two guarded cells above; whether the divergent SQLite and PostgreSQL wrapper texts
+from F320 should be unified, still deliberately unfiled.
+
 ## F320 - the untested third dialect carried the defect, and reports it in words the other one does not use
 
 F319 closed with SQLite untested on both operations and a prediction that it plausibly carried the
