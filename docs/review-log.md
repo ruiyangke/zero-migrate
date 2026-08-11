@@ -8990,6 +8990,45 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F267 - the duplicate package name has no resolution path, and the symlink says so
+
+Closes #72 VERIFIED-NO-CHANGE. No code, no ignore entry, no comment edited.
+
+The finding was real as stated: `sdks/migrate/package.json` carries `"name": "zero-migrate"`, the
+same name as the published package at `packages/zero-migrate`. Two things decide whether that
+matters, and both were measured rather than reasoned:
+
+  pnpm-workspace.yaml globs `packages/*` and `crates/zero-migrate-node`. `sdks/` is in NEITHER, so
+  the stub cannot become a workspace member.
+
+  What pnpm actually linked:
+
+      $ ls -l packages/zero-migrate-cli/node_modules/zero-migrate
+      lrwxrwxrwx ... zero-migrate -> ../../zero-migrate
+
+  The consumer resolves the REAL package. That is the artifact answering the question, not a
+  reading of the globs - the same distinction this log has been insisting on all day.
+
+And `git grep sdks/` over tracked files returns exactly one hit, the `.gitignore` entry itself. No
+tracked file references the directory by path.
+
+NOTHING TO SHIP. The `.gitignore` comment already does the whole job a comment can do here: it
+names the collision, quotes the stub's `0.0.0-stub` version, records that two commits swept it in
+via `git add -A` and that the entry exists to stop a third, and says outright that whether the stub
+should exist at all is a separate open question the entry does not answer. Adding to that would be
+noise, and the earlier pass that wrote it had already done the thinking.
+
+DELIBERATELY NOT DONE: deleting the stub. It is an untracked file in someone's working copy that
+the comment says satisfies a `file:` link in some checkouts. It is not this repository's to remove,
+and removing it would be a destructive act taken on inference about a developer's local setup.
+
+THE ONE CONDITION THAT WOULD MAKE IT DANGEROUS, recorded because nothing enforces it: if
+`pnpm-workspace.yaml` ever grows a glob covering `sdks/`, the stub becomes a workspace member
+claiming a name the real package already has, and the link above flips silently. That is a
+documented condition rather than a guard, on purpose - a gate over a local untracked file would be
+protection nobody asked for, and today's own rule is that an unproven guard is worse than a
+documented condition because it reads as protection.
+
 ## F266 - I closed a ticket with a claim its neighbour had already measured false
 
 No code changed. A correction to the closing note I wrote on #80 an hour earlier, caught by reading
