@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F294 - the discriminator is the INTERNAL edge F293 did not cover, and it refutes F293's own hypothesis
+
+F293 refuted #129's recorded rule and offered a replacement HYPOTHESIS - that the dependent's CLASS
+separates the cases, an index dependent blocking where a constraint dependent does not - explicitly
+marked as consistent-with-six-rows rather than established. Running the two F168 cases it had not
+covered kills it, and the same run supplies the real discriminator.
+
+MEASURED, PostgreSQL 18.4, same method - drop attempted inside a rolled-back transaction:
+
+    case                            column's dependent          that index's owners                 DROP
+    7 partial index PREDICATE       a  index pi_b_idx           a col a, a col b                    allows
+    8 index EXPRESSION KEY          a  index ie_expr_idx        a col c, a table ie                 allows
+    9 gist EXCLUDE over expression  a  index ex_gist_..._excl   a col hi, a col lo,
+                                                                i constraint ex_gist_..._excl       BLOCKS
+    9b same table, drop `note`      (none)                      -                                   allows
+
+F293's hypothesis said an index dependent blocks. Cases 7 and 8 have an index dependent, deptype
+AUTO, and drop cleanly. The hypothesis is refuted by the first two cases it was not tested against,
+which is why it was not promoted.
+
+THE DISCRIMINATOR IS THE `i` (DEPENDENCY_INTERNAL) EDGE FROM THE INDEX TO A CONSTRAINT. #129 listed
+INTERNAL as "does not appear in this table at all" and therefore untested. It appears here, and it is
+the answer. A bare index (cases 7, 8) has no constraint owner, so PostgreSQL auto-drops it with the
+column. An exclusion's index (case 9) is INTERNALLY owned by its constraint, so auto-dropping the
+index would orphan the constraint, and PostgreSQL refuses instead.
+
+ONE RULE FITS ALL NINE FIXTURES ACROSS F293 AND F294:
+
+    column has a NORMAL dependent (generated column, view)           -> REFUSED
+    column has an AUTO dependent that is a CONSTRAINT                -> allowed (constraint auto-drops)
+    column's only AUTO dependent is an INDEX owned by a constraint   -> REFUSED
+    column's only AUTO dependent is an INDEX with no constraint owner-> allowed
+    column has no dependents                                         -> allowed
+
+That explains F293's cases 4 and 5 without a special case: a plain-column exclusion element gives the
+column an AUTO edge to the CONSTRAINT itself, so the constraint goes and its index goes with it. An
+expression-only element gives the column an edge only to the INDEX, and that index is constraint-
+owned, so the drop is refused. The mixed case has both edges, and the constraint edge wins.
+
+STATUS OF THIS RULE: it now explains every case measured in F168, F293 and F294 - nine fixtures
+covering NORMAL, AUTO and INTERNAL - which is materially stronger than what it replaces. It is still
+one server version, and it is still a rule inferred from cases rather than read off PostgreSQL's
+dependency-walk source. Before it becomes a guard it wants the fourth row exercised deliberately
+(a constraint-owned index reached only through a predicate, if that shape is constructible) and a
+second major version.
+
+WHAT THIS SEQUENCE COST AND BOUGHT. Three rules have now been proposed for this guard: "an EXCLUDE
+whose expression reads the column blocks" (F168, too broad), "refuse when the dependency is NORMAL"
+(refuted by F293, misses the motivating case), and "the dependent's class separates them" (refuted
+here, misses two F168 cases). Each was plausible, each was written down as corrected, and each fell
+to the next measurement. The guard has not been built, which is the point - the ticket's instruction
+to verify the joins before building has now paid for itself twice, and the third rule is the first
+one that was tested against cases chosen to break it rather than cases that inspired it.
+
 ## F293 - #129's corrected rule is refuted by the case it was written for: the blocking exclusion is AUTO, not NORMAL
 
 #129's last open first step was "verify the pg_depend joins that name the three blocker classes".
