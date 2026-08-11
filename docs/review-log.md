@@ -8990,6 +8990,51 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F339 - #197's soft-return premise is now RUN rather than read, and a wrong probe nearly refuted it
+
+#197 argues for making the async verbs mirror the sync ones, and its footing is that soft-returning is
+a CONVENTION the surface already keeps rather than one example. That footing was a code read. The
+ticket said so: "I did NOT execute `loadVerify` with a malformed envelope to watch it resolve rather
+than throw ... the earlier genArtifacts claim in this ticket has the same status."
+
+Executed against the built addon:
+
+    loadVerify malformed-json          RESOLVED ok=false error=malformed IR envelope: key must be a string at line 1 column 3
+    loadVerify valid-json-wrong-shape  RESOLVED ok=false error=malformed IR envelope: unknown field `not`, ...
+    loadVerify empty-string            RESOLVED ok=false error=malformed IR envelope: EOF while parsing a value at line 1 column 0
+    genArtifacts malformed-envelope    RESOLVED ok=false runtimeJson=undefined error=schema-emit policy charter failed to load: ...
+
+The convention is real on both fallible sync verbs. The footing survives.
+
+PRECISION THE RESULT DOES NOT CARRY, and the ticket now says so: the `genArtifacts` probe passed
+`charterLayers: []`, so it resolved on a MISSING-CHARTER failure rather than on the malformed
+envelope. Still an ordinary failure soft-returning, which is the property under test, but not the arm
+I aimed at. `gen_artifacts_from_a_malformed_envelope_fails_soft` at
+crates/zero-migrate-node/src/api.rs:466 covers that arm and I have read it, not run it alone.
+
+THE PART WORTH KEEPING. My first probe called `addon.loadVerify(envelope)` with ONE argument; the
+export takes FIVE (bridge.rs:115-121, index.d.ts:531). Every case came back
+
+    THREW name=Error code=StringExpected msg=Failed to convert JavaScript value `Undefined` into rust type `String`
+
+which reads exactly like "loadVerify throws on malformed input" - refuting this ticket's premise and
+knocking the footing out from under its leading option. What separated the two was the CODE:
+`StringExpected` is a napi ARGUMENT-CONVERSION failure, not a domain error, and a domain refusal here
+would have said `malformed IR envelope`.
+
+This is the fifth instrument failure recorded today (F322 pipe status, F328 stale binary, F331
+priors-free fixture, F337 stale output file, this) and the FIRST that would have produced a confident
+NEGATIVE. The other four made something look fine that was not. This one made something look broken
+that was not, which is the more seductive direction when you are hunting for defects: a refutation
+feels like a finding. The generalisation is that a mis-built instrument does not fail safe in either
+direction, so the check is always "did this measure the thing I named", never "does the answer look
+like what I expected".
+
+NOTHING SHIPPED, deliberately. #197 remains DECISION-BLOCKED - it says "DO NOT ship any of these
+without the usual dual opinion", the change is a published-boundary contract break across nine verbs,
+and the consumer who prompted it explicitly declined it. This entry is evidence for whoever holds that
+decision, not the decision.
+
 ## F338 - #204 closed by deletion, and the split's value was the wording rather than the verdict
 
 `ColumnInfo::default_volatility` and its correlated subselect are removed. Both halves of the split
