@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F285 - I filed a finding this log already contained, and the answer was in a file I did not open
+
+#198 REFUTED as filed, by me, one iteration after I filed it. Withdrawn rather than worked.
+
+Yesterday's entry (F284) flagged a blocking sub-question before anything could be deleted: why is
+`unexpected_cfgs` silent about `feature = "introspect"` when the feature is not declared? That was
+the right question to insist on. Answering it took one grep, and the answer was
+`crates/zero-migrate/build.rs:16-24`:
+
+    // The `schema` module tree ... carries the live-catalog introspection-EXECUTION
+    // helpers (`schema::diff::read_live_schema` / `estimate_row_count`, the
+    // `SchemaError` driver wrapper) behind a never-declared `introspect` feature:
+    // they name `compio_postgres` (a driver out of scope for this standalone - the
+    // engine does its own introspection over the `driver::SqlSession` seam) and are
+    // permanently-off dead code. Declaring the cfg here keeps the build free of
+    // `unexpected_cfgs` warnings without resurrecting the feature or the PG driver.
+    println!("cargo::rustc-check-cfg=cfg(feature, values(\"introspect\"))");
+
+Every question in my ticket is answered there, in the comment's own words: "never-declared",
+`compio_postgres` "out of scope", "permanently-off dead code", and the check-cfg line sitting
+directly under the explanation so the silence is deliberate rather than an accident that would hide
+the next one.
+
+And this log already had it. Around line 17549 an earlier entry records the same finding, with the
+same `cargo build -p zero-migrate --features introspect` measurement and the same build.rs
+citation, plus a confirmation sharper than mine: grepping the built `libzero_migrate-*.rlib` finds
+the diff.rs warn strings ABSENT from the artifact while a comparable executor string is PRESENT.
+"The code is not in the product", measured against the built object, beats "it cannot compile"
+reasoned from a manifest.
+
+### The shape, which is not the one I named yesterday
+
+F284 called out a habit - reading a coherent path and reporting what it WOULD do as what it DOES -
+and prescribed treating "and this runs" as a claim needing its own evidence. That prescription was
+right and it would not have caught this. Here the facts were all true and all verified; what was
+missing was checking whether the finding was already known.
+
+Concretely: for #89 I ran step 3 of its own checklist, "search for a written decision - a recorded
+rationale outranks reasoning", and grepped the review log for `_masked`. For #198 I skipped that
+step entirely and grepped only the two Cargo.toml files. The identifier was `introspect`, the log
+is seventeen thousand lines, and one grep would have closed it before it became a ticket.
+
+So the rule to carry is narrower and more mechanical than yesterday's: before filing, grep the
+review log AND the build scripts for the identifier. Not "be careful" - a specific pair of files I
+did not open.
+
+### Cost, stated plainly
+
+One ticket filed and withdrawn, and roughly an iteration spent. Nothing was deleted, no `pub async
+fn` was removed, and #89's correction stands on its own since it used these facts to reach a
+conclusion that is still right. The guard that stopped this from becoming a bad change was the
+"establish why before deleting" line I wrote into the ticket - the process worked, one step later
+than it should have.
+
 ## F284 - I overstated #89's consequence, and the check that caught it found a dead feature gate
 
 Two things, and the second is only here because I went looking for the first.
