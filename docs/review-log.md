@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F362 - #79(B) shipped: MySQL drift sees a column type change it was blind to
+
+Built to F361's decided shape. `385b7166` added the contract and the live side;
+`8df6b300` added the expected side and wired the comparison.
+
+WHAT CHANGED, in behaviour: a declared `varchar(255)` against a live `varchar(64)` used to
+report agreement, because `mysql_canonical_type` folds both to the literal `text` and
+`render/lower.rs` canonicalises the EXPECTED side through the same function. Both sides now carry
+the parsed contract, and `column_data_types_eq` consults it.
+
+### Three things that had to be got right, each verified rather than assumed
+
+  1. THE EXPECTED SIDE COMES FROM THE RENDERER'S DECISION, not from `data_type`. It is derived from
+     `column_type_for_render` so it accounts for `ddl_type_override` and the unbounded-text
+     spelling exactly as the emitted DDL does. Reading the renderer's INPUT would have described a
+     column the engine never creates.
+  2. `column_type_for_render` takes an `inline_pk` flag, and passing it wrongly would have
+     false-drifted every primary key. VERIFIED BY READING: it is consulted only on the SQLite
+     rowid-alias leg (`sqlite_auto_increment_identity_pk`); the MySQL arm never looks at it, so
+     `false` is correct.
+  3. ONE PARSER SERVES BOTH SIDES, which is what makes them agree across spellings. The renderer
+     emits `DECIMAL(65, 30)` and MySQL stores `decimal(65,30)`; both parse to the same values. This
+     is the concrete reason F361 rejected comparing text - that pair, and `POINT SRID 4326` against
+     bare `point`, would each have been a reported difference on a database nobody touched.
+
+### The conservative edges, and why each is the safe direction for THIS consumer
+
+  - The contract is consulted only when BOTH sides carry one. A PostgreSQL or SQLite snapshot
+    carries none and neither does one written before the contract existed; comparing present
+    against absent would manufacture a difference that says nothing about the database.
+  - Two `Unknown` families decline to assert a difference. A differ that cannot establish a
+    difference should not report one. An existence guard asking the same question needs the
+    OPPOSITE answer - it must refuse to adopt - and that stays its own decision rather than being
+    folded into one shared verdict.
+
+### Gate
+
+117 targets, 2522 passed, 0 failed, 1 ignored, zero skip banners, fmt and clippy clean. The +4 over
+`385b7166`'s 2518 are the comparator's own tests. The suite passing WITH the comparison live is the
+evidence that mattered here: it exercises MySQL end to end, so a spelling the parser got wrong would
+have surfaced as false drift rather than as a quiet pass.
+
+### Still open on #79
+
+Half (A), authorized re-scoping of the probe's schema, is untouched. So is the guard half - the
+existence probe still does not carry the contract, and `column_shape_divergence` still asks the old
+question. This shipped the differ, not the guard.
+
 ## F361 - DECISION: a typed column contract, not a signature string. #79(B)'s decided shape is reversed
 
 #79 half (B) decided a "modifier-preserving physical-type SIGNATURE" - normalise two spellings to a
