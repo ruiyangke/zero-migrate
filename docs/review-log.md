@@ -9034,13 +9034,27 @@ Both injects survive in the composed Base layer, same scope, same column name, i
 one `timestamptz NOT NULL`, one `text` nullable. `finalize_charter`'s check (1) at compose.rs:1114 is
 for exactly this and does not run.
 
-CONSEQUENCE NOT MEASURED, and I am not asserting it: `ResolvedInject::for_object`
-(table_shape.rs:148) extends columns from each covering spec with no dedupe, which READS as
-producing a table carrying `created_at` twice. Whether that surfaces as a rejected CREATE TABLE, an
-earlier engine error, or something quieter was not run.
+CONSEQUENCE NOW MEASURED (this entry first left it unmeasured; the reading was right).
+`resolve_create_table_policy` under that charter, for a table the inject scope actually covers,
+returns:
 
-So the suspicion is upgraded to a gap in the check, and left as a suspicion about the blast radius.
-The inject-vs-validate half (compose.rs:1138) was not probed at all.
+    PROBE resolved columns = ["created_at", "created_at", "body"]
+
+The resolved table carries `created_at` TWICE - once `timestamptz NOT NULL`, once `text` nullable -
+because `ResolvedInject::for_object` (table_shape.rs:148) extends columns from each covering spec
+with no dedupe. That is a CREATE TABLE no database accepts. So the missing check does not merely
+skip a lint; it lets a charter produce a malformed table, and the failure surfaces at apply time
+against a real database instead of at compose time naming the conflicting injects.
+
+TWO BROKEN INSTRUMENTS ON THE WAY TO THAT, both mine, both caught before they were believed:
+  - The first fixture failed to deserialize (`table` for `name`, a nested type object where the
+    wire format wants a string). That one announced itself.
+  - The second SILENTLY measured nothing: it reported `["body"]` alone. The inject scope is
+    `schema: app_*` and the probe passed schema `app`, which the glob does not match, so no inject
+    applied at all. A clean-looking result that would have read as "the resolver dedupes" and
+    closed the finding the wrong way. Re-run against `app_main` it produced the duplicate above.
+
+STILL NOT PROBED: the inject-vs-validate half (compose.rs:1138).
 
 ## F364 - DECISION on #60: the live path becomes the only architecture, and the lint moves onto it first
 
