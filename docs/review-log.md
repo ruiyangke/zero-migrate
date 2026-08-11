@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F268 - the owns-nothing charter that could bite a user does not, and running it is what settled it
+
+Closes #47. One comment shipped; the product half is REFUTED by measurement.
+
+The ticket named two copies of `"policy_version = 1\n"` - a charter granting nothing, which owns
+nothing, so `GuardConfig::schema_scope` collapses to `Single("")` and permits no schema. It flagged
+the PRODUCT one first and said so explicitly: "it was not verified whether it produces a denial in
+practice ... Check that first - it is the one that could bite a real user."
+
+Checked by running it, not by reading. A one-table migration, no `--policy` anywhere:
+
+    $ node --import tsx src/cli-bin.ts lint --dir ./<tmp>/migrations --dialect postgres
+    lint 0001_create: ok (1 ops)
+
+No denial. And "ok" is load-bearing rather than incidental: cli.ts:852 computes it as
+`verdict.ok && previewError === undefined`, so the word proves the SQL preview rendered as well as
+the verdict passing. Had the bare charter denied the create, that line could not have printed.
+
+WHY THE FEAR WAS MISPLACED, and it is a distinction the ticket collapsed: the constant is a
+NO-INJECT charter, not an ownership charter. It reaches only `previewSql` via
+`loadLintPolicyFiles` (cli.ts:564); `addon.loadVerify`, which produces the lint VERDICT, never
+receives it (cli.ts:829-835). Charter layers shape what gets INJECTED into a create; confinement
+denial is a different question that this path never asks. The comment at cli.ts:53 already said
+this - "preview rendering is shaped by an explicit in-memory no-inject charter" - and it is
+accurate. "Owns nothing" and "injects nothing" are both true of this string and only the first one
+sounds alarming.
+
+WHAT WAS ACTUALLY WORTH FIXING was the test file, and not by replacing anything.
+tests/host/cli.test.ts imports `noInjectPolicy(schema)` - which grants `schema.cross_schema` over a
+LITERAL schema, so it owns something - AND keeps its own bare `NO_INJECT_POLICY`. Two charters,
+near-identical names, opposite semantics, one file. The bare one is correct where it is used
+because those arms preview and lint rather than applying against a live schema, but nothing said
+so, and the obvious "cleanup" is to swap one for the other. That silently changes what the arms
+assert in one direction and denies every create in the other. Now the constant's doc says which is
+which and why the difference is not cosmetic.
+
+THE SHAPE OF THE ERROR IN THE TICKET is one this log keeps recording: a real observation
+("this charter owns nothing"), a plausible consequence ("so lint denies every create"), and no
+check of whether the consequence holds on the path that actually runs. The observation was correct.
+The consequence was not, and one command settled it. That is the third time today a claim survived
+several restatements because nobody ran the thing.
+
 ## F267 - the duplicate package name has no resolution path, and the symlink says so
 
 Closes #72 VERIFIED-NO-CHANGE. No code, no ignore entry, no comment edited.
