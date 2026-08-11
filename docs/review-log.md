@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F307 - #30 has a precedent it does not cite: F133 answered this exact question for a sibling method and the answer was deletion
+
+F306 left #30 with two open questions - reachability and intent - and said the site carries no comment
+either way. It carries something better: a decided precedent on the SAME TYPE, which #30 does not
+mention and which changes what the ticket is asking for.
+
+F133 (closing #138) faced `BodyScopeDecisions::effective_destructive_ops` answering
+`DestructiveOps::Allow`, the loosest posture, while every sibling stub returned least privilege. The
+resolution was NOT to correct the value. It traced reachability from the one construction site, found
+the method unreachable, and DELETED it from the trait and both impls, moving the sole consumer to a
+concrete impl. Its own words: "changing `Allow` to `Forbid` would have been a correct value nobody
+reads", and "the permissive answer is unrepresentable rather than merely correct".
+
+THE SAME TRACE APPLIES, and its first two legs are already verified - one by F133, one by me now:
+
+    check_raw_view_body_text (guard/mod.rs:2726)      <- the ONE construction site, verified today
+      let decisions = BodyScopeDecisions { scope };
+      GuardWalker { cfg: &decisions }.check_body_text(body, raw)
+    check_body_text calls only check_node             <- verified by F133
+
+So the open question is precisely: does `check_node` reach the three `is_injected_shape` consumers at
+:1604, :1743 and :1758, all of which sit in RENAME COLUMN handling? A raw VIEW body is a SELECT, and
+an `ALTER TABLE ... RENAME COLUMN` inside one is not a shape PostgreSQL accepts - but that is SQL
+reasoning, not a read of `check_node`, and F133 got its answer by reading the path rather than by
+arguing from what SQL permits. That last leg is NOT done here.
+
+WHY THIS CHANGES THE TICKET RATHER THAN JUST INFORMING IT. #30 is titled "Inject-check function
+bodies instead of returning false", which presumes the right fix is to implement the method. If the
+trace lands where F133's did, the right fix is the opposite: remove the method from the body-scope
+impl so a body-scope decision object cannot answer an injected-shape question at all, and the
+constant stops being a silent permissive answer by becoming unrepresentable. Implementing it would
+add a real inject check on a path that never asks - the unexercised branch this review keeps finding.
+
+Note the asymmetry that makes this worth checking rather than assuming: F133's stub was permissive in
+the LOOSE direction (`Allow`), and this one returns `false`, which reads as "not injected" and is
+therefore ALSO the permissive answer - it is the value that lets a rename through. Two stubs on one
+type, both defaulting toward permission, both uncommented. That is a pattern about how this adapter
+was written, not two coincidences.
+
+NOT DONE: the `check_node` leg, and therefore no change to the code. #30 stays open, now with the
+precedent named and the remaining question narrowed to a single reachability read.
+
 ## F306 - #30's premise CONFIRMED, and the near-miss is the interesting part: the right claim about the wrong crate would have refuted it
 
 #30 said `BodyScopeDecisions::is_injected_shape` returns false unconditionally, and marked itself "not
