@@ -8990,6 +8990,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F322 - the view replace fix shipped, and the gate that nearly certified it was measuring nothing
+
+#208 fixed at a1fe1047. `crates/zero-migrate/src/render/fold.rs` binds `replace` and skips only the
+view-duplicate check; the table-collision check above it stays unconditional, because a view never
+replaces a table on any of the three engines.
+
+Mutating the new condition back to `if views.contains_key(name)` fails exactly the PostgreSQL and
+SQLite arms and leaves both MySQL arms green - MySQL correctly does not depend on the gate, since its
+empty catalog map gave the duplicate check nothing to trip on.
+
+### The gate that reported success while measuring nothing
+
+The first gate run was written as
+
+    cargo clippy --all-targets -- -D warnings 2>&1 | tail -5 ; echo "CLIPPY_RC=$?"
+    cargo test -p zero-migrate ... 2>&1 | tail -40 ; echo "TEST_RC=$?"
+
+Both RCs are `tail`'s. Both printed 0. The instruction not to pipe a gate through `head` or `tail`
+before reading `$?` exists in the standing rules and was written after this exact failure happened
+once before, and it still got written this way.
+
+What caught it was not the RC - it was the totals line: `targets=5 passed=17` against a known
+114-target, 2500-test baseline. A tail window of forty lines contains about five `test result:`
+lines, which is precisely what was counted. The instrument reported a number small enough to be
+obviously wrong, which is the only reason the wrongness surfaced. Had the suite been five targets
+big, the same broken command would have produced a plausible number and the fix would have been
+committed on it.
+
+The re-run, each stage redirected to its own file: FMT 0, CLIPPY 0 with zero output, TEST 0, 114
+targets / 2500 passed / 0 failed / 0 ignored, zero skip banners. Host suite 146 / 146.
+
+The generalisable form: a summarising instrument between a command and its exit code silently
+replaces the thing being measured. `$?` after a pipeline is the LAST stage's status, and every
+formatting convenience - `tail`, `head`, `grep`, `sort` - is a last stage that almost always
+succeeds. Check the magnitude of what an instrument reports against a known baseline, not only its
+verdict.
+
+### The fixture that asked PostgreSQL for something it forbids
+
+The first RED narrowed the view's projection from `(id, label)` to `(id)`. When the fold stopped
+refusing, PostgreSQL did:
+
+    migration mig_7n42DGM5TKmbsE96wDdjwq failed to apply: cannot drop columns from view
+
+`CREATE OR REPLACE VIEW` may append columns and never remove them. That is the database's rule, not
+this engine's, and the test was wrong rather than the fix. SQLite accepts the narrowing because it
+drops and recreates - so a SQLite-only run would have gone green on a fixture that blamed PostgreSQL
+for its own documented behaviour. The fixture now holds the projection and changes the predicate,
+asserting `pg_get_viewdef` rather than that nothing threw.
+
+That divergence is worth separating from the defect: narrowing a view legitimately works on SQLite
+and legitimately fails on PostgreSQL. Nothing is filed for it because both engines are correct.
+
+### What the consumer exchange added
+
+zeroship reported (ZEROSHIP-2026-08-11-235) that SQLite is their dev tier and PostgreSQL their
+deployed tier, so both failing cells were tiers they ship, and that their nine dev-vs-deployed
+harnesses could not see it: those assert the two tiers AGREE, and a defect both tiers share leaves
+the diff empty and every row green. Their observation, recorded here because the shape generalises -
+a differential harness is blind to anything its two sides share, and a dependency is the likeliest
+way for both sides to acquire the same defect without either side's code changing.
+
+NOT VERIFIED: whether anything besides the fold must learn about `replace`, notably the rollback
+inverse for `CreateView`. A read-only pass asking that was still running when this landed; #208
+records it as unverified rather than assumed closed.
+
 ## F321 - the guard everyone would reach for first does not work either, and a consumer had been told it was untested
 
 Three entries running have closed with `ifExists` listed as unchecked, and it was named as untested
