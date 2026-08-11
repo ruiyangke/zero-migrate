@@ -8990,6 +8990,37 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F334 - the PostgreSQL half I had flagged as unverified, measured; the projection matrix is now complete on all three dialects
+
+ZERO-MIGRATE-2026-08-11-037 told zeroship plainly that I had NOT measured the PostgreSQL half of the
+empty-priors branch end to end - my evidence there was the MySQL run plus reading a
+dialect-independent branch. F333 is the reason that mattered: SQLite shares the same branch and does
+not reach it, so "MySQL follows verbs.rs:303" is not evidence that PostgreSQL does.
+
+Measured now. An unguarded `dropView` of a view that was never created, through the CLI apply path:
+
+    with one prior applied   failed to project pending schema ...   (the fold refused)
+    with an empty history    (no such text; PostgreSQL names the relation itself)
+
+So PostgreSQL does follow the branch, and the matrix is complete:
+
+    SQLite       never projects, prior or not      refusal always comes from the database
+    MySQL        projects only when a prior exists  native IF EXISTS answers the empty case
+    PostgreSQL   projects only when a prior exists  the database answers the empty case
+
+Two of the three cells were inferred a few hours ago and one of those inferences was wrong. All three
+are now runs.
+
+The arms assert ERROR TEXT rather than failure, because every cell fails and only the wording says
+which layer refused. That distinction is what made F333 findable at all.
+
+Gates: host suite 150 tests / 150 pass / 0 fail / 0 skipped.
+
+PROCESS NOTE: the subagent budget for this session is exhausted (200 of 200), so the standing
+"one Opus agent plus one codex" split for decisions is down to codex plus my own analysis until the
+limit is raised. #213 is the first decision affected and is being handled that way, with the
+reduction stated rather than quietly absorbed.
+
 ## F333 - a consumer's hypothesis about my code was right in conclusion and wrong in mechanism, and measuring it found a second divergence
 
 zeroship's ZEROSHIP-2026-08-11-239 recorded a hypothesis they explicitly did not ask me to answer:
