@@ -8990,6 +8990,97 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F289 - the MySQL guard decision, where a second opinion reversed me and found a regression I would have shipped
+
+#79 DESIGN DECIDED, no code yet. The ticket asked to evaluate existence probes on MySQL, where
+`existence_probe::decide` has production call sites only at postgres/session.rs:719, :1053 and
+sqlite/mod.rs:604. Two questions were open. Both are now answered, and neither the way I was leaning.
+
+THE SPLIT WAS DEGRADED AND THAT IS WORTH RECORDING. The standing rule is one Opus agent plus one
+codex read-only job. The Opus half could NOT be dispatched - the session had spawned its 200-agent
+cap - so this was codex plus my own reading. I compensated by verifying every load-bearing claim
+codex made rather than adopting its report, which is what the rest of this entry is.
+
+(A) SCHEMA SCOPING: AUTHORIZED RE-SCOPING, not the fail-closed refusal I was drifting toward.
+
+I had reasoned that when `probe.schema()` differs from `cfg.project_schema` the MySQL backend should
+refuse, on the grounds that reading another database widens what the apply path touches. That is
+wrong, and one capability flag settles it. VERIFIED BY ME at render/renderer.rs:107:
+
+    SqlDialect::Mysql => match cap {
+        Capability::CrossSchemaDdl => true,
+
+Cross-database DDL on MySQL is deliberate. Lowering resolves the effective schema, binds the DDL
+renderer to it, and stamps that SAME schema into the probe, so the probe names the database the
+statement will actually run against. Refusing on inequality would therefore break legitimate
+cross-database guards and split MySQL from PostgreSQL, which already passes `probe.schema()` into
+its snapshot (session.rs:706). Using `cfg.project_schema` instead is worse than either: it probes
+the wrong database and can answer SatisfiedNoop for an object that does not exist where the DDL
+lands.
+
+The guard is a POLICY CHECK, not an equality test - and there is a specific reason equality is the
+wrong instrument. `Migration::existence_guard` is publicly constructible and is EXCLUDED from the
+per-migration checksum, so probe metadata is forgeable by a direct caller. What that argues for is
+checking the probe's schema against the effective policy scope and returning a typed error when it
+is not permitted, not comparing it to the project schema.
+
+(B) TYPE EQUALITY: a modifier-preserving MySQL physical-type signature gates SatisfiedNoop.
+
+Agreed with my own reading on two points and sharper on a third. Not `ddl_type_override` - it is
+documented emission-only and excluded from equality. Mirror F63's principle, key on the catalog
+datum. But the refinement matters: the signature belongs on the PROBE EXPECTATION as well as the
+snapshot, serde-defaulted, failing closed when an older probe lacks it, and the SAME signature must
+feed structural drift so the guard and the differ cannot disagree about the same column. My version
+put a MySQL arm in `column_shape_divergence` alone, which would have left exactly that disagreement.
+"Raw equality" also has to mean semantic equality, not byte equality: preserve length, capacity
+family, precision/scale, temporal FSP, enum members and signedness; normalise case and whitespace
+OUTSIDE quoted literals, since the current blanket lowercasing would fold enum literals together.
+
+*** THE BLOCKER, which I had not found and which would have been a REGRESSION: wiring a blanket
+MySQL probe call today would break the one op MySQL currently handles correctly. VERIFIED BY ME.
+The MySQL snapshot ends (backend/mysql/drift_sql.rs:619):
+
+    Ok(SchemaSnapshot {
+        tables,
+        ..Default::default()
+    })
+
+so `views` is EMPTY. And `decide_view` (render/existence_probe.rs:255) reads:
+
+    let present = live.views.contains_key(name);
+
+For a `dropView` guard (`GuardDir::IfExists`) an existing view therefore reads as ABSENT, returning
+SatisfiedNoop - the DROP is skipped and the migration journals completed with the view still there.
+`dropView` is the single op whose MySQL lowering carries a native `IF EXISTS` and works today. So
+the naive wiring converts a working op into a silent no-op over a live object. Views must be
+populated, or native handling explicitly retained, BEFORE any probe call is added; the constraint
+variants need the same audit. ***
+
+Ordering also has a constraint: the probe must run after the existing inflight refusal and before
+`record_started`, or a matching partial schema could auto-recover an ambiguous MySQL DDL attempt
+that the backend deliberately refuses.
+
+TWO OF THE TICKET'S OWN CLAIMS ARE NARROWED, both mine:
+
+"A re-run errors" was too broad. A completed identical migration is no longer pending, and after a
+failed MySQL DDL attempt the durable inflight marker blocks replay. The duplicate-object error
+arises on the FIRST pending, un-journaled guarded create or add against an existing object. The
+adoption defect is real; the blast radius sentence was not.
+
+The ticket's headline example does not currently do what it says. It claims a declared
+`t.string(255)` against a live `varchar(64)` would compare text-to-text and return SatisfiedNoop.
+Probe expectations are PostgreSQL-spelled - `character varying(255)`, per declarative.rs:9084 - and
+`mysql_canonical_type` matches `varchar(` while `parse_character_type_len` strips only `character(`,
+`char(` and `bpchar(`. VERIFIED BY ME by reading both. So that path false-FailDrifts rather than
+silently adopting. The silent-adoption hazard is real for `text` against a bounded VARCHAR and for
+decimal and datetime modifiers - it was the example that was wrong, not the concern.
+
+WHAT THIS COST AND WHY IT WAS WORTH IT: no code shipped this iteration. What shipped is a decision
+that reverses my leaning on (A), refines my shape on (B), removes a regression from the plan, and
+deletes two overstatements from my own ticket. The rule that produced it is the one that says get a
+second opinion before implementing, and it earned its keep on a question I would otherwise have
+answered confidently and wrongly.
+
 ## F288 - the collation drift I filed twice is a shipped feature with a passing suite I never opened
 
 #192 REFUTED and closed, no code change. It was filed as "a live COLLATE column reports drift no
