@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F295 - the fourth row holds, and a one-variable control isolates the INTERNAL edge as the cause
+
+F294 stated the rule and named what would test it: exercise the fourth row deliberately - a
+constraint-owned index reached ONLY through its predicate - and get a second major version. The first
+is done and it confirms the rule. The second cannot be done with the containers this repo ships, and
+that is recorded rather than glossed.
+
+The shape is constructible: an EXCLUDE whose KEY names one column and whose WHERE predicate reads
+another. Measured on PostgreSQL 18.4 (`PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1)`), drop attempted
+inside a rolled-back transaction:
+
+    10  EXCLUDE USING btree (other WITH =) WHERE (note IS NOT NULL), drop `note`
+        note's dependents:   a  index ep_other_excl
+        that index's owners: a  column note of table ep
+                             i  constraint ep_other_excl on table ep
+        ERROR:  cannot drop column note of table ep because other objects depend on it
+        DETAIL:  constraint ep_other_excl on table ep depends on column note of table ep
+
+    10b same table, drop `other` - the column the KEY names
+        other's dependents:  a  constraint ep_other_excl on table ep
+        ALTER TABLE                                                    <- allowed
+
+    11  CREATE UNIQUE INDEX pu_other_uidx ON pu (other) WHERE (note IS NOT NULL), drop `note`
+        note's dependents:   a  index pu_other_uidx
+        that index's owners: a  column note of table pu
+                             a  column other of table pu    (NO constraint owner)
+        ALTER TABLE                                                    <- allowed
+
+CASES 10 AND 11 ARE A ONE-VARIABLE CONTROL, and that is what this entry buys over F294. Both are an
+index whose PREDICATE reads the dropped column; both give that column a single AUTO dependency on the
+index and nothing else. The only difference is the `i` edge: case 10's index is owned by a
+constraint, case 11's is not. One refuses, the other allows. Nine heterogeneous fixtures made the
+INTERNAL edge the best explanation; this pair makes it the isolated one.
+
+Case 10b is the second control and closes the same table: the key-named column's dependency lands on
+the CONSTRAINT rather than the index, and it drops cleanly - rule row 2, on the same object, with the
+same constraint present.
+
+THE RULE, unchanged from F294 and now supported by twelve fixtures including a controlled contrast:
+
+    column has a NORMAL dependent (generated column, view)            -> REFUSED
+    column has an AUTO dependent that is a CONSTRAINT                 -> allowed
+    column's only AUTO dependent is an INDEX owned by a constraint    -> REFUSED
+    column's only AUTO dependent is an INDEX with no constraint owner -> allowed
+    column has no dependents                                          -> allowed
+
+WHAT REMAINS UNTESTED, and it is now the only stated gap: a second major PostgreSQL version.
+`docker-compose.test.yml:13` runs `image: postgres:18` and is the only PostgreSQL service in the
+file, so every measurement in F168, F293, F294 and F295 is 18.4. #38's notes cite a PostgreSQL 16
+result for a different question, so a 16 has been reachable at some point, but not from this compose
+file and not by me. Anyone promoting this rule to a shipped guard should re-run these twelve on one
+older major before trusting it, since dependency bookkeeping is exactly the kind of thing that gets
+adjusted between versions.
+
 ## F294 - the discriminator is the INTERNAL edge F293 did not cover, and it refutes F293's own hypothesis
 
 F293 refuted #129's recorded rule and offered a replacement HYPOTHESIS - that the dependent's CLASS
