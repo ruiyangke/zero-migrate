@@ -8990,6 +8990,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F344 - the structural validator has no dialectal hole, and the match arm that says otherwise
+
+Tested a hypothesis with a real failure mode behind it: an op hidden inside a dialectal leg
+that the validator never descends into would skip the whole authorization gate. F80 recorded
+that eight dialectal-leg walkers descend; this asked whether the authorization walk is one.
+
+### It is, and the coverage is stricter than I expected
+
+`crates/zero-migrate-ir/src/validate.rs` carries no `Op::Dialectal` reference at all - it
+handles `Expr::Dialectal` only. That is not the gap it looks like: the crate header says the
+policy validator and the op walk live engine-side, and they do.
+`crates/zero-migrate/src/model/validate.rs:4027-4045` opens `validate_op_authorized` with an
+unconditional early return handing every dialectal op to `validate_dialectal_op`
+(:3899), which:
+
+  - refuses a dialectal carrying no legs at all;
+  - refuses a NESTED dialectal in any leg, so the recursion cannot be driven deep;
+  - re-enters `validate_op_authorized` for every inner op of every present leg;
+  - and validates the `default` leg against Postgres AND SQLite AND MySQL (:3961-3974),
+    because a default leg can render on any target.
+
+So a dialectal op is authorized MORE than a plain one, not less. Hypothesis refuted.
+
+### What was actually wrong: the arm reads as the opposite of the truth
+
+At validate.rs:4688 `Op::Dialectal { .. }` sat at the end of a long `|`-chain of ops that
+genuinely need no further check:
+
+        | Op::PgRaw { .. }
+        | Op::Dialectal { .. } => Ok(()),
+
+A reader auditing "which ops skip authorization" greps this match and gets `Dialectal` in the
+skip list. That is false, and it is false in the direction that would stop someone
+investigating a real dialectal escape. Same class as F332, where a comment defending a stub
+named a fact that was not true.
+
+Fixed by splitting the arm out with the reason. No behaviour change - the arm is unreachable
+either way.
+
+### Proving "unreachable" rather than asserting it
+
+I did not want to write `unreachable` into a comment on the strength of having read one early
+return. Replaced the arm with `unreachable!("dialectal probe")` and ran the engine crate:
+
+    targets=104 passed=2197 failed=0
+    occurrences of "dialectal probe" in the output: 0
+
+Nothing reached it. That is EVIDENCE, not proof - the suite covering no path to an arm is not
+the same as no path existing - but taken with the unconditional early return at 4027 it is
+enough to state plainly. Probe reverted before the final gate.
+
+VERIFIED BY ME: every file:line above read directly; the probe run and its zero panics.
+NOT VERIFIED: that `validate_op_authorized` is the ONLY authorization entry point - I traced
+this walk, not every caller that might reach an op by another route.
+
 ## F343 - no dead public function in zero-migrate-ir, and two more ways the reachability grep lies
 
 Swept zero-migrate-ir for the #75 class - a shipped `pub fn` with no production caller.
