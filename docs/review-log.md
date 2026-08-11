@@ -8990,6 +8990,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F363 - #60 is not a docs divergence: a safety lint was moved onto a path production never calls
+
+#60 was filed as "the docs recommend a composition path the product does not use". That is true, and
+it is the smaller half. Verifying its premises turned up a REACHABLE gap.
+
+### The three filed premises, all now verified by me
+
+  - `restrict(`, `overlay(`, `finalize_charter(` and `as_trusted(` have ZERO call sites in any
+    crate's `src/`. Only their own definitions and `crates/zero-migrate-policy/tests/compose_oracle.rs`.
+  - Production composes at `crates/zero-migrate/src/model/table_shape.rs:761`
+    `effective_policy_from_charter_layers`: one layer goes to `effective_policy_from_charter_toml`,
+    more layers fold through repeated `admit`. Neither shape calls `finalize_charter`.
+  - The `CreatableEscapesMandatoryInject` lint's only test really does restrict a charter against
+    ITSELF - `restrict(root.as_trusted(), root.as_trusted(), &reg)` at compose_oracle.rs:1224 - and
+    its own comments admit the real precondition could not be constructed. #60 recorded this as
+    reported-not-verified; it is now verified.
+
+### What the lint actually guards, and the comment that gives the game away
+
+`compose.rs:1182 check_charter_creatable_lint` requires the charter's effective
+`schema.create_table` scope to be a subset of EVERY mandatory inject's scope. Otherwise a charter can
+create tables outside the region where its mandatory column is contributed - tables that escape a
+column the charter declares is not optional.
+
+Its call site carries this, at compose.rs:1167:
+
+    // (3) creatable-escape: ... (MED - moved here from admit). Because
+    //     admit later proves draft.create_table ⊑ charter.create_table, this charter-
+    //     side bound transitively bounds every admitted draft's creatable region.
+
+MOVED HERE FROM ADMIT. The transitive argument is sound only if the charter-side bound is checked
+somewhere. Its one caller is `finalize_charter`, which nothing ships. So the check was moved off the
+live path onto a dead one, and the reasoning that justified the move quietly stopped holding.
+
+### Measured, not inferred
+
+Composed this charter through the production entry point:
+
+    policy_version = 1
+    [[inject]]
+    scope = { include = ["app_*"] }
+    mandatory = true
+    columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+    [[grant]]
+    key = "schema.create_table"
+    value = true
+    scope = "all"
+
+`effective_policy_from_charter_layers(&[that])` returns Ok. A control charter with the create grant
+confined to `{ include = ["app_*"] }` also returns Ok, so the probe discriminates rather than
+accepting everything. A charter that can create tables anywhere while declaring a mandatory column
+only for `app_*` composes clean today.
+
+### Not yet decided, and deliberately not implemented here
+
+The repair direction follows - the check needs a home on the path that runs - but WHERE is a real
+choice (re-inline it in `admit`, or call the charter-side lint from
+`effective_policy_from_charter_layers`), and it interacts with #60's original docs question. The
+second opinion was dispatched and had not finished when this was written, so nothing was built. The
+reproduction above is exact; rebuilding it is a few minutes.
+
+ALSO SPOTTED: `compose.rs:1179` documents the lint as guarding `core.create_table`. The constant it
+reads is `CREATE_TABLE_KEY = "schema.create_table"` (compose.rs:55). The doc names a knob that is not
+the one checked.
+
 ## F362 - #79(B) shipped: MySQL drift sees a column type change it was blind to
 
 Built to F361's decided shape. `385b7166` added the contract and the live side;
