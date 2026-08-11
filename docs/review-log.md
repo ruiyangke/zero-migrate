@@ -8990,6 +8990,57 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F331 - #212 answered by tracing: the fixture was measuring a path no deployment takes, and my original reading was right
+
+F330 left the mechanism unnamed. Naming it took an instrument, not another read: a temporary
+`ZM_TRACE_VIEWGUARD`-gated `eprintln!` on the projection loop at
+`crates/zero-migrate-node/src/lower.rs:601` and inside the fold's `DropView` arm at
+`crates/zero-migrate/src/render/fold.rs:2398`, with the addon rebuilt so the host suite loaded the
+traced binary rather than the previous one.
+
+The first run of the absent-view arm printed NOTHING. That is not evidence on its own - Node's test
+runner can capture per-test stderr - so the next run was a positive control over every arm in the
+file, which printed 16 trace lines. The instrument works; the silence was real.
+
+Same migration, same database, one difference:
+
+    no priors        (no trace line at all)                                    -> ran
+    one prior        ZMTRACE fold-dropview name=view_drop_active present=false -> refused
+
+with the refusal reading
+
+    failed to project pending schema after envelope "view_drop_guarded":
+      fold: view `view_drop_active` does not exist
+
+So the pending-schema projection is skipped entirely for an empty history, the fold never sees the op,
+and MySQL's native `DROP VIEW IF EXISTS` answers. Add any prior applied migration - which is every
+real deployment - and the projection runs, the fold reports the view absent, and the MySQL guard leg
+at `:638` refuses exactly as I first read it.
+
+My reading of the three sites was correct all along. What was wrong was the FIXTURE: `applyOne(drop,
+database, driver, [])` passes an empty priors list, which measures a path no deployed application
+takes. The result looked like a refutation of the code and was really a statement about my test setup.
+
+This is the same family as F322 (a pipe made `$?` report tail's status) and F328 (a green host suite
+measuring a stale binary), and it is the more dangerous member: the other two produced obviously
+suspicious numbers, while this one produced a plausible pass that pointed the opposite way. The rule
+that catches it is not "read more carefully" - the reading was fine - it is that a green result from a
+fixture whose setup you have not interrogated is a claim about the fixture.
+
+TWO CONSEQUENCES:
+
+ZERO-MIGRATE-2026-08-11-030 STANDS. It told zeroship `ifExists` is ruled out as a workaround for the
+MySQL view drop, and that is correct. The correction I was one step from sending in F330 would have
+been wrong in the direction that costs a consumer work. Holding it was right, and the reason it was
+held - unable to name the mechanism - was the right reason.
+
+The empty-history skip now has its own arm. Nothing else in the suite recorded that a fixture without
+priors silently measures a different path, which is the trap that produced this whole detour.
+
+Gates: host suite 148 tests / 148 pass / 0 fail / 0 skipped against an addon rebuilt from this tree
+with the traces removed. The Rust sources are untouched by the final state - both trace edits were
+reverted with `git checkout` before the rebuild, and `git status` shows only the test file.
+
 ## F330 - the correction I was about to send a consumer was refuted by running it, and the mechanism is still unnamed
 
 Having fixed #207, I went to correct ZERO-MIGRATE-2026-08-11-030, which told zeroship that `ifExists`
