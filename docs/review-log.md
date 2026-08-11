@@ -9045,9 +9045,25 @@ measurement rather than an assumption. What was actually run for this change: `t
 host suite at 139/139, the mutation at 138/1, and `cargo clippy --all-targets -- -D warnings` RC=0 on
 the committed tree.
 
-NOT VERIFIED: a fresh `cargo test` on this exact tree. It is unaffected by construction and the
-construction is proven above, but the command did not run, and "unaffected by construction" is the
-shape of claim this log has had to retract twice today. Recorded as a gap rather than dressed up.
+GAP NOW CLOSED, and the way it closed is the point. The paragraph here used to read "NOT VERIFIED: a
+fresh `cargo test` on this exact tree ... unaffected by construction", left as a gap because that
+phrasing is the shape of claim this log has retracted twice today. Retrying the same four-crate
+invocation a fourth time would have been the definition of not learning, so the scope was SPLIT into
+pieces small enough to finish:
+
+    cargo test -p zero-migrate-ir -p zero-migrate-guard -p zero-migrate-policy   SMALL_RC=0
+    cargo test -p zero-migrate --lib      1131 passed; 0 failed                  LIB_RC=0
+    cargo test -p zero-migrate --tests    100 targets, 2191 passed; 0 failed     INT_RC=0
+                                          0 FAILED targets, 0 skip banners
+
+1131 + 2191 = 3322 over 101 targets, against the live databases with
+`ZERO_MIGRATE_REQUIRE_LIVE_DB=1`. Combined with `FMT_RC=0` and `CLIPPY_RC=0` from the third attempt,
+every stage of the gate has now reported on the committed tree - just not in one invocation.
+
+The earlier by-diff argument was sound and is now redundant, which is the preferable order: reason
+about scope when the measurement is unavailable, then take the measurement anyway when the machine
+frees up. A correct inference and a run command are not interchangeable, and only one of them can be
+wrong about something nobody thought to check.
 
 ## F313 - I filed a schema-leak finding and refuted it myself an hour later, having never run the one command that tested it
 
