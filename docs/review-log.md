@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F304 - #25's premise is refuted: the recorder has no down phase to un-ignore, and a grep collision is probably why it said otherwise
+
+#25 says authored `down()` is nearly free because the plumbing exists and is merely inert: "ops.ts:353
+already declares RecorderPhase = up|down and `__begin(_phase)` at :365 takes and ignores it, and
+recordUp produces ops." That reads as settled. It is wrong in every element, and I checked before
+designing on top of it because four consequential sub-questions were about to be decided on that
+floor.
+
+MEASURED, in packages/zero-migrate/src/ops.ts:
+
+  grep -rn "RecorderPhase" packages/ --include="*.ts"     -> no matches, anywhere in any package
+  grep -c "down" packages/zero-migrate/src/ops.ts         -> 0
+  export function __begin(): void                          <- line 363, takes NO parameter
+
+So there is no `RecorderPhase` type, no phase argument being ignored, and the word "down" does not
+occur in the recorder at all. This is not line-number drift - the ticket's :353/:365 are close to the
+real :363, and the file IS the recorder (`__begin`, `__abort`, `__drain`, `__pgPush` all live here).
+The content claims are false regardless of where the lines sit.
+
+WHERE THE CLAIM PROBABLY CAME FROM, since it is a mistake worth recognising again: the only symbol in
+that file matching a `recordUp` search is `recordUpdate` (ops.ts:3978), the recorder for the `update`
+DML op. A grep for `recordUp` matches it as a prefix. "recordUp produces ops" is true of
+`recordUpdate` and says nothing about an up/down phase split. Substring matches make a plausible
+sentence out of an unrelated symbol.
+
+WHAT THIS CHANGES. #25 is not "un-ignore a parameter that is already threaded"; it is "add a phase
+concept to a recorder that has none". The four sub-questions the ticket lists are all still real -
+where down ops live in `MigrationIr` under `deny_unknown_fields`, whether authored ops override
+synthesis silently or conflict hard, whether they fold into `Checksum::of_ir`, and whether they need
+ordering validation the up path does not - but they now sit on top of unbuilt plumbing rather than
+beside it. The estimate implied by "already declares" is the part to discard.
+
+ONE PREMISE THAT DID HOLD, checked at the same time: the checksum-neutrality constraint is real and
+is stated at crates/zero-migrate-ir/src/ir.rs, in the `check_ir_version` doc - "a bump is required to
+be checksum-neutral for already-applied artifacts". So the sub-question about folding down ops into
+`Checksum::of_ir` is asking about a genuine constraint, not an imagined one.
+
+NOT DONE, and deliberately: I did not decide any of the four sub-questions. They want the usual split,
+and the Opus half is still unavailable at the 200-agent cap. Deciding a wire-format and checksum
+question on a degraded split at the end of a long session is how a bad decision gets made quickly.
+The premise correction is what this iteration owed; the decision is not.
+
 ## F303 - the vacuous-gate audit a consumer's defect prompted: one real gap, now closed, and no others
 
 zeroship's drift gate was VACUOUS for an externally-tagged union and they did not know. Their
