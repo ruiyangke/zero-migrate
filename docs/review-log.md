@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F266 - I closed a ticket with a claim its neighbour had already measured false
+
+No code changed. A correction to the closing note I wrote on #80 an hour earlier, caught by reading
+#79 immediately afterwards.
+
+#80's closure carried this, inherited from a 2026-08-07 verification and repeated in every update
+since:
+
+    the guard path DESCENDS, so `dialect({ pg: () => table("t").create({ ifNotExists: true }),
+    mysql: () => ... })` remains a working in-history escape hatch for #79's multi-dialect case -
+    full PostgreSQL guard safety, no MySQL refusal, one history, no fork.
+
+#79 already recorded, from live measurement against MySQL 8 on the same day, that this does not
+work: dropping the guard on the MySQL leg leaves BARE DDL, and bare DDL errors on an existing
+object. The measurement in that ticket is `ERROR 1050 (42S01): Table 'notes' already exists`, exit
+1, against a table matching the declaration EXACTLY.
+
+Both halves of my sentence are individually defensible and the conclusion is still wrong:
+
+  "full PostgreSQL guard safety"  - TRUE. A guard inside a pg leg is stamped and probed, which is
+  what the descent verification established.
+
+  "no MySQL refusal"              - TRUE, and misleading. Nothing refuses because nothing CHECKS.
+  model/support.rs:401 says it outright: "Validation never gates on this feature", and the
+  EXISTENCE_GUARD_PROBE entry declares MySQL unsupported with "a guarded statement runs
+  unconditionally and a re-run errors". The absence of a refusal is the defect, not a feature.
+
+So the hatch buys nothing for the case #79 is about. On a FRESH MySQL database both legs work - but
+they already did. On an EXISTING one, PostgreSQL adopts and MySQL errors, which is exactly the
+adoption gap #79 exists to describe. The hatch is an authoring-ergonomics answer to "how do I write
+one history for two dialects", not an answer to "can MySQL adopt".
+
+WHAT I HAD DONE WRONG, precisely: I verified the mechanism (the guard descends into legs) and
+carried a CONSEQUENCE (therefore the hatch solves #79) that I had not verified and that a
+neighbouring ticket had already refuted with a live error code. The mechanism check was real. The
+inference from it was not, and I restated it four times across #80's updates without ever
+re-reading #79.
+
+That is the same failure this repo has been cataloguing all day from both sides of the mailbox:
+individually-correct facts, a story assembled from them, and no check of whether the thing being
+claimed had already been measured. Twice today I caught it in someone else's note. This one is
+mine, in a ticket I closed, written after I had already named the pattern.
+
+#80's note is corrected in place. #79 keeps its measurement and its framing; nothing there needed
+changing.
+
 ## F265 - a validator that checked the legs' shape and never their columns, and #80 closes
 
 Closes #80. Eight fixes, six production walkers and both public-API stragglers.
