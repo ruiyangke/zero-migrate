@@ -8990,6 +8990,45 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F276 - the async panic fix stops at the call thread, and a sync export aborts the process
+
+#196 filed. Found by a consumer's question rather than by looking: they asked whether F274's
+`catch_unwind` reaches `applyIrSqlite`, the one async verb they await. It does - `apply_ir_sqlite`
+(`bridge.rs:709`) goes through `run_in_process_verb` (`:744`), which is one of the two call sites
+that gained the panic arm. Their other entry point is `genArtifacts`, which is synchronous, and
+"not covered by that fix" is not the same as "safe", so I measured it.
+
+Temporary panic at the top of `gen_artifacts`, addon rebuilt, called from node:
+
+    thread '<unnamed>' (1242260) panicked at crates/zero-migrate-node/src/bridge.rs:135:5:
+      probe: a panic inside a synchronous napi export
+    fatal runtime error: failed to initiate panic, error 5, aborting
+    bash: line 1: 1242260 Aborted                 (core dumped)
+    node_rc=134
+
+The script's next line, `console.log("PROCESS SURVIVED THE CALL")`, never printed. 134 is 128+6,
+SIGABRT. Not a catchable JS exception - the host process dies with a core dump and no JS stack.
+
+napi-rs wraps an export body in `catch_unwind` only on opt-in
+(`napi-derive-backend-5.1.1/src/codegen/fn.rs:142-149`), and no export in `bridge.rs` passes the
+attribute. The generated shim is `extern "C"`; unwinding out of one aborts. Five exports sit
+there: `irVersion` (:80), `buildInfo` (:90), `loadVerify` (:98), `genArtifacts` (:132),
+`previewSql` (:176).
+
+The part that qualifies F274 rather than merely extending it: the async entry points have an
+unprotected PREFIX. `apply_ir_sqlite` decodes envelopes, builds the registry and composes the
+policy at `bridge.rs:715-742` on the call thread, and only enters the protected region at :744. So
+"the async verbs are covered" is true of the engine work and false of the argument decoding, and
+F274 did not say so.
+
+Two things worth keeping from how this arrived. The consumer's question was better scoped than my
+own analysis: I led -003 with the PostgreSQL project lock, which is the worst consequence of the
+hang, and they correctly pointed out that their verb takes no such lock and asked whether the
+mechanism still reached them. The lock was never the mechanism. And option (c) for #196 - "a panic
+is a bug, aborting is honest" - is the same argument F274 rejected for the async path, where
+killing an embedder's process is exactly why `panic = "abort"` lost. It should lose here for the
+same reason, but that is a decision for the ticket, not a conclusion to assume.
+
 ## F275 - one completed online rename blocks every rollback the project will ever run
 
 #195 DECIDED, not yet built. The decision reversed while I was tracing it, and the reversal is
