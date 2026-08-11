@@ -9059,7 +9059,20 @@ raises the `ComposeError::CharterInjectCollision` variant that also already exis
 constructed nowhere. Scoped to WITHIN one layer on purpose: cross-layer pairs are already admit's
 business, and the root layer - which never passes through admit as a draft - is the sharpest case.
 
-STILL NOT PROBED: the inject-vs-validate half (compose.rs:1138).
+AND THE THIRD CHECK IS ALREADY COVERED, by something else. The inject-vs-validate half
+(compose.rs:1138) was the last unprobed one. Composing a charter whose inject contributes `ssn`
+while a validate in the SAME layer forbids it returns:
+
+    Err("policy charter failed to load: SelfContradictoryInjectValidate
+         { detail: \"inject column `ssn` forbidden by an overlapping validate\" }")
+
+Refused, and for the right reason - checked because an Err raised by an unrelated parse failure would
+have read as coverage. Note WHERE: "failed to load". The LOADER catches it before composition, so
+`finalize_charter` duplicates a check the load gate already performs. That is why this half never
+went quiet when the finalizer stopped running.
+
+So the audit closes with a measured answer per check: creatable-escape MISSING (fixed 97281cfd),
+same-layer inject conflict MISSING (fixed be6a5ddb), inject-vs-validate COVERED by the loader.
 
 ## F364 - DECISION on #60: the live path becomes the only architecture, and the lint moves onto it first
 
