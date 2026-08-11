@@ -8990,6 +8990,111 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F316 - MySQL's UNIQUE placement is deliberate on BOTH sides, and the fix I proposed for it would have created the drift defect I went looking for
+
+F290 and F315 recorded MySQL filing a UNIQUE key under `indexes` while PostgreSQL and SQLite file it
+under `constraints`, and #199's part C1 prescribed the repair: make MySQL emit a `ConstraintSnapshot`
+and keep the auto-index out of the index bucket, matching the convention SQLite documents at
+`crates/zero-migrate/src/apply/backend/sqlite/drift_sql.rs:599-613`.
+
+That prescription is wrong, and this entry retracts it.
+
+### The question that surfaced it
+
+C1 had been classified latent because the existence probe is its only consumer and the probe has no
+MySQL call site - the three are `sqlite/mod.rs:604`, `postgres/session.rs:719`,
+`postgres/session.rs:1053`. But the probe is not the snapshot's only reader. Drift reads it too, and
+drift runs on MySQL today. If the expected side named a UNIQUE constraint the actual side never
+reports, that is a permanent structural drift report on every check - the exact shape of F110,
+"Every CHECK constraint reports permanent structural drift", which was a real defect.
+
+### The near-miss, which is the part worth keeping
+
+I first read the constraint comparison at `crates/zero-migrate/src/apply/drift.rs:2596`:
+
+    for ec in &exp_t.constraints {
+        if let Some(ac) = act_con.get(ec.name.as_str()) {
+
+and concluded from its presence-intersection that an expected-but-absent constraint is silently
+skipped, so the gap was invisible to drift and therefore latent. That conclusion was right by
+accident and wrong by reasoning. `:2596` is only the ATTRIBUTE half. Presence is handled separately
+by `diff_named`, per the comment at `:1785-1787`: "diff their columns / indexes / constraints by
+name (added/removed -> missing/unexpected) AND, for same-name children, by attribute (-> altered)".
+Reading one of two comparison halves and generalising from it would have produced a confident
+"latent" on a defect that was live.
+
+### What actually settles it
+
+The fold is dialect-conditional at `crates/zero-migrate/src/render/fold.rs:3532`:
+
+    fn unique_constraint(name: &str, columns: &[String], dialect: SqlDialect) -> FoldedConstraint {
+        FoldedConstraint {
+            constraint: (!matches!(dialect, SqlDialect::Mysql)).then(|| ConstraintSnapshot {
+                name: name.to_string(),
+                kind: "UNIQUE".to_string(),
+                ...
+            }),
+            index: Some(IndexSnapshot::btree(name.to_string(), true, columns.to_vec())),
+        }
+    }
+
+On MySQL the expected side emits `constraint: None` and an index. The actual side emits an index and
+no constraint. Both agree, `diff_named` sees no difference, and there is no drift. The gap I was
+chasing does not exist.
+
+Its doc comment at `:3525-3531` had already reasoned this through and states the failure mode by
+name: "MySQL collapses `CONSTRAINT name UNIQUE (...)` and `UNIQUE KEY name (...)` to the same
+`STATISTICS`/`SHOW INDEX` object, so its authoritative snapshot retains only the ordered unique
+index. Keeping a synthetic MySQL constraint here would make a clean apply report that constraint as
+missing on every re-introspection."
+
+So C1's repair, applied to the snapshot alone, produces precisely that: expected has no constraint,
+actual now does, and every UNIQUE reports as unexpected forever. Applied to both sides it fights a
+real property of the engine - MySQL has one physical object under one name, and `STATISTICS` is
+where the snapshot reads it from.
+
+### The correction to the classification
+
+MySQL is not deviating from a documented convention by oversight. It is deviating deliberately, on
+both sides, coherently, with the reason written at the emission site. F290 and F315 described the
+asymmetry accurately and inferred a defect from it; the asymmetry is the design.
+
+What survives for #79 is a smaller and different obligation: when MySQL gets an existence-probe call
+site, `decide_constraint` must not assume a UNIQUE lives in the constraint bucket, because on that
+dialect it never will. That is a probe-side dialect awareness, not a snapshot change. #199's C1 is
+retracted and re-scoped to that; the `views` gap it was bundled with is untouched and still real.
+
+### The sibling map, checked rather than assumed
+
+F290 and F315 left `decide_index` unchecked on MySQL, and the UNIQUE finding was a reason to look
+rather than a reason to assume a matching gap. Looked: there is none. `decide_index`
+(`crates/zero-migrate/src/render/existence_probe.rs:619`) reads exactly four snapshot fields, and
+MySQL populates all four correctly:
+
+  `unique`     `mysql/drift_sql.rs:429`  `is_primary || parts.unique`
+  `columns`    `:430`
+  `elements`   `:431`, including `IndexElementSnapshot::Expr` at `:378` and `:383` off the
+               `EXPRESSION` column selected at `:326`, so MySQL 8 functional indexes ARE modelled
+               and trip the probe's fail-closed expression arm
+  `predicate`  `:433` explicitly `None`, which is correct rather than missing - MySQL has no
+               partial indexes, so there is nothing to carry
+
+The function was already dialect-aware besides: it gates its schema-wide name scan on
+`Capability::SchemaWideIndexNames` and its own comments say MySQL scopes index names per table and
+calls `decide` nowhere.
+
+One detail confirms the UNIQUE conditional is precise rather than sloppy. MySQL's snapshot DOES file
+a PRIMARY KEY as a `ConstraintSnapshot` (`:415`) - it is not that the dialect never reports
+constraints. It reports PK and withholds UNIQUE, matching the fold, which makes `unique_constraint`
+conditional and leaves PK unconditional.
+
+VERIFIED by reading: the fold's conditional and its doc, the two drift comparison halves, the three
+probe call sites, the three dialects' snapshot emission, and all four fields `decide_index` reads
+against their MySQL population sites. NOT VERIFIED: no live MySQL drift run was made - the argument
+is that expected and actual are emitted by the same dialect-conditional convention, not a
+measurement that they match at runtime. A live check would want the host CLI suite, since there is
+no Rust harness for live MySQL (F256).
+
 ## F315 - a second probe map is wrong before #79 wires it, and "empty map" is the wrong thing to look for
 
 F290 recorded one MySQL snapshot gap: `views` is a top-level sibling map left at
