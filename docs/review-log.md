@@ -8990,6 +8990,96 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F274 - a panicking engine future settles its promise instead of hanging the caller forever
+
+#49. The remedy chosen is (a) `catch_unwind` and reject, not `panic = "abort"`.
+
+### The defect, measured before the fix
+
+`run_engine_blocking` ran the future and then called the completion callback. A panic
+unwound the spawned closure, so the callback was destroyed along with it. Measured with a
+temporary characterization test on the unmodified code, which reports what the receiver
+actually saw:
+
+    thread 'zero-migrate-cli' panicked at crates/zero-migrate-node/src/runtime.rs:144:24:
+      probe: an engine panic on the worker thread
+    on_done outcome after a panicking future: Err(Disconnected)
+
+`Err(Disconnected)` is the sender being dropped without ever being used. In the napi wrapper
+that sender is a `JsDeferred`, which settles a promise only through `resolve` or `reject` and
+has no `Drop` impl - so the JS promise stayed pending, `index.ts:215`'s `finally` never ran,
+`close()` never ran, and the PostgreSQL session-scoped advisory project lock was held until
+the process died.
+
+### The decision
+
+Two opinions, and I am naming their provenance because they were not equally independent.
+One is `codex exec -s read-only`. The second was mine, read from the code - the session had
+exhausted its subagent budget (200 of 200), so the Opus half of the usual pair did not run.
+Both landed on (a), and for the same three reasons.
+
+Against `panic = "abort"`: it kills the entire Node process, not the worker thread. The
+package ships both a programmatic export and a CLI binary (`packages/zero-migrate-cli/package.json:30`),
+and `runtime.rs:88` already refuses process-global logging changes on the grounds that this
+is "a library first". Abort would release the lock - process death closes the socket - by
+taking an embedding service down with it.
+
+For (a): `AssertUnwindSafe` is sound here because nothing in flight is read again. The whole
+operation is owned by that frame and dropped during the unwind; only the panic message
+crosses to the callback. It asserts nothing about the DATABASE, and `EnginePanic::reason`
+says so - it points at `status` rather than at a retry, because a panic can land after a
+step has already committed.
+
+Rejecting is sufficient to free the lock, transitively: `deferred.reject` -> the awaited
+promise throws -> `index.ts:199-217`'s `finally` -> `close()` -> `client.end()` -> the
+PostgreSQL session ends -> the advisory lock goes with it. That path was already proven by
+the ordinary error arm at `bridge.rs:523`; the panic arm joins it rather than inventing one.
+
+### Mutation
+
+The new gate was broken on purpose - an env-gated bypass that skips `catch_unwind` and calls
+the future directly, every export intact:
+
+    test runtime::tests::a_panicking_engine_future_reports_the_panic_instead_of_reporting_nothing ... FAILED
+    test runtime::tests::block_on_runs_a_future_on_a_worker_thread_and_reports_out_of_thread ... ok
+    test runtime::tests::diagnostics_are_off_until_the_operator_asks_for_them ... ok
+    test result: FAILED. 2 passed; 1 failed
+
+The right test fails and its two neighbours do not.
+
+### Two claims in the ticket that are wrong, corrected by reading
+
+`history` does NOT take the project lock. `bridge.rs:1230-1253` calls
+`zero_migrate::ops::status::history` directly; the five `acquire_project_lock` sites in
+`verbs.rs` (278, 534, 648, 749, 801) belong to apply_ir, rollback, status_ir, legacy_status
+and resolve_pending. A panic during `history` strands the promise and the connection, but no
+project lock. The ticket's `verbs.rs:472, 519` citation resolves to neither.
+
+`NapiHostSession` holds an `AtomicBool`, not a `RefCell` (`session.rs:57-61`). The
+`run_engine_blocking` doc comment that says otherwise is stale.
+
+### What the gate could not check
+
+`cargo clippy -p zero-migrate-node --all-targets --features napi -- -D warnings` fails, and
+not on this change - `git status` showed only `bridge.rs` and `runtime.rs` modified when it
+fired. It is an unused `resolved_contracts` at `verbs.rs:547`, filed separately. The reason
+it went unnoticed is worth its own note: the workspace `cargo clippy --all-targets` passes,
+because the addon's `napi` feature is off there, so nothing lints the file this lives in.
+
+### Gate
+
+    fmt_rc=0  clippy_rc=0  test_rc=0  node_lib_rc=0
+    addon_build_rc=0  dts_drift_rc=0  host_rc=0
+    rust targets=113 passed=2493 failed=0 ignored=0   skip_banners=0
+    zero-migrate-node lib: 47 passed, 0 failed
+    host suite: 135 pass, 0 fail, 0 skipped
+
+    clippy_napi_rc=101   <- the pre-existing verbs.rs:547 warning above, not this change
+
+The addon was rebuilt before the host suite (the staleness gate compares the `.node` mtime
+against its sources) and `git diff --exit-code -- crates/zero-migrate-node/index.d.ts` is
+clean, so the new type is internal and the published surface did not move.
+
 ## F273 - the schema leak is closed by an RAII guard, and the mutation says it is the guard doing it
 
 #50 SHIPPED. F272 confirmed the mechanism; this is the fix and its proof.
