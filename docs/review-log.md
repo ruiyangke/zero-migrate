@@ -9054,6 +9054,11 @@ TWO BROKEN INSTRUMENTS ON THE WAY TO THAT, both mine, both caught before they we
     applied at all. A clean-looking result that would have read as "the resolver dedupes" and
     closed the finding the wrong way. Re-run against `app_main` it produced the duplicate above.
 
+REFUSED NOW (F366, 4-arm test + mutation-proven): `EffectivePolicy::check_same_layer_inject_conflicts`
+raises the `ComposeError::CharterInjectCollision` variant that also already existed and was also
+constructed nowhere. Scoped to WITHIN one layer on purpose: cross-layer pairs are already admit's
+business, and the root layer - which never passes through admit as a draft - is the sharpest case.
+
 STILL NOT PROBED: the inject-vs-validate half (compose.rs:1138).
 
 ## F364 - DECISION on #60: the live path becomes the only architecture, and the lint moves onto it first
