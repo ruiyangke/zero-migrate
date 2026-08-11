@@ -9138,9 +9138,26 @@ larger one. The stranded fourteen were all named fold_check_cascade_pg_3820540_{
 _migrations siblings - one process id, the control run - and were dropped afterwards, so the database
 is back at 88.
 
-TWO FILES ARE DELIBERATELY NOT IN THAT SWEEP. pg_primary_key.rs and synchronize_identity_pg.rs create
-their schema through a shared helper, so guarding them changes the helper's signature and every
-caller. That is a different change and #203 keeps it.
+TWO FILES WERE DELIBERATELY NOT IN THAT SWEEP, and are now done in 197c985e. pg_primary_key.rs and
+synchronize_identity_pg.rs create through a shared `setup()` that returned `()`, so guarding them
+meant returning a `SchemaGuard` and binding it at all nine call sites (four and five, counted before
+editing and again after).
+
+THAT IS A THIRD GUARD SHAPE, and it got its own control rather than inheriting the other two. The
+first proof covered one schema named inline; the second, two schemas named inline; this one is the
+first where the guard crosses a function boundary, where it could be dropped at the call site or
+outlive its borrow. Same method, panic in the CALLER this time so the return is what is under test:
+
+  guard returned and bound   -> FAILED. 0 passed; 4 failed   all non-system schemas 88
+  setup arming an empty list -> FAILED. 0 passed; 4 failed   all non-system schemas 96
+
+96 - 88 = 8 = four tests times two schemas. The control was `SchemaGuard::arm(session, Vec::new())`
+rather than deleting the binding, because deleting it would have changed the caller too and tested two
+things at once. Probes reverted, the eight stranded `pk_*` schemas dropped, database back at 88.
+
+Worth recording for whoever extends this: `SchemaGuard` carries `#[must_use]` ON THE TYPE, not on the
+function, so `setup(&session, &cfg).await;` without a binding does not compile quietly. The comment at
+the type says why - an attribute on an `async fn` marks the future, which `.await` consumes.
 
 #202 IS NOT DONE, AND ITS PLAN CHANGED. The codex read-only opinion did land, late, and it is better
 than mine on the main point. The cheapest STRONGER first step is not the signature grouping at all:
