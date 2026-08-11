@@ -8990,6 +8990,89 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F342 - the knob-enforcement partition had an unenumerated residual, and my first instrument would have filed four false findings
+
+Went looking for F145's defect class in the grown registry: a knob registered
+`Enforced` that no engine path reads, which lets an operator seal a policy advertising
+a control the engine never applies. Found no live instance, and found that nothing
+stops the next one.
+
+### The instrument was wrong first, in the direction that manufactures findings
+
+I counted readers per key by grepping the constant name outside the registry and
+outside tests. Nine keys came back with zero. Five are explicitly `declared_only`, so
+four looked like live defects:
+
+    KEY_SQL_RAW_VIEW_BODY  KEY_SCHEMA_PARTITION  KEY_CODE_FUNCTION  KEY_CODE_MATERIALIZED_VIEW
+
+All four are read. `knob_key_for_capability` at
+crates/zero-migrate-ir/src/policy_registry.rs:219-233 maps every `VendorCapability`
+onto a key generically, so these are resolved through `capability_knob_key` and carry
+no direct reference outside the registry file. The chain completes in production at
+crates/zero-migrate/src/model/validate.rs:5316 and
+crates/zero-migrate/src/render/lower.rs:9275, both calling `policy_grants_capability`.
+
+My grep measured "named by a constant reference", not "read by a production path".
+Those differ exactly where a dispatch table exists, and the gap is invisible unless you
+go looking for the table. Had I stopped at the count I would have filed four bogus
+inert-knob defects against the security core. Same family as the probe that threw
+`StringExpected` on every case and read like a refutation - the instrument fails toward
+a finding, and a finding gets less scrutiny than a green.
+
+The literal-string check that first made me suspicious is worth keeping: the four
+suspects' only literal hits are in charters that GRANT the knob
+(crates/zero-migrate/src/test_fixtures.rs, crates/zero-migrate/tests/support/mod.rs),
+never in code that reads one. A charter granting a knob is not evidence anything
+consumes it.
+
+### The audit result, once the instrument was fixed
+
+All 23 registered keys account for: 14 read by direct constant reference, 11 through
+the capability table (overlapping), 5 `declared_only`, 1 `HostEnforced`. No knob claims
+authority the engine lacks. F145's instance is closed.
+
+### The gap is the residual, and it is ungated
+
+`the_knobs_no_engine_path_reads_are_declared_only` and
+`no_knob_an_engine_path_reads_is_declared_only` pin the DeclaredOnly set (exactly five)
+and the HostEnforced set (exactly one). `Enforced` is never enumerated - it is whatever
+is left. And `bool_grant`, `posture_grant` and `bool_require` all produce `Enforced`, so
+a knob added tomorrow claims enforcement without anyone deciding it does, changes
+neither pinned set, and passes.
+
+MEASURED, not argued. I added one unread knob to the builtin registry:
+
+    bool_grant("safety.mutation_probe", ObjectModel::Global, false, "temporary mutation probe")
+
+and ran the module:
+
+    test result: FAILED. 12 passed; 1 failed; 0 ignored
+
+The only failure was the new pin. Every existing test passed, including
+`no_knob_an_engine_path_reads_is_declared_only` and
+`builtin_registry_builds_and_covers_every_vendor_capability`. That is the whole
+justification for adding it: the gap was real, not hypothetical. Probe removed after.
+
+### Fixed
+
+`every_enforced_knob_is_named_with_the_path_that_reads_it` enumerates the seventeen
+Enforced keys, each with the path that reads it and a `(cap)` marker where the route is
+the capability table rather than a direct reference - which is also the note that stops
+the next reader repeating my grep mistake. A closing assertion makes the three classes
+sum to the registry size, so a knob cannot be added outside all of them.
+
+Gate at this change, docker compose databases up and healthy (postgres:18 on 5434,
+mysql:8 on 3306): fmt 0, clippy 0, tests 117 targets / 2508 passed / 0 failed /
+2 ignored, zero LIVE-DATABASE COVERAGE SKIPPED banners. The first gate run returned
+FMT_RC=1 on comment alignment while the wrapping job still exited 0 - the per-stage RCs
+are what caught it.
+
+VERIFIED BY ME: every file:line above read directly; the mutation run and its 12-pass
+1-fail split; the full gate. NOT VERIFIED: that each of the fourteen direct readers
+actually reaches a denial - I confirmed the reference and, for `safety.destructive_ops`,
+traced it to `effective_destructive_ops` and its two callers, but did not walk the other
+thirteen to a refusal.
+
 ## F341 - the notation convention decided: one symbol carries five different relations, so a substitution table cannot be correct
 
 F340 left #11's fourth item open: what ASCII convention replaces the lattice notation. Decided now,
