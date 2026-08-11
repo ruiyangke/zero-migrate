@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F355 - MySQL reads the project-lock budget, and the one test that matters is the zero
+
+F354's rule built. `project_lock_timeout` now reaches both dialects that have a bound at all, so an
+operator who sets it stops getting it honoured on SQLite and silently ignored on MySQL.
+
+    crates/zero-migrate/src/apply/backend/mysql/session.rs
+      fn project_lock_timeout_secs(cfg) -> u64 { cfg.project_lock_timeout_ms().div_ceil(1000) }
+      replaces `const PROJECT_LOCK_TIMEOUT_SECS: i64 = 10`, now deleted
+      both GET_LOCK sites take it - the project lock and the journal bootstrap lock, which share
+      one budget because bootstrapping the journal is part of the deploy that queues
+      both timeout messages report the EFFECTIVE seconds, so the number a reader sees is the
+      number MySQL waited
+    apply/backend/mysql/mod.rs:391, :665, :790   thread `cfg`, already in scope at all three
+    conn.rs   the field doc no longer says SQLite-only
+
+### The zero test is the whole point of the test module
+
+Mutating the conversion to `.div_ceil(1000).max(1)` - which is what the sibling
+`effective_lock_timeout_secs` does eleven lines away, and what I would have written by analogy:
+
+    a_zero_budget_stays_zero_rather_than_becoming_a_one_second_wait ... FAILED
+      assertion `left == right` failed: zero is try-once on a project lock; a floor would
+      substitute a wait for it
+        left: 1
+       right: 0
+    a_millisecond_budget_rounds_up_to_whole_seconds ... ok
+
+The rounding test does NOT move under that mutation, because every case it asserts is already at
+least one second. Only the zero case separates the two implementations, and it is the one an analogy
+from the neighbouring function gets wrong. A test module without it would have passed against the
+defect.
+
+### What is still not tested, and it is the interesting half
+
+The conversion is unit-tested; the WAIT is not. Nothing here drives two MySQL sessions contending a
+real `GET_LOCK` and measures that a 2000ms budget waits about two seconds. #177's live-MySQL arm
+pins the 10s default's refusal message, and that arm still passes unchanged - which is evidence the
+default survived the conversion, not that a non-default value behaves.
+
+So the shipped claim is "the budget reaches MySQL and converts correctly", not "MySQL waits the
+converted time". The second needs the two-process contention harness #178 also wanted and neither
+ticket has built.
+
+Gate: fmt 0, clippy 0, 117 targets / 2511 passed / 0 failed / 2 ignored, zero LIVE-DATABASE COVERAGE
+SKIPPED banners (2509 -> 2511, the two new conversion tests).
+
+VERIFIED BY ME: the mutation failure and its exact assertion output; the restored green; every
+file:line changed.
+NOT VERIFIED: MySQL 8.0's rounding (F353 measured 8.4.11 only). This build no longer depends on it -
+passing whole seconds sidesteps MySQL's own rounding entirely - which is a second reason to convert
+in Rust rather than hand MySQL a fraction.
+
 ## F354 - the conversion rule was already solved in the same file, and the reason its floor does not transfer
 
 #217 decided. The rule for turning `project_lock_timeout` (milliseconds) into a MySQL `GET_LOCK`
