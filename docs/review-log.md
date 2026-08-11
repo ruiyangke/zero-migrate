@@ -8990,6 +8990,50 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F280 - the panic fix left one fault class still indistinguishable, one level in
+
+#197 filed, not fixed. Found by a consumer's question rather than by looking, which is now the
+third finding this thread has produced that I would not have gone looking for.
+
+F277 made an engine panic reach a JS caller instead of aborting the process. It did not make it
+distinguishable from an ordinary failure. Measured, using `applyIrSqlite` because it is in-process
+and needs no host driver to reach a rejection:
+
+    await addon.applyIrSqlite("/nonexistent/dir/app.db", "/nonexistent/dir/journal.db", {...})
+    -> REJECTED name=Error code="GenericFailure" msg=at least one policy charter is required
+
+That is an ordinary config rejection. An engine panic arrives identically - `code=GenericFailure`
+- and must, because `bridge.rs` rejects both arms through `Error::from_reason`, which hardcodes
+`Status::GenericFailure` (napi-3.10.3/src/error.rs:457-459), the same status `panic_to_error` sets
+(mod.rs:44).
+
+So on every async verb the only thing separating "your migration was rejected" from "the engine has
+a bug" is the prose prefix F274 introduced. That is the same shape as the defect F277 fixed, moved
+one level in: there an engine bug was indistinguishable from nothing at all because it aborted;
+here it is indistinguishable from ordinary input rejection.
+
+The consumer is writing a classifier to decide whether their dev server keeps running after a
+gen-types failure. I warned them off applying it to the async path, so nothing is broken for them
+today - but "do not rely on this" is a workaround for a gap, not a closure of one.
+
+### What I am not doing
+
+Not fixing it in the same breath as finding it. The options all touch a published boundary and one
+of them may not exist: napi's `Status` enum is fixed and has no panic-shaped variant, so a
+distinguishable status would mean misusing `Unknown`; the `Error` struct carries a `cause` field
+(error.rs:461) that might carry a machine-readable marker, and I have not checked whether napi
+surfaces it to JS at all. That check decides whether the option list has three entries or four, and
+guessing it would be the same error I made twice today about which command lints the addon crate.
+
+### Worth noting about where these came from
+
+F276, F277 and now this one all started from a consumer asking a question about their own tree, not
+from me auditing mine. Each time the question was better scoped than my analysis: they asked
+whether the fix reached the verb they actually call, and reaching for the answer turned up a class
+of exposure the original ticket had not covered. The pattern is not that they know my code - they
+explicitly do not read it - but that "does this reach ME" forces a walk from a real entry point,
+which is the thing that keeps finding what a walk from the defect does not.
+
 ## F279 - rollback survives a contracted rename, and my "nothing lints the addon" claim was wrong
 
 #195 SHIPPED. Also a correction I have now made twice in the wrong direction and am fixing here.
