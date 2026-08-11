@@ -8990,6 +8990,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F278 - the guarantee I was going to prove is already unconditional, and it changes #195's fix
+
+F275 left #195 blocked on one thing: `normalize_historical_renames` warns "This never authorizes
+apply: its caller accepts the result only when the derived plan already has journal evidence", and
+I would not wire it into rollback on an argument that rollback is structurally safe. That was the
+right call to make and the wrong model of where the guarantee lives.
+
+I assumed the promise was kept by `strict_historical_apply`, the apply-only flag - which would
+have meant a rollback caller needed something new to inherit it. Reading the recovery block says
+otherwise:
+
+    lower.rs:638   if strict_historical_apply {
+    lower.rs:639       validate_historical_apply_evidence(&lowered.0, &live, journal_entries, resolved_contracts)
+    lower.rs:648   }
+    lower.rs:649   if plan_has_no_journal_evidence(&lowered.0, journal_entries)? {
+    lower.rs:650       return Err(original_error);
+    lower.rs:651   }
+
+The gate at :649 is outside the flag. `plan_has_no_journal_evidence` (lower.rs:1146-1157) refuses
+when no step of the derived plan matches a journal version, and it runs for every caller.
+`strict_historical_apply` layers a STRONGER check for apply on top; it is not the source of the
+base guarantee.
+
+So the documented promise is inherited by construction: any caller that goes through the shared
+block gets it. What I framed as "prove rollback is safe before wiring this in" was really "find out
+which line keeps the promise", and the answer makes the wiring safe rather than the wiring needing
+a new argument.
+
+### What that changes about the fix
+
+Not a parameter. `lower_ordered_envelopes_to_plans_for_rollback` (lower.rs:368-413) does not route
+through `lower_ordered_envelopes_to_plans_inner` (lower.rs:553), and cannot simply start doing so:
+the two loops differ in the middle, because rollback replays the executed history into a SEPARATE
+snapshot and merges only object definitions (lower.rs:400-407) where the inner loop advances
+pending ops. The recovery block - lower once, on a Postgres historical-rename error reconstruct and
+retry, then apply both evidence gates - comes out into a helper both loops call.
+
+Deliberately not by copying it into the rollback function. Two gates duplicated across two call
+sites is how one copy later loses one, and the one that would go missing is the unconditional one,
+because it reads like a detail next to the flagged check above it.
+
+Left open for the build, and worth deciding rather than defaulting: whether rollback also passes
+`strict_historical_apply = true`. Rollback is at least as safety-critical as apply and
+`validate_historical_apply_evidence` is an evidence check rather than an apply-specific action, so
+`true` is the conservative reading - but read what it demands before choosing it.
+
+### The general shape, since this is the second time today
+
+F275 recorded a blocking question. The question dissolved on contact with the code, and it
+dissolved in the direction that made the work smaller. The same happened to #195's own premise
+earlier: "delete the dead query" became "a completed rename blocks every rollback" once I traced
+who calls the lowering and when. Both times the ticket's framing was the thing that needed
+checking, not the code's behaviour. Before designing around a constraint, read the line that is
+supposed to enforce it.
+
 ## F277 - every N-API export now catches its own panic, and the abort is measured on both sides
 
 #196 SHIPPED. F276 measured the defect; this is the fix, the option that beat the one I filed,
