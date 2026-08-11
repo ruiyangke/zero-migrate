@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F272 - the mechanism the ticket filed first is the one that survives, and now it is measured
+
+#50's mechanism CONFIRMED. Three rounds of re-scoping ended by returning to the hypothesis the
+original filer wrote down.
+
+F271 left one survivor: red or interrupted runs. It is directly testable, and testing it took one
+env-gated panic between the create and the drop, in the pattern this repo uses for a RED - no file
+reverted, every export intact:
+
+    ensure_project_schema(&session, &cfg).await;
+    if std::env::var("ZM_PROBE_50_PANIC").is_ok() {
+        panic!("probe: does a panic between create and drop leak the schema?");
+    }
+
+    before=85
+    thread 'an_over_long_fts_index_name_re_diffs_clean' panicked at
+      crates/zero-migrate/tests/fts_index_name_truncation_pg.rs:143:9
+    test result: FAILED. 0 passed; 1 failed
+    after=86  delta=1
+
+So a panic between the two leaks exactly one schema. The cleanup at the end of the test is
+straight-line code after the assertions, and an unwind walks past it.
+
+DELTA=1, NOT 2, and that detail explains the ticket's own data. `ensure_project_schema` creates
+only the PROJECT schema; the meta schema is created later, by the engine. A panic before that point
+leaks one, a panic after leaks two. The 85 currently holds 36 `proj_` against 29 `meta_` - an
+asymmetry the original ticket noted as "the count grows two at a time" and could not reconcile.
+Seven panics landed in the window where only the project schema existed.
+
+=== WHAT THE THREE ROUNDS ACTUALLY BOUGHT ===
+
+F270 re-scoped it and named a lead from the shape of the leaked names. Wrong.
+F271 executed F270's own method, found eleven zero-delta green runs, and withdrew the lead - along
+with a "measurement" I had never taken.
+F272 tested the last survivor and confirmed it in one run.
+
+The net is not "three wasted rounds". The eliminations are what make the fix targeted: the leak is
+NOT on any green path (11 measurements), so a Drop guard is not needed on the happy path and would
+be pure ceremony there. It is needed exactly where an unwind can cross a cleanup line. That is a
+much smaller change than the 32-file sweep the ticket's framing invited, and it is now justified by
+a measured RED rather than by plausibility.
+
+The ORIGINAL filer had it right on the first try. Three of my re-framings were needed only because
+I kept preferring a mechanism I could see in the data over the one already written down, and the
+data I was reading - a distribution of name shapes - could not distinguish them.
+
+=== ON THE ONE SCHEMA I LEAKED ===
+
+The probe created `proj_991172_1786410471746066881_0` and, by design, did not clean it up. I
+dropped exactly that name and re-counted: back to 85. Not a mass cleanup - one schema, mine,
+created seconds earlier, named explicitly. The other 85 stay untouched for the reasons F270
+recorded: irreversible, possibly load-bearing, and the only baseline a future fix can be measured
+against.
+
 ## F271 - eleven green runs leak nothing, and two of my own claims from an hour ago were wrong
 
 Correction to F270, below, written one turn earlier. The method it proposed was right; the two
