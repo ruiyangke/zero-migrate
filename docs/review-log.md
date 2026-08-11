@@ -8990,6 +8990,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F360 - the two spellings the MySQL signature must reconcile disagree, measured on 8.4.11
+
+F359 established that the signature is needed and named the four sites. Its whole design assumes the
+engine's emitted MySQL type and MySQL's stored `COLUMN_TYPE` agree once normalised. They do not, and
+each disagreement would be false drift for every user holding that column type - so this had to be
+measured before a comparator was written, not after.
+
+Measured by creating the columns in the live MySQL 8.4.11 the gate uses and reading
+`information_schema.COLUMNS.COLUMN_TYPE` back:
+
+    a VARCHAR(255)      -> varchar(255)
+    b VARCHAR(64)       -> varchar(64)
+    c CHAR(10)          -> char(10)
+    d TEXT              -> text
+    e LONGTEXT          -> longtext
+    f INT               -> int              <- no display width in MySQL 8
+    g INT UNSIGNED      -> int unsigned
+    h BIGINT            -> bigint
+    i DECIMAL(10,2)     -> decimal(10,2)
+    j DATETIME(3)       -> datetime(3)
+    k TIMESTAMP         -> timestamp        <- no fsp when zero
+    l ENUM('a','b c')   -> enum('a','b c')  <- members single-quoted, spaces preserved
+    m TINYINT(1)        -> tinyint(1)       <- width KEPT, unlike int
+    n VARBINARY(16)     -> varbinary(16)
+
+against what `render::declarative::mysql_ddl_type` (declarative.rs:1341) emits.
+
+### Two genuine mismatches, both verified
+
+    DECIMAL: mysql_ddl_type:1365 emits "DECIMAL(65, 30)" - a space after the comma.
+             MySQL stores decimal(65,30) - no space. Verified by creating DECIMAL(65,30).
+             A case-insensitive string compare reports drift on EVERY numeric/decimal column.
+
+    POINT:   mysql_ddl_type:1370 emits "POINT SRID 4326".
+             MySQL stores COLUMN_TYPE = point. The SRID is NOT part of COLUMN_TYPE; it is
+             separate catalog metadata. Verified by creating POINT SRID 4326 NOT NULL.
+             A compare reports drift on EVERY geography column.
+
+Clean round-trips confirmed for the rest: `VARCHAR(191)` (what `text` lowers to), `LONGBLOB`, `JSON`,
+`VARCHAR(43)` (the inet spelling), and `TINYINT(1)` for boolean.
+
+### Two normalisation traps the measurements expose
+
+  1. `tinyint(1)` KEEPS its display width while `int` loses its own. `strip_mysql_int_display_width`,
+     which the existing canonicaliser runs, would fold `tinyint(1)` to `tinyint` and destroy the one
+     width MySQL actually preserves - the boolean representation. The signature must not reuse that
+     helper blindly.
+  2. `enum('a','b c')` keeps its members single-quoted, with spaces inside them. This is the concrete
+     case behind #79's warning that blanket lowercasing folds enum literals together: normalisation
+     has to skip quoted regions rather than run over the whole string.
+
+### What this means for the build
+
+The signature is not "compare the two strings case-insensitively". It needs a normalisation pass that
+collapses whitespace INSIDE the parameter list, leaves quoted literals untouched, and either drops
+`SRID n` from the emitted side or reads the SRID from its own catalog column. Landing the comparator
+without this turns a quiet blind spot into loud false drift on decimals and geography - strictly
+worse than today.
+
+VERIFIED: every spelling above, by running it against the gate's MySQL and reading the catalog back.
+NOT VERIFIED: the fsp/temporal family beyond datetime(3) and timestamp, and the SET type, neither of
+which I created. Nothing here is inferred from the engine's tests.
+
 ## F359 - #79's type-signature premise is now measured, not designed: MySQL cannot see a VARCHAR length change
 
 #79 half (B) was DECIDED from reading. This walks the chain and confirms it holds, which matters
