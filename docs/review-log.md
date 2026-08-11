@@ -8990,6 +8990,76 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F328 - a regression I predicted was refuted by a comment I had already read, and a green host suite turned out to be testing a stale binary
+
+Two corrections, both to claims I had made with confidence in the previous hours.
+
+### The regression that was not
+
+Scoping #207 - populating MySQL's empty `views` map - I found `merge_recovered_definitions` merging
+recovered history into the live schema with `or_insert` (`zero-migrate-node/src/lower.rs:450`), which
+keeps whatever is already there. A catalog entry carries `authored_query: None`; a recovered one
+carries `Some(query)`. I concluded that populating the map would let the catalog entry win, discard
+the typed body, and REGRESS MySQL view-drop rollback from working to irreversible. Wrote it on the
+ticket as the main blocker.
+
+It is wrong, and the refutation was in the addon test's own header at
+`crates/zero-migrate-node/tests/rollback_sqlite.rs:164-171`:
+
+    The verb reads the live catalog AFTER taking the lock, and at that moment the view is already
+    dropped
+
+Rolling back a `dropView` happens when the view is ABSENT - the drop ran. The catalog snapshot has no
+entry for it, `or_insert` inserts into a vacant key, and the recovered body lands. That holds whether
+or not MySQL populates its map.
+
+The evidence was already in hand twice over: SQLite POPULATES its views map and its addon rollback
+test passes. I knew both facts and did not put them together.
+
+The error was not misreading the merge - the merge reads exactly as I described. It was reasoning
+about a mechanism without checking the STATE it runs in. Correct code, correct trace, wrong premise
+about what is in the map at that moment.
+
+What survives is narrower and stated as such: `or_insert` is first-wins over a strictly more
+informative source, which is worth revisiting, but no view case currently reaches it - a create's
+inverse needs no typed body and a replace now yields `down: None` (#209).
+
+### The green suite that proved nothing
+
+Running the host suite to check the comment fix produced one test and zero passes:
+
+    Error: the host suite's addon is older than the sources it is built from.
+      addon: 2026-08-11T14:38:20.370Z
+
+The freshness gate from #45 firing correctly. `fold.rs` and `lower.rs` both changed for #210 and #209
+AFTER the last addon rebuild, so the prebuilt binary the host suite loads was two fixes behind.
+
+The consequence is the part worth keeping: the "146 pass / 0 fail" I reported earlier was measured
+against the PRE-#209/#210 addon. It was a true statement about a binary that no longer matched the
+tree, which is the same species as the piped-`tail` gate in F322 - an instrument reporting
+confidently about something other than the subject. Rebuilt and re-ran: 146 pass / 0 fail / 0
+skipped, zero skip banners, this time against the current sources.
+
+Two of my own gate results this week have now been invalidated by the instrument rather than by a
+test failing. The generalisation is that a compiled artifact under test is itself a measurement
+dependency: "the suite passed" means nothing without "and the artifact was built from this tree".
+The gate existed and caught it, which is the argument for having built it.
+
+### The comment that stood in for coverage
+
+`packages/zero-migrate-cli/tests/host/rollback-live.test.ts:332` claimed view, sequence and schema
+were "covered above and in the SQLite addon suite". Sequence and schema are above; view is not, and a
+case-insensitive search of the file returns only that sentence.
+
+What exists is a SQLite addon test on the same re-lowering path, and a PostgreSQL test that calls the
+engine directly and never reaches the addon's envelope loop. So the cell this file would fill - a
+view rollback on PostgreSQL through the verb - is empty, and neither test covers it between them.
+Corrected at 14949e69 to name both tests and what neither reaches.
+
+That claim was load-bearing for my own reasoning an hour earlier, when I nearly took "#188 shipped a
+view rollback" as evidence that the PostgreSQL path was fine. A false coverage claim is worse than no
+coverage, because it stops the next person looking - and here the next person was me.
+
 ## F327 - the instrument refused my #211 measurement and corrected the ticket instead, and a consumer refused a conclusion that favoured them
 
 Three corrections in one stretch, none of them from reading harder.
