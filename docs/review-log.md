@@ -8990,6 +8990,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F324 - rolling back a view replace destroys the view, measured; and the fix was stopped at the point it stopped being a patch
+
+#209 confirmed at ab5b2d73, and it is the sharpest thing the view work turned up. Measured through
+the real lower + apply + rollback path against a temp-file SQLite database, every assertion read from
+`sqlite_master`:
+
+    thread 'rolling_back_a_replace_restores_the_previous_body' panicked at
+    crates/zero-migrate/tests/replace_view_rollback_sqlite.rs:247:5:
+    rolling back a replace must not drop a view that existed before the migration
+
+The rollback did not error. It reported success and removed a view that predated the migration it was
+undoing. Every precondition passed first - the original body was present, the replace genuinely
+changed it, the rollback itself succeeded - so the failure is the view's absence and not a broken
+fixture.
+
+`lower.rs` renders the `createView` inverse as `DROP VIEW IF EXISTS` unconditionally; `replace`
+reaches the up prefix and the replace prelude and never the down. That was CORRECT until a1fe1047:
+while the fold refused a replace against a view an applied migration had created, this arm could only
+run when the create had brought the view into being, and dropping really was its inverse. Making the
+across-deploys replace applicable made a previously-unreachable arm reachable in the one case it
+gets wrong.
+
+### The instrument was already in the tree
+
+`drop_view_rollback_sqlite.rs` had a complete real-path rollback harness - temp-file backend, apply
+through `lower_plan` + `apply_plan`, assertions against `sqlite_master`. The first plan was to drive
+the CLI through `spawnSync` the way the host rollback suite does, which would have been slower to
+write and weaker evidence. Looking for an existing harness before building one was worth more than
+the measurement itself took.
+
+### Stopping at the point it stopped being a patch
+
+The repair looks like one line and is not. `ViewStatement.down` holds ONE statement. A faithful
+restore is `CREATE OR REPLACE VIEW` carrying the prior body, and SQLite has no such form:
+`view_create_prefix` ignores the flag entirely (`render/renderer.rs:444-452`) and SQLite's replace is
+carried by a separate prelude that DROPs first. So the repair needs a wider `down`, or a per-dialect
+split, or a refusal - a decision, not an edit.
+
+Stopped there and recorded the three options on #209. Two of my own fixes today have already needed
+follow-up corrections (#209 and #210 both descend from a1fe1047), and the failure mode each time was
+shipping before the blast radius was mapped. A third rushed change to the same area at the end of a
+long session is exactly the move that pattern predicts.
+
+What makes it tractable rather than blocked: the `dropView` arm thirty lines below already
+reconstructs a view body from `live_schema.views[name].authored_query`, which is precisely the data
+a restore needs. Only the statement-count shape is in the way.
+
+### The test is committed ignored, and that is a deliberate cost
+
+`#[ignore = "measured failing: rolling back a view replace drops the view (#209)"]`. Carried rather
+than deleted because the measurement was the expensive part and the assertion states the contract the
+fix must meet. This moves the gate's ignored count off zero - a visible, explained change rather than
+drift, and preferable to either a red gate or a deleted measurement.
+
+Two fixture corrections en route. The first `where`-predicate JSON was wrong
+(`missing field 'node' at line 1 column 349`); rather than reverse-engineer the predicate encoding
+the body now changes by APPENDING a column, which is the one replace shape PostgreSQL also permits,
+so the fixture stays comparable across dialects instead of exercising something only SQLite allows.
+
+NOT VERIFIED: PostgreSQL or MySQL - the arm is dialect-independent so the same is expected, but
+expected is not measured. And whether any OTHER op renders the undo of a MODIFY as a DELETE; that
+shape is worth a sweep and has not had one.
+
 ## F323 - the materialized-kind refusal, and a gate total that looked like a defect and was an arithmetic error
 
 #210 fixed at 78cc1725. Teaching the fold to honour `replace` (#208) removed an accidental refusal
