@@ -9075,9 +9075,47 @@ These are doc comments using U+2291, U+2293, U+2294, U+22A4, U+2229, U+222A, U+2
 U+2205 to state the policy lattice - `forbid [subsumes] warn [subsumes] allow` and similar. That
 is notation carrying meaning, not decoration, so there is no substitution that is obviously
 correct: `<=` reads numeric on a lattice that is not ordered by magnitude, `[=` is obscure, and
-prose is clearest but reflows every line it touches. Wants the usual split before anyone types
-it. (I said "twelve files in the guard and IR crates" when I first looked at this; the measured
-figure is 23 files across four crates.)
+prose is clearest but reflows every line it touches. Wants the usual split before anyone types it.
+
+THREE CORRECTIONS TO MY OWN SCOPING, all found by measuring what I had asserted from memory.
+
+FIRST, the nine characters above are not the alphabet. The same sentences also use U+2286, U+2287,
+U+2283, U+2292, U+22E2, U+22A5, U+2A06, U+22C3, U+1D4B0 (script capital U, the universe), U+2218,
+U+27FA, U+27F7, U+21D4, U+2194, U+03A3 and the angle brackets U+27E8/U+27E9. Over that full
+26-character alphabet the class is 419 occurrences across 42 files, not 242 across 23. Someone
+converting on the nine would rewrite half a sentence and leave the other half - `scope/mod.rs:10`
+says "conflating [EMPTY SET] with [SCRIPT U]" and only the first of those is in the short list.
+
+SECOND, #11's own file list for this item was wrong, and wrong in the way that wastes a day. It
+named twelve files in zero-migrate-guard and zero-migrate-ir. I checked eight of them:
+
+    analysis/analyze.rs  analysis/classify.rs  guard/denylist.rs  guard/lib.rs
+    ir/capability.rs     ir/dialect.rs         ir/id.rs           ir/ir.rs
+      -> every one carries ZERO lattice or set operators
+
+They carry arrows and ellipses, which is Class A. The list had been built from the wrong character
+class. The notation actually concentrates in zero-migrate-policy - `scope/mod.rs` 43 lines,
+`compose.rs` 34, `scope/oracle.rs` 29, `boundary.rs` 19, `value_order.rs` 18, `scope/glob.rs` 18 -
+a crate the ticket never mentioned at all.
+
+THIRD, not all of it is comments. Eighteen of the 242 lines are code, and two groups are Class B
+rather than notation-in-a-comment:
+
+    crates/zero-migrate-policy/src/compose.rs:1579   Scope::Nothing => "[EMPTY SET]".to_string(),
+    crates/zero-migrate-ir/src/policy_registry.rs:438,439,443,447
+      knob descriptions reading "forbid [SUBSUMES] warn [SUBSUMES] allow"
+
+`render_scope` is a diagnostics renderer reaching users via `offending_pattern` (boundary.rs:181,
+211) and `inject_scope` (compose.rs:1213), and nothing asserts on its output. It is also already
+internally inconsistent - the `Of` arm renders set difference as an ASCII `\` while the `Nothing`
+arm uses the glyph - which suggests the ASCII choice was made here once already and the glyph is
+the leftover.
+
+The argument I did not have when I filed this: the crate already owns an ASCII name for every one
+of these operators, and `scope/mod.rs:6-7` glosses them itself - `Scope::subset`, `Scope::meet`,
+`Scope::join`, `Scope::difference`, with `Nothing` and `All` for bottom and top. So the prose
+option is not "invent English for each symbol", it is "use the name the code already uses", which
+is a materially stronger position than the one I wrote the ticket against.
 
 ### The open question answered itself
 
