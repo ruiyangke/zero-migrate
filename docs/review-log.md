@@ -8990,6 +8990,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F354 - the conversion rule was already solved in the same file, and the reason its floor does not transfer
+
+#217 decided. The rule for turning `project_lock_timeout` (milliseconds) into a MySQL `GET_LOCK`
+argument (whole seconds, F353) is:
+
+    let effective_secs = cfg.project_lock_timeout_ms().div_ceil(1000);   // NO .max(1)
+
+Ceil rather than nearest, because for a QUEUE the safe rounding direction is longer: waiting an extra
+fraction of a second is harmless, waiting less can fail a deploy that would have succeeded. Nearest
+rounding shortens 1200ms to 1s and lets MySQL give up before SQLite's requested deadline.
+
+### It is not a taste call - the same conversion already exists eleven lines away
+
+    crates/zero-migrate/src/apply/backend/mysql/session.rs:400
+      fn effective_lock_timeout_secs(cfg: &ExecutorConfig, m: &Migration) -> Result<u64, TimeoutError>
+        // Round UP to whole seconds (MySQL's unit), floor 1s so a sub-second budget
+        // never becomes a 0 = "no wait" that fails every contended DDL.
+        Ok(ms.div_ceil(1000).max(1))
+
+for `innodb_lock_wait_timeout`. Same unit mismatch, same file, already decided. Choosing anything but
+ceil here would have made one file convert milliseconds to MySQL seconds two different ways.
+
+### The floor is the part that does NOT transfer, and the reason inverts
+
+That helper's `.max(1)` exists because for `lock_timeout` a ZERO means NO LIMIT - its own doc says
+rounding 0 up "would substitute a budget for an explicit 'no limit' the migration checksum describes",
+and `resolve_timeout_ms` refuses zero outright before the rounding runs.
+
+For the PROJECT lock, zero means the opposite. `engine.rs:2769` on SQLite: "a zero there means 'do not
+wait' rather than 'wait forever'", and the SQLite loop confirms it - `elapsed() >= timeout` is true
+immediately at zero, so the first `WouldBlock` returns the timeout error. MySQL agrees:
+`GET_LOCK(name, 0)` is try-once.
+
+So copying `.max(1)` would take an operator's explicit try-once and silently turn it into a
+one-second wait. The floor is correct for the budget it was written for and wrong for this one, and
+the two look identical at the call site. Plain `div_ceil(1000)` preserves zero.
+
+### Decided by
+
+One codex read-only opinion plus my own read, formed before opening it. The Opus half was unavailable
+for the seventh session running (subagent spawn limit 200/200). We reached the same option; codex's
+warrant was better than mine - I argued from queue safety, it found the existing precedent in the
+same file - and it supplied the zero nuance I did not have. My independent answer would have shipped
+`.max(1)` by analogy and broken try-once.
+
+Also settled, both agreeing: the error message must report the EFFECTIVE rounded seconds, not the
+requested milliseconds. "timed out after 1500ms" would be false when MySQL waited 2s. With the 10s
+default the rendered fragment is unchanged, so the #177 pin at
+packages/zero-migrate-cli/tests/host/rollback-live.test.ts:614 - which matches
+`GET_LOCK\('<name>'\) timed out after 10s` - still holds.
+
+REJECTED, and codex called my premise on it: keeping MySQL's constant and documenting the field as
+SQLite-only. MySQL was the SOURCE of the 10s default and already consumes other `PgConfinement`
+timeout fields, so "read by the SQLite application-file lock" in the field doc I wrote is stale by
+construction and moves with the build.
+
+VERIFIED BY ME at a82facfe: `effective_lock_timeout_secs` and its comment at session.rs:400 and the
+doc above it; the zero-means-no-limit rationale in that doc; engine.rs:2769; the #177 assertion text
+at rollback-live.test.ts:614.
+NOT VERIFIED: nothing is built yet. This entry decides the rule; the threading through the two
+`GET_LOCK` sites and their three callers is unstarted.
+
 ## F353 - MySQL rounds a fractional GET_LOCK timeout to whole seconds, so 0.25s means try-once
 
 F352 gave the SQLite project lock its own config value and noted MySQL's hardcoded
