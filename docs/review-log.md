@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F350 - the second lowering entry point is guarded too, so the structural fact F348 flagged is benign
+
+F348 recorded that `applyIrSqlite` shares no lowering with `applyIr` and called that "a bigger
+structural fact than the projection question it came up in". Followed it: what else does the SQLite
+apply path not get? Answer: nothing that matters. It runs a different validation mechanism, not none.
+
+The networked verb `apply_ir_with_locked_backend` (verbs.rs:259) does, in order: `ensure_journal`,
+acquire the project lock, `snapshot_schema`, `applied()`, resolve pending contracts, build
+`LiveSchema`, lower through `crate::lower` (projecting when priors are non-empty), then
+`status_plans_via_backend_locked` and `require_applied_prefix`.
+
+The SQLite export does three things - open the backend, build an `ExecutorConfig`, call
+`deploy_envelopes` - which reads as skipping all of the above. It is not.
+
+    crates/zero-migrate/src/engine.rs:427  pub async fn deploy_envelopes<B: MigrationBackend>(
+      ensure_journal
+      snapshot_schema  ->  LiveSchema::from_catalog_snapshot
+      GuardConfig::from_policy(policy.clone(), dialect)
+      for envelope in envelopes:
+          backend.applied(exec_cfg)                     <- journal re-read PER envelope
+          author.load_and_lower_guarded(...)
+
+So the engine re-snapshots and re-reads the journal for every envelope, and lowers through a second
+guarded entry point.
+
+I checked that the second entry point guards rather than merely being named for it - my own standing
+trap is that a name may describe a precondition instead of an action:
+
+    crates/zero-migrate/src/render/lower.rs:2915  pub fn load_and_lower_guarded(
+      takes `guard_cfg: &GuardConfig`
+      derives the confinement scope from the guard's trust posture (`guard_cfg.schema_scope()`)
+      loads with `?` into LoadAndLowerGuardedError::Load
+      calls `lower_guarded_with_op_spans(&ir, guard_cfg, live)`
+
+It applies the guard. The name is honest.
+
+WHAT THE DIFFERENCE ACTUALLY IS, then: the two paths validate against different pictures of the
+world. The networked path builds ONE projection across the batch and checks the applied prefix; the
+SQLite path re-derives fresh live state per envelope and guards each in turn. Neither is a subset of
+the other - a per-envelope re-snapshot sees real intermediate state the projection only models, and
+the projection catches cross-envelope conflicts a per-envelope walk cannot. That is a design
+difference, not a gap, and it is the same shape #99 already recorded from the status side.
+
+So F348's "bigger structural fact" is real and benign, and I am closing it rather than leaving the
+phrase to imply an unfound defect. The one asymmetry that DOES bite remains the one already filed:
+on SQLite, status projects and apply does not (#99).
+
+VERIFIED BY ME at 5e9da6fc: the verbs.rs:259 step list read in order; engine.rs:427's body; the
+`load_and_lower_guarded` signature and its guard call at lower.rs:2915.
+NOT VERIFIED: that the two mechanisms are equivalent in strength. I compared what each CALLS, not
+what each REFUSES. Establishing "neither is a subset of the other" as fact rather than reading would
+need one migration each way - one the projection refuses and the per-envelope walk admits, and one
+the reverse - and I have run neither.
+
 ## F349 - the SQLite apply's empty contract list is correct, and correct for a reason the site did not state
 
 #216, raised by a consumer looking at my code: `crates/zero-migrate-node/src/bridge.rs:795` returns
