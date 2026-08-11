@@ -8990,6 +8990,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F290 - the view-rollback asymmetry I nearly filed does not exist, because a dropped object is not in the catalog
+
+#199's gate question ANSWERED, no code change, and the answer shrinks the ticket rather than growing
+it. F289 recorded that the MySQL snapshot returns `SchemaSnapshot { tables, ..Default::default() }`
+(backend/mysql/drift_sql.rs:619), leaving `views` empty. #199 asked the only question that decides
+whether that is a defect today or merely groundwork: WHICH snapshot feeds the view-down synthesis at
+render/lower.rs:8400, where `live_schema.views.get(name)` decides whether a dropped view can be
+rebuilt on rollback.
+
+WALKED FROM THE VERB, as the ticket required, rather than grepped:
+
+    zero-migrate-node/src/verbs.rs:540   backend.snapshot_schema(cfg)          <- CATALOG
+    verbs.rs:557                         lower_ordered_envelopes_to_plans_for_rollback(.., snapshot, ..)
+    zero-migrate-node/src/lower.rs:384   live_schema_with_ownership(base_snapshot.clone(), ..)
+    lower.rs:417                         merge_recovered_definitions(&mut live, &history_ops, ..)
+
+`merge_recovered_definitions` (lower.rs:436) folds the executed history onto an EXPLICITLY EMPTY
+snapshot and lends the result to `live` - its own doc says "lend the live schema the object
+definitions the catalog can no longer show, so a drop's inverse can be rendered from what created
+it". So the `authored_query` that makes a view reversible comes from the AUTHORED HISTORY, never
+from the catalog.
+
+THE HYPOTHESIS THAT LOOKED LIKE A POSTGRESQL DEFECT. The merge fills with `or_insert`:
+
+    for (name, view) in recovered.views {
+        live.views.entry(name).or_insert(view);
+    }
+
+`or_insert` only writes an ABSENT key. PostgreSQL's catalog reader DOES populate views
+(apply/drift.rs:735-761) and those carry `authored_query: None` - the site says so directly:
+"Introspection reads back rendered SQL, never the typed body an author wrote, so a view discovered
+here carries no inverse". Put together that reads as: on PostgreSQL the catalog's inverse-less view
+occupies the key, `or_insert` declines to replace it, `authored_query` stays `None`, and the drop is
+irreversible - while MySQL's EMPTY map lets the good value in. An incomplete snapshot producing
+BETTER behaviour than a complete one is exactly the sort of inversion worth filing.
+
+IT IS NOT REAL, and the refutation is one sentence: the view being reversed was DROPPED, so it is
+not in the catalog when the rollback reads it. `or_insert` therefore finds the key absent on every
+dialect and fills it with the history-recovered view. The catalog's views map is irrelevant to the
+object whose inverse is being synthesised, which is precisely what "the definitions the catalog can
+no longer show" means. MySQL's empty map creates no asymmetry here.
+
+WHAT #199 IS NOW: exactly what F289 said and nothing more - a prerequisite for #79 (the probe's
+`decide_view` reads `live.views`, so an existing MySQL view would read absent and a guarded dropView
+would be skipped with a green journal), plus a documentation gap, because `..Default::default()`
+makes "not implemented" and "not applicable" look identical when MySQL genuinely has no sequences
+and no PostgreSQL-style schema namespaces.
+
+WHY THIS IS LOGGED THOUGH NOTHING CHANGED: it is the fourth time in two days that the same check
+changed an answer, and the first time it ran BEFORE the claim was written rather than after. F284
+and F288 are the same lesson paid for twice - a mechanism that looks decisive read statically, and a
+one-line fact about what actually reaches it that dissolves the finding. The cost of checking was
+four file reads. The cost of not checking, measured twice already, is a filed defect that a
+consumer or a future reader has to unwind.
+
 ## F289 - the MySQL guard decision, where a second opinion reversed me and found a regression I would have shipped
 
 #79 DESIGN DECIDED, no code yet. The ticket asked to evaluate existence probes on MySQL, where
