@@ -8990,6 +8990,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F314 - the extension arm closes the verb matrix, and three of its own ticket's specifics were wrong
+
+#193 is done: 32347c48. Rolling back a `dropExtension` reinstalls the extension, proven over the
+host-driver seam, which was the last empty cell beside view, sequence, schema and guard.
+
+THREE THINGS THE TICKET SPECIFIED THAT DO NOT HOLD. Each was caught by reading the code the ticket
+pointed at rather than by taking its summary:
+
+  1. `ZM_MUTATE_NO_MERGE` and `ZM_MUTATE_NO_GUARD`, which the ticket quotes as how the other three arms
+     were mutation-tested, DO NOT EXIST. `grep -rn "ZM_MUTATE"` across the tree returns nothing. They
+     were temporary probes, inserted and reverted, exactly as this session has been doing - not
+     permanent env switches. A reader following the ticket would set a variable nothing reads and
+     conclude the mutation passed.
+  2. `code.extension` is a GLOBAL StrSet whose value IS the permitted-name allowlist, not a scoped
+     bool. The ticket said to add a fixture "beside `createSchemaPolicy`", and copying that fixture's
+     shape would not have loaded: `global_knob_narrow_scope_rejects`
+     (crates/zero-migrate-policy/tests/loader.rs:288) pins that a narrow
+     `scope = { include = [...] }` is REJECTED for this key. It takes `scope = "all"`, and the guard
+     treats a non-empty allowlist as the capability itself
+     (`grants_extension_capability`, crates/zero-migrate-guard/src/guard/mod.rs:379).
+  3. `FORBIDDEN_EXTENSIONS` (crates/zero-migrate-guard/src/guard/denylist.rs:18) overrides the
+     allowlist regardless of any grant, so the name has to be checked against it before being chosen.
+     `citext` is not on it; the list is untrusted-language and remote-access extensions.
+
+MUTATION-PROVEN against the code the arm claims to cover, not against a switch. Neutering the
+`live_schema.extensions.get(name)` lookup at crates/zero-migrate/src/render/lower.rs:8028 - the site
+that renders a `dropExtension` inverse from the recorded create:
+
+    intact                          ok 127        139 tests, 139 pass
+    lookup neutered                 not ok 127    138 pass, 1 fail
+
+One failure, and it is the new arm. The schema and sequence arms live in the SAME
+`vendor_inverse_from_history` function and both kept passing, so this is not a shared failure mode.
+
+THE ARM ASSERTS ABSENCE FIRST. An extension is database-wide, so a copy left by anything else would
+make both later assertions read backwards - the post-apply "it was dropped" would pass for the wrong
+reason and the post-rollback "it came back" would pass without a rollback. It fails with a message
+naming that rather than reporting a false green.
+
+A VERIFICATION DECISION, recorded because it is a departure. The full gate was KILLED three times
+mid-run - twice at `cargo clippy`, once during the test compile - reaching `FMT_RC=0` and, on the
+third, `CLIPPY_RC=0`. Rather than retry a fourth time or treat two stage RCs as a gate, I checked
+whether the Rust gate was in scope at all:
+
+    git diff --name-only e7019eb3..HEAD -- '*.rs'    -> 0 files
+    git diff --name-only e7019eb3..HEAD             -> docs/review-log.md
+                                                       packages/.../host/policy.ts
+                                                       packages/.../host/rollback-live.test.ts
+
+`e7019eb3` is the tree on which the last COMPLETED four-crate run reported 114 targets / 2500 passed /
+0 failed. Its Rust source is byte-identical to the committed tree, so that result carries forward as a
+measurement rather than an assumption. What was actually run for this change: `tsc --noEmit` RC=0, the
+host suite at 139/139, the mutation at 138/1, and `cargo clippy --all-targets -- -D warnings` RC=0 on
+the committed tree.
+
+NOT VERIFIED: a fresh `cargo test` on this exact tree. It is unaffected by construction and the
+construction is proven above, but the command did not run, and "unaffected by construction" is the
+shape of claim this log has had to retract twice today. Recorded as a gap rather than dressed up.
+
 ## F313 - I filed a schema-leak finding and refuted it myself an hour later, having never run the one command that tested it
 
 The suite leaves nothing behind on a green run. Counting every non-system schema in the live container
