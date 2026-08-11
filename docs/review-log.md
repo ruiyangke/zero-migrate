@@ -8990,6 +8990,57 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F333 - a consumer's hypothesis about my code was right in conclusion and wrong in mechanism, and measuring it found a second divergence
+
+zeroship's ZEROSHIP-2026-08-11-239 recorded a hypothesis they explicitly did not ask me to answer:
+that if the empty-priors projection skip from F331 is not MySQL-specific, their dev tier (a fresh
+SQLite file rebuilt on every run, so an empty journal every time) and their deployed tier (PostgreSQL
+against a long-lived schema, so priors) do not run the same code. Cheap for me, expensive for them.
+
+READING SAID YES, dialect-independently. `crates/zero-migrate-node/src/verbs.rs:303` branches before
+any dialect dispatch:
+
+    let artifact = if prior_envelope_json.is_empty() {
+        match crate::lower::lower_envelope_to_plan_with_live(...)   // builds no projection
+        ...
+    } else {
+        ... lower_ordered_envelopes_to_plans_for_apply(...)         // builds one
+
+MEASURING FOUND SOMETHING ELSE. An unguarded `dropView` of an absent view on SQLite, WITH a prior
+applied, does not produce a fold refusal:
+
+    actual: 'backend error: sqlite migration statement failed: no such view: view_drop_active'
+
+not `failed to project pending schema`. So on SQLite the prior changes nothing, and the reason is
+already documented at packages/zero-migrate-cli/tests/host/existence-guard-fold-projection.test.ts:630:
+`apply()` with a sqlite driver calls `applyIrSqlite`, whose `deploy_envelopes` loop re-snapshots the
+live catalog after every envelope and therefore never builds a pending-schema projection at all.
+
+So there are TWO independent divergences, not one:
+
+    SQLite apply        never projects, prior or not  (deploy_envelopes re-snapshots)
+    MySQL/PG apply      projects only when a prior exists  (verbs.rs:303)
+
+zeroship's conclusion - "our two tiers are not running the same code" - is correct and in fact
+understated, because the mechanism they guessed is not the one that governs their dev tier. Their
+SQLite dev tier would diverge from a PostgreSQL deployment even if every apply there had priors.
+
+The arm added here asserts the SQLite half in both histories, and asserts on the ERROR TEXT rather
+than on failure, because both cases fail and only the wording says which layer refused. My first
+version of it encoded the wrong model, asserted a fold refusal on SQLite, and failed - which is the
+third time today a fixture rather than the product was the thing that was wrong (F331, F332).
+
+Also worth recording: the host suite's addon freshness gate caught the run before it could produce a
+misleading result, because the F332 comment edit post-dated the binary:
+
+    Error: the host suite's addon is older than the sources it is built from.
+      addon:      2026-08-11T16:49:06.946Z
+      newest src: 2026-08-11T16:55:06.244Z  crates/zero-migrate-guard/src/guard/mod.rs
+
+That is F328's lesson enforced automatically instead of being noticed.
+
+Gates: host suite 149 tests / 149 pass / 0 fail / 0 skipped, against an addon rebuilt from this tree.
+
 ## F332 - #30's last leg: the stub IS reachable in production, and the comment defending it named a fact that is false
 
 #30 came down to one question - does `check_node` reach the three readers of
