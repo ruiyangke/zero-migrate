@@ -8990,6 +8990,62 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F346 - the projection guard is on the APPLY lowering path, so linking the addon does not buy it
+
+A consumer corrected their own earlier report: their build tier DOES link the addon (a vite
+plugin calling `genArtifacts`), their deployed tier is pure Rust. They kept one inference -
+that the deployed tier's lack of a pending-schema projection is harmless because the artifacts
+it applies "were already generated through the guarded path" at build time.
+
+That inference needs `genArtifacts` to run the projection. It does not.
+
+    crates/zero-migrate-node/src/api.rs:155   pub fn gen_artifacts_from_envelopes(...)
+      its entire lowering tail:   match render_artifacts(&ops, dialect, schema, &effective) {
+
+    crates/zero-migrate/src/render/gen_types.rs:417   pub fn render_artifacts(
+      -> the ENGINE crate, not the addon
+
+    grep -n 'lower::|lower_envelope|lower_ordered' crates/zero-migrate-node/src/api.rs
+      -> no matches
+
+    git grep -c ProjectionGuardVerdict -- 'crates/*.rs'
+      crates/zero-migrate-node/src/lower.rs:9
+      crates/zero-migrate/tests/drop_view_rollback_pg.rs:1
+      the nine sit inside lower.rs:562 `lower_ordered_envelopes_to_plans_inner` (639, 647,
+      701, 713) and its helper (enum 1312, builder 1341-1378)
+
+So the condition for getting the projection is not "links the addon" - it is "goes through
+APPLY lowering". Generation and apply are different entry points into the same crate, and only
+one of them projects. The type does not exist in the engine crate at all, so the generation
+path cannot reach it even indirectly.
+
+This sharpens #214. The Rust-boundary documentation I shipped under 8c64ec66 says a Rust
+embedder does not get the projection. The more precise statement is that NOBODY gets it except
+through `applyIr` / `applyIrSqlite` / `rollback` / `rollbackSqlite`, and a Node host that only
+ever calls `genArtifacts` is in exactly the same position as a pure-Rust embedder. Host
+language was never the real axis; entry point is.
+
+### A correction to F345 that came from outside
+
+F345 recorded `genArtifacts` as a second possibly-dead export - twelve methods on the CLI's
+`MigrateAddon` (addon.ts:76), `genArtifacts` omitted, its only in-repo callers a single host
+test that declares its own local interface. It is not dead. The consumer above is a production
+caller of it. "No caller" was true of this repo and false of the world, which is the limit I
+had labelled on the finding and which turned out to bind.
+
+What survives, and is worth more than the original claim: `genArtifacts` has a real external
+consumer and exactly one in-repo test, so it is less defended by my suite than any verb the CLI
+drives. Told them so rather than leaving them to assume parity of coverage.
+
+VERIFIED BY ME on this checkout at 4af48ca7: every file:line above; that api.rs contains no
+reference to the lower.rs lowering functions; that `render_artifacts` is defined in the engine
+crate.
+NOT VERIFIED: this is a reachability argument from the type existing in one file, NOT an
+observed refusal. I have not run a fold-refusing migration through `genArtifacts` and watched
+it pass. Nor have I measured what `deploy_envelopes` re-snapshotting covers, which is the
+mechanism that might make the absence harmless on the apply side. The consumer's tree is taken
+entirely as reported; I have not fetched it.
+
 ## F345 - the addon ships a build identity for a host to log, and the host neither types it nor logs it
 
 Swept the fourteen published napi exports for the #75 class - a shipped export with no
