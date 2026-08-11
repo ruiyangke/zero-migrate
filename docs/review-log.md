@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F297 - the rule F293-F296 derived was already shipped, and #129's remaining work is one call site
+
+Before building #129 I checked whether the preflight seam already existed. It does, and so does the
+rule. `blocking_column_dependents` (apply/backend/postgres/mod.rs:288) landed on 2026-08-09 under
+#167 (`be15281`), and its doc comment already states what F293 through F296 spent four iterations
+re-deriving:
+
+    /// Refuse iff a NORMAL dependency exists, or an AUTO dependency from an index
+    /// a constraint internally owns exists WITHOUT that constraint also depending
+    /// on the column. The obvious "any NORMAL dependency" filter is WRONG: it
+    /// misses an EXCLUDE whose expression reads the column, which reports AUTO and
+    /// is still refused, because the exclusion's index is internally owned by its
+    /// constraint. Where the constraint ALSO depends on the column directly,
+    /// PostgreSQL drops the whole constraint and the drop succeeds
+
+Both traps named there are the two I rediscovered: F293's refutation of the NORMAL-keyed rule, and
+the constraint-versus-index distinction F294 landed on. It is backed by
+`tests/pg_column_drop_dependency_oracle.rs`, which attempts a real drop per shape and compares.
+
+WHY I RE-DERIVED IT. #129's description carried the NORMAL-keyed rule as its "corrected" formulation
+and listed "verify the pg_depend joins" as a first step. I did what the ticket said and went to the
+database, without first asking whether the engine already had a dependency predicate. One grep for
+`blocking_column_dependents` would have found it. The ticket was stale, and I extended it rather than
+checking it - the same shape as F291, one iteration later.
+
+WHAT THE FOUR ITERATIONS ACTUALLY ADDED, stated narrowly so nobody reads them as the origin of the
+rule:
+  - F296's cross-version confirmation. The oracle runs against whatever `ZERO_MIGRATE_TEST_PG_URL`
+    points at, which is the compose file's PostgreSQL 18. The twelve fixtures on 16.14 are new.
+  - One shape the oracle lacked: a column reaching a constraint through an index WHERE PREDICATE
+    rather than an expression key, plus its key-column control. Added to the oracle.
+Everything else duplicated knowledge the tree already held.
+
+AND A CLAIM I NEARLY OVERSTATED ABOUT THAT SHAPE. It reads like it isolates the ownership branch, so
+I mutation-tested instead of asserting: removing the internal-ownership check from the predicate
+fails on `idx_pred` FIRST - an existing shape. So `excl_expr` and `idx_pred` already exercise both
+sides of that branch, and the new pair adds SHAPE coverage, not BRANCH coverage. Its real value is
+narrower and now written at the site: an index predicate and an expression key are different catalog
+constructs that produce the same dependency today, so a future predicate trying to tell them apart
+would be caught here and nowhere else.
+
+A GAP FOUND WHILE READING IT. The predicate's doc said the oracle verifies it. The oracle runs its
+OWN SQL spelling of the same rule - an aggregate `bool_or` form against the production query's
+row-filtering form - so the two are independently maintained and an edit to production would not fail
+the oracle. Both encode the same rule today; nothing enforces that they stay that way. The doc now
+says so rather than claiming a verification it does not have, and its stale "10 shapes" is now 12.
+
+*** WHAT #129 ACTUALLY NEEDS, which is much less than it says. The predicate exists and is correct.
+Its ONLY call site is engine.rs:1835, inside a loop over
+`PlanStep::OnlineRename(RenameStep::PgExpandContract(plan))`, so it fires for the online rename and
+nothing else. A plain `Op::DropColumn` reaches PostgreSQL unguarded. The remaining work is to call
+the existing predicate for column-drop steps too - one call site and its refusal, not the two-layer
+build the ticket describes. ***
+
 ## F296 - the rule survives a major-version change: twelve fixtures, identical on PostgreSQL 16.14 and 18.4
 
 F295 named the last untested condition - a second major PostgreSQL version - and recorded that the
