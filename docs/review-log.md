@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F313 - I filed a schema-leak finding and refuted it myself an hour later, having never run the one command that tested it
+
+The suite leaves nothing behind on a green run. Counting every non-system schema in the live container
+at 127.0.0.1:5434 either side of the whole zero-migrate suite:
+
+    BEFORE=88
+    cargo test -p zero-migrate --no-fail-fast    TEST_RC=0
+    AFTER=88
+    NEW schemas left by the run:  (none)
+
+So happy-path cleanup is complete across the suite and the 88 sitting there are historical. Note what
+this does NOT show: a guard only fires on an UNWIND, so a green run exercises the explicit cleanup and
+says nothing about guard coverage. The three mutation proofs in F310 and the #203 close are still the
+only evidence for that half.
+
+RECORDED AS A MEASUREMENT FLAW IN MY OWN COMMAND: I piped `cargo test` through `tail -3`, so the
+per-target totals are gone and I cannot quote how many targets ran. `TEST_RC=0` from `PIPESTATUS[0]`
+with `--no-fail-fast` is what carries the claim that the suite passed. The count would have cost
+nothing to keep.
+
+THE PART WORTH WRITING DOWN. Before that measurement I filed a ticket (#205) claiming
+`pg_status_project_lock.rs` and `pg_project_lock_grant.rs` create `proj_`/`meta_` schemas through the
+engine and strand them, and that #203's sweep missed them because it narrowed candidates by grepping
+for the literal string `CREATE SCHEMA`. Both files were then measured:
+
+    BASE=88
+    --test pg_status_project_lock   ok. 2 passed   AFTER=88
+    --test pg_project_lock_grant    ok. 6 passed   AFTER=88
+
+Zero delta. `pg_project_lock_grant.rs` is decisive because it has NO cleanup at all, so a created
+schema could only push the count up. Those files take an advisory lock; the `proj_{tok}` in their
+`cfg_for` is a config value nothing materialises. The real producers of that family are five files
+that DO materialise it - fts_index_name_truncation_pg.rs:50, index_name_scheme_alias_pg.rs:59,
+pg_declarative.rs:52, truncated_identifier_pg.rs:56, declarative_require_rls_pg.rs:108 - and every one
+of them is already guarded, which puts that family back on SIGKILL exactly where F310 first put it.
+
+I ALSO HAD `ExecutorConfig::new`'s ARGUMENT ORDER BACKWARDS while building the claim, inferring it
+from sibling call sites rather than reading conn.rs:182-186 where the second parameter is the schema.
+Infer a signature from call sites and you learn the convention, not the contract.
+
+THE COMPOUNDING IS THE LESSON, not any of the three errors. I found a naming coincidence, built an
+attribution on it, built a meta-critique on the attribution - that #203 had committed the same
+enumeration-basis sin this log spends F309 to F312 on - and wrote all three up before running the
+delta. The critique was the most seductive part precisely because it used this session's own
+vocabulary back at me, and it evaporated with its premise: if the two missed files create nothing,
+missing them cost nothing, and I have no demonstrated instance that the grep basis was insufficient.
+It may still be insufficient. I have not shown it.
+
+A finding that arrives already fluent in the local idiom deserves the cheapest disconfirming
+measurement FIRST, not the writeup first. The delta cost two commands and a few seconds; the
+paragraph explaining why the grep was the wrong basis cost more than that to write.
+
 ## F312 - the second enumeration basis landed, and the first thing it caught was my model of the predicate
 
 #202 is done: e7019eb3. The oracle groups the fixture's columns by the CATALOG FOOTPRINT the shipped
