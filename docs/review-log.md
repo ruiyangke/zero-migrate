@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F308 - the last leg read, and it refutes F307's expectation: the check IS reachable, and the entry point is exported with no production caller
+
+F307 predicted #30 would resolve the way F133 did - method unreachable, delete it - and said plainly
+that the last leg was unread and the resemblance was not evidence. Read now, and the prediction was
+wrong in both directions at once.
+
+REACHABLE, unlike F133's method. `check_node` (guard/mod.rs:1305) calls `check_namespace_structural`
+at its step 2c, whose own comment names "II.2.6 creation-gating + injected-shape immutability" - the
+three `is_injected_shape` consumers. And `check_body_text` (:2524) does not merely walk expressions:
+
+    (a) it re-parses the body as SQL and calls check_node on EVERY parsed statement
+    (b) it re-parses embedded STRING LITERALS and calls check_node on those too, with the
+        comment naming `EXECUTE 'CREATE ROLE ...'` as the case it exists for
+
+So a body carrying `EXECUTE 'ALTER TABLE t RENAME COLUMN <injected> TO x'` reaches the immutability
+check, where `BodyScopeDecisions::is_injected_shape` returns false and the denial cannot fire. The
+F133 disposal - "a correct value nobody reads" - does not apply, because this one IS read.
+
+BUT THE ENTRY POINT HAS NO PRODUCTION CALLER. `check_raw_view_body_text` (:2726) is the sole
+constructor of `BodyScopeDecisions`, and every reference to it outside its own definition is in
+crates/zero-migrate-guard/tests/guard_smoke.rs (six hits, :14 through :209). Nothing in `crates/`
+calls it in production.
+
+WHICH MAKES IT NEITHER OF THE TWO THINGS THE TICKET OR F307 PROPOSED. It is not a live hole in the
+engine's own paths, because no production path constructs the adapter. It is not dead code to delete
+either, because the function is `pub`, documented as a compatibility scanner, and therefore part of
+the exported surface an embedder can call - and when they call it, they get an injected-shape rule
+that silently never fires.
+
+This is the inverse of a lesson this review has leaned on repeatedly: a shipped function with no
+caller is not a shipped feature. Here the function has no INTERNAL caller and IS exported, so the
+usual conclusion runs backwards. Reachability inside the crate was the wrong question; who can reach
+it from outside was the right one.
+
+WHAT I GOT WRONG AND WHY IT WAS WORTH THE READ. F307 laid out a precedent that fit, on the same type,
+with the same permissive-constant shape, and predicted the same disposal. Every part of that
+resemblance was real and the conclusion still did not hold. Corroboration from a precedent is the same
+trap as corroboration from an instrument - it is agreement, not evidence, and it suppresses the check
+more effectively than suspicion does.
+
+STILL NOT DECIDED, deliberately: what to do. The options are now (a) implement the check for body
+scope, (b) make the adapter refuse rather than permit, or (c) narrow the exported surface so a caller
+cannot get a scanner that answers this question at all. That is a public-API decision and wants the
+usual split, which has been degraded all session at the 200-agent cap. #30 stays open with the
+reachability question CLOSED and the disposition open.
+
 ## F307 - #30 has a precedent it does not cite: F133 answered this exact question for a sibling method and the answer was deletion
 
 F306 left #30 with two open questions - reachability and intent - and said the site carries no comment
