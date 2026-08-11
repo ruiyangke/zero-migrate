@@ -9062,9 +9062,15 @@ project lock. The ticket's `verbs.rs:472, 519` citation resolves to neither.
 
 `cargo clippy -p zero-migrate-node --all-targets --features napi -- -D warnings` fails, and
 not on this change - `git status` showed only `bridge.rs` and `runtime.rs` modified when it
-fired. It is an unused `resolved_contracts` at `verbs.rs:547`, filed separately. The reason
-it went unnoticed is worth its own note: the workspace `cargo clippy --all-targets` passes,
-because the addon's `napi` feature is off there, so nothing lints the file this lives in.
+fired. It is an unused `resolved_contracts` at `verbs.rs:547`, filed separately.
+
+Why the gate never saw it is worth its own note, and my first answer was wrong. It is not
+the `napi` feature: the same command fails with the feature OFF. It is `default-members` at
+`Cargo.toml:11`, which lists the four library crates and leaves `crates/zero-migrate-node`
+out, so the workspace-root `cargo clippy --all-targets -- -D warnings` the gate runs never
+compiles the addon crate at all. `Cargo.toml:4-10` says the exclusion is deliberate - a bare
+`cargo build` should not pull the napi toolchain path - so what is missing is a separate
+addon-crate lint step, not a change to that list.
 
 ### Gate
 
