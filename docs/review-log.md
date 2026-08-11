@@ -8990,6 +8990,39 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F336 - #214's documentation half shipped: the Rust boundary is stated, and it says the refusal MOVES rather than disappears
+
+F335 established the fact and killed the safety claim. This writes the surviving half where a reader
+meets it: a new "Rust boundaries" section in docs/embedding.md, sitting as a peer of the existing
+"JavaScript boundaries" list, because it was that list running one way only that made the omission
+read as completeness.
+
+What it now says, and the wording is the point:
+
+  - the pending-schema projection is a property of the Node host lowering, not of the engine, with
+    the symbol evidence named;
+  - it is a difference in STRATEGY, not a missing check - `MigrationEngine` re-reads the live catalog
+    as it goes and decides each envelope against the database;
+  - measured, with the test named: a drop of a view nothing created is refused on BOTH hosts. "The
+    refusal moves layers; it does not disappear."
+  - the consequence a host should plan for is WHEN and IN WHAT WORDS it learns - apply time against a
+    live connection in the database's vocabulary, versus lowering time before any statement is sent
+    in the engine's - plus the concrete warning that a host matching on message text will not see the
+    projection wording;
+  - and plainly: no case is known where the projection refuses something the database then accepts,
+    with an invitation to report one.
+
+That last line is doing real work. It states the gap that WOULD matter, says it is not known to
+exist, and does not imply it does. Writing "Rust embedders get fewer checks" would have been shorter
+and unsupported.
+
+Ticket item 3 answered while here: docs/embedding.md is the ONLY page carrying the one-directional
+claim. `grep -rn 'full engine plans' docs/*.md` returns embedding.md:4 and one hit inside this log.
+
+Left as-is deliberately: the opening sentence at embedding.md:3-5 still recommends the Rust API for
+"full engine plans", which remains true - the new section is the qualifier, and rewriting the opener
+to hedge would trade a true summary for a muddier one.
+
 ## F335 - a consumer's audit of MY tree found a real documentation gap, and measuring it killed the safety claim I was about to attach
 
 zeroship, checking their own topology, established that `ProjectionGuardVerdict` appears in exactly
