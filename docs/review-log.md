@@ -8990,6 +8990,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F284 - I overstated #89's consequence, and the check that caught it found a dead feature gate
+
+Two things, and the second is only here because I went looking for the first.
+
+### The correction
+
+Last iteration I wrote in #89 that an orphaned `<col>_masked` column gets proposed for a
+DESTRUCTIVE drop on the next declarative deploy, citing `schema/diff.rs:1513-1526`, and called it
+"the two halves disagree". The code at that line says exactly that. What I claimed about behaviour
+did not follow, because the differ does not run here.
+
+I had named the blocking question myself - "whether a project driving authored `Op::DropColumn`
+also runs the declarative differ over the same table" - and then answered the ticket as if the
+answer were yes. Checking it:
+
+    $ cargo check -p zero-migrate --features introspect
+    error: the package 'zero-migrate' does not contain this feature: introspect
+
+`read_live_schema` (diff.rs:672) is the function that would produce the `LiveSchema` that
+`compute_diff` compares against. It is behind `#[cfg(feature = "introspect")]`, a feature that is
+not declared, over `compio_postgres`, which is not a dependency and appears zero times in
+`Cargo.lock`. And `compute_diff` (diff.rs:1003) has no caller outside its own in-module tests.
+
+So the corrected #89: the sibling is orphaned and NOTHING in this repo collects it. The verdict
+(defect, not deliberate) is unchanged - the asymmetry stands on its own, one authored op creating
+two columns and its mirror removing one, with no recorded rationale and a purpose-built
+`MaskRemove` (diff.rs:162) the authored path declines to use. What was wrong was the severity, and
+an overstated severity in a ticket is the thing someone acts on.
+
+### The dead gate, filed as #198
+
+Ten `#[cfg(feature = "introspect")]` blocks - six in `schema/diff.rs`, four in `schema/error.rs` -
+gate on a feature that does not exist, over a crate that is not in the build graph. They cannot
+compile in any configuration. That is consistent with the deleted compio client the test-support
+header already describes; the client went and these did not.
+
+The part worth more than the tidy-up: a reader auditing drift behaviour finds a complete-looking
+differ, with destructive-drop classification and a `MaskRemove` op and per-field comparison, and
+reasonably concludes it runs. I did exactly that, one iteration ago, in writing.
+
+Also flagged there and not yet answered: `-D warnings` passes on the workspace, so Rust's
+`unexpected_cfgs` lint is not firing on `feature = "introspect"`, and I found no `check-cfg`
+configuration in either manifest. Whatever suppresses it would hide the next dead feature gate too,
+so that gets established before anything is deleted.
+
+### The pattern, now four for four
+
+F281 named it: when the question is what a CONSUMER observes, no amount of reading the producer
+answers it. This is the same shape a fourth time - the `napi` feature, `default-members`, `cause`,
+and now a differ I described as acting when nothing calls it. Each time the reading was accurate
+and the conclusion false, and each time the cheap check that would have caught it was one command.
+
+The habit that keeps failing is specific enough to name: I read a code path, find it coherent, and
+report what it WOULD do as what it DOES. The fix is not more care while reading. It is to treat
+"and this runs" as a separate claim needing its own evidence, every time - a caller, a test, or a
+command.
+
 ## F283 - the SQLite arm F282 left uncovered, and the staleness gate catching me
 
 F282 shipped the ownership probe for an unguarded `createTable`'s inline index and named its own
