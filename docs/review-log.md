@@ -8990,6 +8990,74 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F279 - rollback survives a contracted rename, and my "nothing lints the addon" claim was wrong
+
+#195 SHIPPED. Also a correction I have now made twice in the wrong direction and am fixing here.
+
+### The fix
+
+`lower_envelope_recovering_historical_renames` in `crates/zero-migrate-node/src/lower.rs` is the
+recovery block lifted out of `lower_ordered_envelopes_to_plans_inner`, and both the apply/status
+loop and the rollback loop now call it. The rollback lowering gained the `resolved_contracts`
+parameter the verb had been computing and discarding since the rollback verb was written.
+
+Extracted rather than copied, for the reason F278 gave: the block carries two gates, one of them
+flagged and one unconditional, and duplicating them is how the unconditional one eventually goes
+missing - it reads like a detail next to the flagged check above it.
+
+Rollback passes `strict_historical_apply = false`. The flag layers `validate_historical_apply_evidence`
+on top for apply; the base promise comes from `plan_has_no_journal_evidence`, which runs for every
+caller. The second test below is what holds that line.
+
+### RED, then GREEN
+
+    a_contracted_rename_earlier_in_the_history_does_not_block_the_rollback ... FAILED
+      "IrAuthor::lower of renameColumn on \"items\".\"a\" needs the live `a` column's type
+       (LiveSchema::table_snapshots) to reconcile the IR-carried type against the live column;
+       it is absent - refusing to lower a rename from an IR type alone"
+    the_recovery_still_refuses_a_rename_with_no_journal_evidence ... ok
+
+The control passed before the fix and still passes after, which is the point of it: the recovery
+must not become "trust any rename that fails to lower". Its fixture is the same catalog and the
+same envelopes with an EMPTY journal, and it asserts the ORIGINAL lowering error comes back rather
+than some new message the recovery invented.
+
+The other fixture is built the long way on purpose. The journal is derived by lowering the rename
+against the catalog it actually ran on - the pre-contract shape, where the source column still
+exists - and reading the versions off the resulting manifest. A hand-written version would have
+satisfied `plan_has_no_journal_evidence` by coincidence and proved the gate passes for the wrong
+reason.
+
+### The correction, and it is the third in this area
+
+I wrote in F274's amendment, in F275 and in #195 that nothing lints the addon crate, because
+`default-members` at `Cargo.toml:11` excludes it. That is true of the command MY gate script ran
+(`cargo clippy --all-targets -- -D warnings`) and false of CI, which runs
+
+    .github/workflows/ci.yml:69   cargo clippy --workspace --all-targets -- -D warnings
+
+`--workspace` overrides `default-members`. Measured on this run:
+
+    g3.clippy_ws.log:4   Checking zero-migrate-node v0.1.0 (/home/ruiyang/Projects/zero-migrate/crates/zero-migrate-node)
+
+So the addon crate IS linted by CI, the gate hole I described does not exist, and what was actually
+broken was my own local gate command omitting `--workspace`. I have corrected the reason for this
+once already - F274 first blamed the `napi` feature, and I replaced that with `default-members`,
+which was also wrong. Both times I reasoned from the command in front of me instead of reading the
+one CI runs.
+
+Which leaves a question I am NOT answering by assertion: the `resolved_contracts` warning was in
+the tree since the rollback verb landed, and `-D warnings` should have failed CI on it every run
+since. Either CI has been red, or it has not run, or something excludes it that I have not found. I
+have no CI history in front of me and am not going to guess which.
+
+### Gate
+
+    fmt 0, clippy --workspace 0, test 0, addon 0, addon build 0, index.d.ts drift 0, host 0
+    rust targets=113 passed=2493 failed=0 ignored=0, skip banners 0
+    addon targets=8 passed=68 failed=0
+    host suite 135 pass, 0 fail, 0 skipped
+
 ## F278 - the guarantee I was going to prove is already unconditional, and it changes #195's fix
 
 F275 left #195 blocked on one thing: `normalize_historical_renames` warns "This never authorizes
