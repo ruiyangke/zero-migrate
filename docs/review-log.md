@@ -8990,6 +8990,98 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F341 - the notation convention decided: one symbol carries five different relations, so a substitution table cannot be correct
+
+F340 left #11's fourth item open: what ASCII convention replaces the lattice notation. Decided now,
+and the deciding fact was not readability or reflow - it was that the symbol is OVERLOADED.
+
+### The measurement that settles it
+
+`crates/zero-migrate-policy/src/value_order.rs:49-56` uses one glyph and then enumerates four
+different relations for it, inside a single doc block:
+
+    /// `a [SYM]_value b` under `kind` - is `a` no LOOSER than `b`? (The security direction:
+    /// a draft value `a` is admissible against a charter value `b` iff `a [SYM] b`.)
+    ///
+    /// - `Bool`: `false [SYM] true` and reflexive; `true [SYM] false` is false (implication).
+    /// - `StrSet`: subset.
+    /// - `UintCharter`: `<=`.
+    /// - `OrderedEnum`: rank `<=` (tightest-to-loosest variant order).
+
+Two more meanings elsewhere:
+
+    crates/zero-migrate-policy/src/rule.rs:65     the composer enforces creatable [SYM] inject
+      -> scope containment
+    crates/zero-migrate-ir/src/policy.rs:76       `forbid` [SYM] `warn` [SYM] `allow`
+      -> a total rank chain over three postures
+
+So the same character means Boolean implication, set subset, integer comparison, enum rank, and
+scope containment depending on where it sits. A substitution table maps it to ONE spelling and
+therefore states four of those five wrongly. `<=` in particular reads as numeric comparison, which
+is right for exactly two of the five.
+
+Note also `[SYM]_value` at value_order.rs:49 - a subscripted variant of the operator. No substitution
+table has a row for that, which is a second sign the corpus is not shaped like a lookup.
+
+### The decision
+
+If the conversion happens: option (b) - per-site prose anchored on the API names the crate ALREADY
+owns. Not free-form English, and not a table. `scope/mod.rs:6-7` glosses the operators itself with
+`Scope::subset`, `Scope::meet`, `Scope::join`, `Scope::difference`, and `Nothing`/`All` for bottom
+and top, so the vocabulary is already in the tree.
+
+My one objection to (b) when I filed it was that algebraic-law sites would bloat into paragraphs.
+That is answered empirically. `scope/mod.rs:265-266` reads
+
+    /// `self [JOIN] other` - least upper bound, allowed to OVER-approximate ([SUPSET-EQ]):
+    /// `Objects(result) [SUPSET-EQ] Objects(self) [UNION] Objects(other)`.
+
+and becomes, at the same two lines:
+
+    /// Returns a least upper bound that may conservatively over-approximate the union:
+    /// every object denoted by `self` or `other` is also denoted by the result.
+
+No net growth, and it states the over-approximation in words rather than requiring the reader to
+know that the containment sign is doing that work.
+
+Reflow is not the constraint either way: substituting `<=` for the subsumption sign leaves only two
+rustdoc lines past the file's roughly 88-column shape and none past 100.
+
+CORRECTED, and I was the one who was wrong: I had proposed "subsumes" as the prose word. It is
+worse than the symbol. It is jargon, and its containment direction reads backwards about as often
+as forwards, so `forbid subsumes warn` is ambiguous in exactly the place the comment must not be.
+Per-site phrasing - "from most restrictive to least restrictive", "must be contained in", "no
+looser than" - says the actual relation each time.
+
+### What is still open, and it is not mine to close
+
+Whether the conversion happens at all. The honest reading is that this is conditional on something
+#11 never states: is ASCII-only source a hard requirement here, or a preference? If it is hard,
+(b) is the answer and exempting these comments would contradict the requirement. If it is
+aesthetic, option (c) - leave the notation alone and convert only decoration and literals - is
+defensible, because Rust and rustdoc handle these characters correctly and nothing is broken by
+their presence. #11 carries no stated rationale, so I am not inventing one. Flagged for Ruiyang as
+a yes/no, with the convention already decided for the yes branch so no further design is needed.
+
+### How this was decided
+
+One codex read-only opinion plus my own independent read, formed BEFORE the codex result arrived so
+the agreement is not an echo. The Opus half of the usual split was unavailable for the fourth
+session running (subagent spawn limit, 200 of 200), and I am recording that rather than presenting
+a one-sided result as a split.
+
+The two halves converged on (b) and diverged on one point - I proposed a uniform prose word, codex
+argued for per-site phrasing and was right. Both independently found the same three defects in my
+own scoping that F340 records: the alphabet was wider than the nine characters, not every site is
+a doc comment, and `compose.rs:1579` renders the glyph into user-visible diagnostics.
+
+VERIFIED BY ME just now, by reading each site: the four relations enumerated at value_order.rs:49-56,
+the scope-containment use at rule.rs:65, the rank chain at ir/policy.rs:76, the join doc at
+scope/mod.rs:265-266, and the API gloss at scope/mod.rs:6-7.
+NOT VERIFIED: the reflow figures (2 lines past 88, none past 100) are codex's measurement, not mine;
+I did not re-run the substitution to count columns. Nor have I written any of the replacement text
+into the tree - this decides the convention, it does not implement it.
+
 ## F340 - #11 measured: 87 percent of the non-ASCII is decoration, and the naive em-dash rule would rewrite the fixture that proves em dashes are handled
 
 #11 has sat in the queue reading like the cheapest task on it - convert the tree to ASCII, no
