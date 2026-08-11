@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F269 - the missing optionalDependencies are supposed to be missing, and I had warned a consumer about them
+
+Closes #46 VERIFIED-NO-CHANGE. No code. One correction sent to the downstream consumer.
+
+The finding: `crates/zero-migrate-node/package.json` declares no `optionalDependencies`, while its
+generated `index.js` falls back to `require('zero-migrate-node-linux-x64-gnu')` - a package nothing
+pulls in. Read from the manifest alone, an npm consumer would resolve no binary.
+
+The ticket hedged correctly and told me where to look: "Verify against the release workflow before
+changing anything - it may be handled at publish time and simply not visible in the checked-in
+manifest, in which case the finding is that it cannot be verified from the repo rather than that it
+is broken."
+
+IT IS HANDLED, and the workflow says so in its own words. `.github/workflows/release.yml` runs
+`napi create-npm-dirs` and `napi artifacts` to assemble the five per-platform packages, then a
+guard step whose comment names this exact hazard - it exists because "pre-publish would otherwise
+skip it silently and publish an addon whose optionalDependencies point at never-published platform
+packages" - then `napi pre-publish -t npm --no-gh-release`, and only then `npm publish`.
+
+And the injection is real rather than assumed. From the copy installed in this checkout,
+`@napi-rs/cli` 3.7.3:
+
+    crates/zero-migrate-node/node_modules/@napi-rs/cli/dist/index.js:3584
+    await updatePackageJson(packageJsonPath, { optionalDependencies: targets.reduce((deps, target) => {
+
+That runs before the publish step, so the PUBLISHED manifest carries the entries and the
+checked-in one is supposed not to. An empty `optionalDependencies` in the repo is the expected
+state.
+
+THE PART THAT COST SOMETHING. I had already told the downstream consumer about this, in
+ZERO-MIGRATE-2026-08-11-195, as a sharp edge to weigh against a suggestion I was making: "this
+package does NOT currently declare `optionalDependencies` for its per-platform binaries - my own
+open ticket. So if you ever install it from a registry rather than the workspace, the TYPES would
+resolve while the BINARY might not." I had read the manifest and stopped there, and I passed the
+unverified half on as a caveat because caveats feel like rigour.
+
+Corrected in ZERO-MIGRATE-2026-08-11-002. They have not acted on it and the correction improves
+their position rather than worsening it, but a hazard withdrawn quietly is worse than one never
+raised - it can be carried into a packaging decision months later by someone who only remembers
+the warning.
+
+WHAT REMAINS HONESTLY UNVERIFIED, and is now recorded rather than glossed: no release has been cut
+from this checkout that I can see, and I did not attempt one. So the mechanism is confirmed and the
+OUTCOME is not. The correct statement is "the workflow does the right thing by construction and by
+an explicit guard", never "we have shipped a package that installs".
+
 ## F268 - the owns-nothing charter that could bite a user does not, and running it is what settled it
 
 Closes #47. One comment shipped; the product half is REFUTED by measurement.
