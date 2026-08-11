@@ -8990,6 +8990,49 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F335 - a consumer's audit of MY tree found a real documentation gap, and measuring it killed the safety claim I was about to attach
+
+zeroship, checking their own topology, established that `ProjectionGuardVerdict` appears in exactly
+one file of one crate. Re-run here, it reproduces:
+
+    grep -rn 'ProjectionGuardVerdict' --include='*.rs' crates/ | grep -v /target/
+      -> 9 occurrences, all in crates/zero-migrate-node/src/lower.rs
+
+with zero in zero-migrate, zero-migrate-guard, zero-migrate-ir, zero-migrate-policy. Their positive
+control (MigrationEngine, SqlSession, ExecutorConfig, each found across the Rust crates) reproduces
+too, so the instrument finds Rust-crate symbols when they are there.
+
+So the pending-schema projection is a property of the NODE HOST LOWERING, not of the engine. A host
+embedding `zero-migrate` in Rust never builds one.
+
+THE DOCUMENTATION HALF IS A REAL GAP. docs/embedding.md opens with "Use the Rust API when you need
+SQLite apply, custom policy, full engine plans, manifests, structural drift, or a host that does not
+run Node", and its "JavaScript boundary" section enumerates only what JS lacks relative to Rust. The
+asymmetry is documented in exactly one direction, so a Rust embedder would reasonably conclude they
+get everything the Node host gets and more.
+
+THE SAFETY HALF IS NOT, and I was one sentence from asserting it. Measured instead:
+`a_rust_embedding_refuses_an_absent_view_drop_at_the_database` in
+crates/zero-migrate/tests/drop_view_rollback_pg.rs drives a `dropView` naming a view nothing created
+through the documented Rust embedding path against live PostgreSQL. It is REFUSED - the message names
+the view and does NOT contain `failed to project pending schema`, so the refusal came from PostgreSQL
+rather than from a projection that does not exist on that path.
+
+Both hosts refuse the same authored migration. The difference is WHERE, not WHETHER. "A Rust embedder
+is less protected" is not supported by this case and is not written anywhere.
+
+What WOULD establish a safety gap, and nobody has produced one: an op the projection refuses that the
+database ACCEPTS. The existence-guard absorption at crates/zero-migrate-node/src/lower.rs:648-713 is
+where to look, because that is the projection's own decision rather than a fold error the database
+would catch anyway. #214 says so and says not to close it by bolting a projection onto the Rust path.
+
+The pattern worth keeping: a true structural finding (the symbol is absent) invites a behavioural
+conclusion (therefore less safe) that does not follow from it. The run is what separates them, and it
+took one test.
+
+Gates: fmt 0, clippy 0; 103 targets / 2196 passed / 0 failed / 2 ignored, zero LIVE-DATABASE COVERAGE
+SKIPPED banners.
+
 ## F334 - the PostgreSQL half I had flagged as unverified, measured; the projection matrix is now complete on all three dialects
 
 ZERO-MIGRATE-2026-08-11-037 told zeroship plainly that I had NOT measured the PostgreSQL half of the
