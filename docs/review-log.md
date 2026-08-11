@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F303 - the vacuous-gate audit a consumer's defect prompted: one real gap, now closed, and no others
+
+zeroship's drift gate was VACUOUS for an externally-tagged union and they did not know. Their
+extractor keyed on the internally-tagged shape (`{ op: "createTable" }`), returned an empty list for
+`Precondition` (`{ TableExists: {...} }`), and an empty list compared against an empty list PASSED.
+They measured it by injecting our new variant into their vendored schema: 19 pass, 0 fail, unchanged.
+
+They passed the concern back as a SHAPE-LEVEL suggestion, explicitly labelled inferred rather than a
+finding about our code. Worth checking rather than accepting or dismissing, because "does this gate
+actually discriminate" is the defect class this review keeps finding.
+
+THE ONE REAL GAP, closed in b51bd871 (#201): nothing enumerated `Precondition` variants here either.
+`op_variant_names_from_schema` covered `Op` alone. The byte-comparison gate did catch the new variant
+- verified, it was the only failing test when `ColumnHasNoBlockingDependents` landed - so this was
+never a hole in DETECTION. What it lacked was DEMAND: a byte comparison is cleared by one
+`UPDATE_SCHEMA=1` run without reading what moved, where a hard-coded list makes a human write the new
+name down. The new test is mutation-proven both ways, and the first mutation is the one that matters:
+keying its extractor on the `Op` shape fails on the non-empty assertion instead of passing.
+
+THE REST OF THE AUDIT CAME BACK CLEAN, and the negative result is recorded so nobody re-runs it:
+
+  - packages/zero-migrate/tests/ir-types-drift.test.ts is our own gate of the same name and job. Its
+    `enumTokens` and `variantTags` helpers ARE projection-shaped and CAN return empty, so the
+    mechanism is present. It cannot pass vacuously because every expected side is a hard-coded
+    non-empty list, and an empty extraction compared against a non-empty constant fails loudly. It
+    does not mirror `Precondition` at all, and that is correct rather than missing: the TS DSL does
+    not expose preconditions (the only two `precondition` hits in types.ts are doc prose about drift).
+    zeroship's tree hand-transcribes the union because THEY chose to; we do not, so there is nothing
+    to keep in step.
+  - crates/zero-migrate-node/tests/napi_exports_catch_panics.rs already carried the guard, with the
+    reason written at the site: "Pinned so a rename or a refactor that stops matching fails loudly
+    instead of passing over an empty set", asserting `attributes.len() >= 14` before filtering. Its
+    sibling test additionally proves the scanner handles the rustfmt-wrapped attribute shape three
+    real exports use, rather than trusting the main gate's silence.
+
+So the convention already existed in this repo, in one place, undocumented as a convention. The
+`Precondition` seed now states it a second time and says why.
+
+WHAT MAKES A PROJECTION GATE SAFE, since two of the three here are safe for different reasons: either
+the expected side is a non-empty constant (so an empty projection cannot match it), or the test
+asserts the projection is non-empty before comparing. The napi gate takes the second route, the TS
+drift gate the first, and the new `Precondition` seed takes both. A gate with an empty-able projection
+AND an empty-able expectation is the only genuinely vacuous shape, and none remains here.
+
+STILL NOT AUDITED, and NOT claimed: every extraction-shaped test in the tree. I checked the three
+gates whose job is drift or completeness. The general claim - that a projection-shaped gate can only
+fail vacuously when the projection can be empty - is reasoned from the shape, not proven exhaustively.
+
 ## F302 - the shipped rename guard's CHECK refusal is now MEASURED, and it was the last inferred claim in F300
 
 F300 and F301 both closed with the same caveat: that `blocking_column_dependents` no longer returns
