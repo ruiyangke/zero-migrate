@@ -8990,6 +8990,76 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F361 - DECISION: a typed column contract, not a signature string. #79(B)'s decided shape is reversed
+
+#79 half (B) decided a "modifier-preserving physical-type SIGNATURE" - normalise two spellings to a
+common string and compare. F360 measured that the two spellings genuinely disagree, which is grounds
+to revisit the shape before building it. Full dual opinion this time, not the degraded one #79 got:
+one codex read-only pass and my own independently formed reading. They converged.
+
+DECIDED: compare a TYPED CONTRACT of parsed values. Never compare rendered type text.
+
+### Why the string loses
+
+The failure modes are not symmetric. A string comparison turns any unrecognised spelling into
+"different", and different means FALSE DRIFT - loud, blocks deploys, discovered in production. Two
+such spellings already exist and are measured (F360): `DECIMAL(65, 30)` against `decimal(65,30)`, and
+`POINT SRID 4326` against bare `point`. Every future type added to `mysql_ddl_type` is another
+chance to add a third, silently.
+
+A typed contract makes those two disappear rather than special-casing them: precision and scale
+become integers, so spacing is not a concept; SRID was never part of `COLUMN_TYPE` at all and comes
+from its own catalog column.
+
+The maintainability argument is the one that settled it for me. `ColType` is a CLOSED model, so a new
+authorable type forces an explicit contract arm and the compiler says so. A string normaliser has no
+such pressure and accumulates spelling exceptions until someone notices a false red.
+
+### What the second opinion added that I did not have
+
+  - MySQL already exposes the facets SEPARATELY - `DATA_TYPE`, `CHARACTER_MAXIMUM_LENGTH`,
+    `NUMERIC_PRECISION`, `NUMERIC_SCALE`, `DATETIME_PRECISION`, `SRS_ID`. VERIFIED BY ME against the
+    gate's MySQL: all six exist on `information_schema.COLUMNS`. So `COLUMN_TYPE` needs parsing only
+    for residual facts - enum members, UNSIGNED, and the `tinyint(1)` boolean recognition. I had been
+    assuming the whole contract came from parsing `COLUMN_TYPE`.
+  - Family-GATED variants rather than a flat bag of optional facets, because comparing every
+    populated catalog facet is itself a false-drift source.
+  - The expected side must be derived at the FINAL physical-type decision
+    (`render/declarative.rs:1195 column_type_for_render`), not from `ColumnSnapshot.data_type`, so it
+    accounts for `ddl_type_override`, unbounded text storage, decimal overrides and named enums.
+    Ideally that finalizer returns both the DDL and the contract, so rendering and comparison cannot
+    diverge. This is the producers-versus-consumers trap: reading the input to the renderer is not
+    reading what the renderer decided.
+  - Do NOT gate the MySQL comparison on `introspected_table_dialect`; its `mysql_text_storage`
+    heuristic misses numeric-only tables. Populate the contract on every MySQL column.
+
+### Where equality lives, and the precedent for it
+
+One definition, three callers. The precedent is `partition_divergences`, which was deliberately
+hoisted for exactly this reason - VERIFIED BY ME at `crates/zero-migrate/src/apply/drift.rs:1553`,
+`pub(crate)`. The second opinion cited 1537; the function is at 1553.
+
+Add a sibling `column_type_divergences` beside it, called from structural `diff_attrs` (replacing
+`column_data_types_eq`, VERIFIED at drift.rs:2317), from
+`existence_probe::column_shape_divergence`, and from the MySQL declarative same-column decision.
+Carry `mysql_physical_type: Option<...>` on `ColumnSnapshot`, serde-defaulted, and extend the guard
+payload the same way. An older guard payload lacking the contract FAILS CLOSED rather than falling
+back to the lossy `text` comparison.
+
+`mysql_canonical_type` stays as a coarse family projection for FK and cursor uses. It stops being the
+authority on structural identity.
+
+### The one place the two opinions differed, and how it resolved
+
+My own reading wanted an explicit `Unknown` variant, resolved per consumer in each one's safe
+direction: a guard refuses to adopt, a differ declines to assert a difference it cannot establish.
+The second opinion did not raise it. It survives reconciliation because it is the same instinct as
+"fail closed on an older payload" applied to an unparsed type rather than an absent contract, and
+because the two consumers genuinely have opposite safe directions. It is a design note for the build,
+not a settled detail.
+
+NOT DONE: the build. This entry decides the shape and reverses #79(B). No code changed.
+
 ## F360 - the two spellings the MySQL signature must reconcile disagree, measured on 8.4.11
 
 F359 established that the signature is needed and named the four sites. Its whole design assumes the
