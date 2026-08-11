@@ -8990,6 +8990,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F283 - the SQLite arm F282 left uncovered, and the staleness gate catching me
+
+F282 shipped the ownership probe for an unguarded `createTable`'s inline index and named its own
+gap in as many words: the arm is dialect-gated on `Capability::SchemaWideIndexNames`, SQLite
+supports it, so the fix APPLIES there - but no test observed it. Closing that.
+
+Two arms in `crates/zero-migrate/tests/existence_guard_sqlite.rs`, beside the `createIndex`
+sibling they mirror:
+
+    create_table_unguarded_inline_index_name_owned_by_another_table_fails_closed
+    create_table_unguarded_inline_index_free_name_still_creates
+
+The control is a separate test rather than a tail on the negative one, because the negative arm
+returns as soon as it sees the refusal it is looking for and anything after that would never run.
+
+### Mutation, because there was no pre-fix RED here
+
+On the PostgreSQL side the RED came first, so its absence was the proof. SQLite got its arms after
+the fix, which makes them unproven until broken on purpose. Env-gated bypass on the new `else if`,
+every export intact:
+
+    test create_table_unguarded_inline_index_free_name_still_creates ... ok
+    test create_table_unguarded_inline_index_name_owned_by_another_table_fails_closed ... FAILED
+      the colliding inline index was accepted; versions applied:
+      ["mig_7n42DGM5RHVzlvcklNspA3", "mig_7n42DGM5R6dNYpknISh1Pq"]
+
+The negative arm fails with its own message and the control still passes, so it is load-bearing and
+the control is not a false positive.
+
+### The addon staleness gate caught me, correctly
+
+The full gate came back with the host suite at 20 tests, 0 pass, 20 fail, while Rust was green. Not
+a regression:
+
+    Error: the host suite's addon is older than the sources it is built from.
+      addon:      2026-08-11T03:05:21.589Z  crates/zero-migrate-node/zero-migrate-node.linux-x64-gnu.node
+      newest src: 2026-08-11T03:12:24.752Z  crates/zero-migrate/src/render/declarative.rs
+
+The mutation cycle rewrote `declarative.rs` twice and `cargo fmt` touched it again. The CONTENT
+ended byte-identical to the commit - `git diff --stat` showed only the test file changed - but the
+mtime moved past the `.node`. F247's gate is an mtime proxy and says so in its own message ("a
+comment-only edit also trips this"). Rebuilding the addon restored 137/137.
+
+Worth recording because the failure mode is indistinguishable from a real one at a glance: 20 of
+137 tests failing, on a change whose Rust half is green. The instinct is to look at the diff, and
+the diff is clean. The answer was in the first line of the host log.
+
+### One more self-inflicted false signal in the same run
+
+The rerun after rebuilding reported 137 tests, 116 pass, 21 SKIPPED - which reads like the fix
+disabled a fifth of the suite. It was my invocation: I exported only
+`ZERO_MIGRATE_TEST_PG_URL` and not `ZERO_MIGRATE_MYSQL_URL`, so every MySQL-gated arm skipped
+cleanly. Re-run with both, 137 pass, 0 skipped. The skip-visibility work from #41 is what made that
+legible rather than silent.
+
+### Gate
+
+    fmt 0, clippy --workspace 0, test 0, addon 0, index.d.ts drift 0, host 0
+    rust targets=113 passed=2495 failed=0 ignored=0, skip banners 0   (2493 before; the two new arms)
+    host suite 137 pass, 0 fail, 0 skipped
+
 ## F282 - a createTable's inline index gets the ownership probe its standalone peer already had
 
 #85 SHIPPED. #81 closed this collision for `Op::CreateIndex`; the same collision reached through a
