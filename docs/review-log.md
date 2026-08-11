@@ -8990,6 +8990,73 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F357 - undoing a function's body change deleted the function, and said it worked
+
+#211's repair was decided by elimination long before this. What it recorded as unproven was the
+behaviour itself: "the instrument has never reached the rollback. Everything about the BEHAVIOUR is
+read, not run." This ran it.
+
+### The blocker was smaller than the ticket thought
+
+The ticket's next step was to BUILD `VendorAuthority` plumbing for tests. None was needed.
+`load_ir_document_authorized` is already public (`model/load.rs:70`) and `support::operator_charter`
+already returns the `EffectivePolicy` that `VendorAuthority { effective, default_schema }` takes. The
+instrument was simply calling the unauthorized `load_ir_document`, which keeps the scope-derived
+fallback that "grants nothing outside an operator posture" - and THAT, not a missing capability, is
+what produced the `VENDOR_OP_DENIED` refusal the ticket attributed to the capability set.
+
+Threading the charter through the authorized entry point was the whole fix to the harness.
+
+### What the rollback actually did
+
+```
+PROBE rollback=ok RollbackOutcome { rolled_back: ["mig_7n42DGM5ScOJ88p9mizZEC"],
+                                     skipped_irreversible: [] } function_after=None
+```
+
+`function_after=None` is read from `pg_proc.prosrc` through the live session. Rolling back a
+migration that only CHANGED an existing function's body deleted the function, reported success, and
+recorded nothing as skipped. The ticket's inference was right, and it is now measured.
+
+### The repair
+
+`render/vendor.rs`, mirroring the view fix `f33e742b` and conditional the same way:
+
+```rust
+let down = if replaces_existing {
+    None
+} else {
+    Some(format!("DROP FUNCTION IF EXISTS {qname}({args_sql})"))
+};
+```
+
+A create that brought the function into being is still undone by dropping it - that inverse is
+correct and stays. Only a replace, which edits an object predating the migration, becomes
+irreversible. `executor.rs:2563` turns that into `RollbackError::Irreversible` naming the version,
+and passing it needs both `force` and an explicit `backup_acknowledged`.
+
+Safety, not capability: strictly better than destroying, strictly worse than restoring. The previous
+body is still not put back, and cannot be - the fold treats CreateFunction as a structural no-op and
+`SchemaSnapshot` carries no functions map, so nothing at render time holds the prior source.
+
+### Mutation-proven
+
+The guard was disabled behind a temporary env check and the test re-run. It failed on the FIRST
+assertion, the one guarding the branch that changed:
+
+```
+the rollback must refuse a replace it cannot invert, and it succeeded:
+RollbackOutcome { rolled_back: ["mig_7n42DGM5ScOJ88p9mizZEC"], skipped_irreversible: [] }
+```
+
+Not an incidental failure elsewhere in the test. The test also re-reads the catalog after the
+refusal, because a refusal that still dropped the object would be the same defect wearing an error
+message.
+
+Gate: 117 targets, 2512 passed, 0 failed, 1 ignored, zero skip banners. The +1 over F355's 2511 is
+this instrument, no longer ignored; the remaining ignored arm is the view-restoration contract
+`f33e742b` deliberately left unreached.
+
 ## F356 - one stray terminate had two victims, and the suite hung rather than failed
 
 Found by running `test:host` after F355 and watching it stop dead. The output file sat at 9136 bytes
