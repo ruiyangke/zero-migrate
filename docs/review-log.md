@@ -8990,6 +8990,51 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F332 - #30's last leg: the stub IS reachable in production, and the comment defending it named a fact that is false
+
+#30 came down to one question - does `check_node` reach the three readers of
+`BodyScopeDecisions::is_injected_shape`? The site already carried a long comment answering it, which
+is exactly the kind of thing this review has been burned by, so the comment was checked rather than
+believed.
+
+Its conclusion (reachable) is right. Its load-bearing fact is wrong. It said:
+
+    `check_raw_view_body_text` is the sole constructor of this adapter and has no production
+    caller - every reference outside its definition is in tests/guard_smoke.rs.
+
+There is a production caller. `crates/zero-migrate/src/model/validate.rs:5499` calls it on every raw
+`viewBody`. The earlier grep that produced the claim had been run inside `crates/zero-migrate-guard`;
+widening it to the repository finds the caller immediately. A crate-scoped grep answering a
+whole-repo question is the same shape as F331's priors-free fixture - the command was correct and the
+question it answered was not the one being asked.
+
+WHAT ACTUALLY BOUNDS IT, which is a better justification than the false one it replaces: the gate
+directly above that call refuses any raw view body that is not a single top-level SELECT -
+
+    raw viewBody SQL must be a single top-level SELECT; DDL, DML, COPY, and utility
+    statements are refused
+
+so a rename cannot arrive as the body. It arrives only through arm (b) of `check_body_text`, which
+re-parses bare string literals, and a literal inside a view body is data that never executes.
+
+MEASURED, with a positive control, because "it was admitted" and "it never ran" look identical:
+`a_rename_inside_a_view_body_literal_is_walked_but_never_meets_the_injected_rule` in
+crates/zero-migrate-guard/tests/guard_smoke.rs. A rename written inside a literal against ANOTHER
+schema is DENIED with `GuardError::CrossSchema`, proving the literal is genuinely parsed and routed
+into the rename checks; the same rename inside the scope's own schema is admitted, which is the
+permissive answer this ticket is about.
+
+NOT IMPLEMENTED AND NOT DELETED, deliberately. F307 expected F133's precedent to transfer - that one
+deleted `effective_destructive_ops` from this same adapter because nothing read it. It does not
+transfer: this method is read by three consumers AND its entry point has a production caller. The
+residual risk is narrower and real: the function is `pub`, so an embedder calling it on text that is
+NOT gated to a single SELECT gets a scanner whose injected-shape rule silently never fires. Which of
+implement-or-remove is right is a public-API question and gets the two-opinion split the standing
+rules require, not a unilateral call at the end of an iteration.
+
+Gates: fmt 0, clippy 0, 13 targets / 309 passed / 0 failed for the three small crates - one more than
+the 308 baseline, which is the new test.
+
 ## F331 - #212 answered by tracing: the fixture was measuring a path no deployment takes, and my original reading was right
 
 F330 left the mechanism unnamed. Naming it took an instrument, not another read: a temporary
