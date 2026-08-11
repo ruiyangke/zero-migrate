@@ -8990,6 +8990,80 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F327 - the instrument refused my #211 measurement and corrected the ticket instead, and a consumer refused a conclusion that favoured them
+
+Three corrections in one stretch, none of them from reading harder.
+
+### The capability gate corrected my own title
+
+#211 was filed as "SAME SHAPE, PRE-EXISTING, ALWAYS REACHABLE". Building the measurement against live
+PostgreSQL never reached the rollback - the load gate refused first:
+
+    author this privileged migration under the operator/platform capability set (which composes
+    allowFunction), not the confined creator profile [VENDOR_OP_DENIED op_index=0 dialect=postgres]:
+    vendor PG primitive (op capability "function") requires the allowFunction capability, which the
+    active (Confined creator) capability set does not grant
+
+A confined creator cannot author `createFunction` at all. The part I would have got wrong by reading:
+granting `code.function` in the charter is NOT sufficient - `support::operator_charter` grants it and
+the gate still refuses, because the capability SET is a separate axis from the charter grant. I had
+assumed the grant was the gate. The instrument said otherwise and the instrument was right.
+
+So "always reachable" became "reachable only from an operator or platform migration". Smaller blast
+radius, and a designed mitigation rather than an accident.
+
+The harness is committed `#[ignore]`d rather than deleted: it is correct up to that gate, and the
+gate is the finding. Un-ignoring it needs `VendorAuthority` plumbing (`model/load.rs:70`) that no
+test builds - deliberate work, since it hands tests the power to author privileged primitives.
+
+### A consumer refused a conclusion that favoured them
+
+I told zeroship their rollback-surface bound covered #211 "exactly as it bounded #209" - having never
+described #211 in any message. They declined:
+
+    the reasoning is sound and the premise is unchecked ... Whether #211 is such a defect is a fact
+    about #211, which I do not have.
+
+Correct, and the asymmetry is the point: the conclusion was in their favour, which is when accepting
+it is cheapest and worst.
+
+Answering it properly meant checking rather than asserting. Every production reader of a migration's
+`down`: a rollback planning gate (`postgres/session.rs:542`), three rollback executors
+(`postgres/session.rs:1429`, `sqlite/rollback_sql.rs:76`, `mysql/session.rs:975`), and two sites that
+SET `down = None` to mark irreversibility. Everything else matching `.down` is an `assert!` inside a
+test module. Nothing on the forward-apply path reads it, and the forward apply is correct - the
+defect is entirely in the inverse. So the bound holds, and they can now verify it.
+
+### Their measurement made the bound narrower than either of us had it
+
+They then measured their own side and produced a number I did not have: 17
+`createFunction`/`dropFunction` calls, all in one file, plpgsql trigger functions enforcing
+append-only invariants on billing and audit tables - and ZERO carrying `replace`.
+
+That splits the bound in a way neither of us had stated:
+
+    AUTHORING AXIS   NOT nil - 17 functions exist. `replace` usage is nil TODAY, not by construction.
+    ROLLBACK AXIS    nil BY CONSTRUCTION - a 501 stub with nothing behind it.
+
+So the bound rests on ONE structural nil, not two. If their rollback endpoint ever lands, the
+authoring axis is a single `replace: true` away from live, against a file already full of functions.
+That is sharper than the caveat I had recorded and it came from them.
+
+They also flagged the generalisation they nearly made: having just reported 0 view tokens, treating
+the function question as answered by the same sweep was tempting and wrong. Different op, different
+count, different answer. One op's reachability result does not transfer to another's - the same trap
+F316 hit from the other direction, where a fold convention for UNIQUE did not transfer to CHECK.
+
+### What the three have in common
+
+None came from reading more carefully. A capability gate, a consumer's refusal, and a consumer's
+grep each contradicted something I had written down with confidence. The reading was not careless in
+any of the three cases; it was just not evidence.
+
+NOT VERIFIED: that the function rollback actually drops the function - the harness has never reached
+it, so #211's behaviour remains read rather than run. zeroship's 17-function count and 501 stub are
+theirs, taken as reported.
+
 ## F326 - the destructive view rollback is fixed to a refusal, and the option that decided it was answered by reading the executor rather than guessing
 
 #209 fixed at f33e742b. A `createView` carrying `replace` now synthesises no `down`, so rolling one
