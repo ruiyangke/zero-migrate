@@ -9059,12 +9059,51 @@ and make a drop irreversible that history could have inverted, since rollback re
 at `render/lower.rs:8418-8421`. And MySQL has no materialized views (`op_support.rs:246`, `:388`), so
 a populated entry must set `materialized: false` rather than leaving it unknown.
 
-VERIFIED by reading: the four chain sites, the op_support view arms, and that
-`merge_recovered_definitions` is called on the rollback path and not the apply path.
-NOT VERIFIED: that the refusal fires end to end, or the error text a user actually sees. The measure
-has to go through the host CLI suite against the live MySQL container, since there is no Rust harness
-for live MySQL (F256). The three hazards come from a codex read-only pass I have not independently
-confirmed.
+### The two links that could have rescued it, and do not
+
+Filing this found a handler for exactly the pair in question, which is the kind of thing that usually
+means the defect was already thought about. Both were read, and both confirm rather than rescue.
+
+`inflight_projection_already_reflected` (`crates/zero-migrate-node/src/lower.rs:1381`) has an arm at
+`:1561`:
+
+    (Op::DropView { name, .. }, FoldError::MissingView(actual)) => {
+        name == actual && !snapshot.views.contains_key(name)
+    }
+
+On MySQL `snapshot.views` is always empty, so that predicate is unconditionally true - which WOULD
+turn the drop into a no-op. But its call site at `:616` is gated on `inflight`, so it only applies to
+crash recovery, where MySQL may legitimately show either side of a non-transactional DDL. An ordinary
+pending drop never reaches it.
+
+The fall-through arm then hardcodes the verdict for this dialect (`:643-644`):
+
+    let verdict = if dialect == SqlDialect::Mysql {
+        ProjectionGuardVerdict::NotSatisfied
+    } else { ... };
+
+with the reason given at `:636-641`: "NOT MySQL. MySQL evaluates no existence probe at apply time, so
+a satisfied verdict here would send bare DDL to a backend that cannot check anything; its leg keeps
+refusing." That reasoning is about GUARDED ops absorbing a duplicate. An UNGUARDED drop of a view
+that genuinely exists is not the case it was written for, and refusing it is not the safety the
+comment is buying.
+
+`NotSatisfied` returns at `:713-717`, so the text a user gets composes that wrapper with the
+`FoldError` Display at `fold.rs:219`:
+
+    failed to project pending schema after envelope "<name>": fold: view `<view>` does not exist
+
+VERIFIED by reading, end to end with no gap left in the code path: the MySQL snapshot construction,
+the apply seeding and fold call, the DropView arm, the inflight gate and its predicate, the
+MySQL-hardcoded verdict, the returning arm, and the error Display. Also the op_support view arms, and
+that `merge_recovered_definitions` belongs to the rollback path and not the apply path.
+NOT VERIFIED: that this fires when actually run. Every link is read, but a read chain is not an
+executed one, and this review has twice found a composed chain that did not behave as its parts
+suggested. The measure has to go through the host CLI suite against the live MySQL container, since
+there is no Rust harness for live MySQL (F256), and the RED must capture the real text rather than
+the text predicted above. Note also that NO host test on ANY dialect currently exercises `createView`
+or `dropView`, so this is uncovered ground rather than a regression in something once proven. The
+three hazards come from a codex read-only pass I have not independently confirmed.
 
 ## F316 - MySQL's UNIQUE placement is deliberate on BOTH sides, and the fix I proposed for it would have created the drift defect I went looking for
 
