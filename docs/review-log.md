@@ -8990,6 +8990,59 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F312 - the second enumeration basis landed, and the first thing it caught was my model of the predicate
+
+#202 is done: e7019eb3. The oracle groups the fixture's columns by the CATALOG FOOTPRINT the shipped
+query reads, so which columns are comparable stops being anyone's judgement. Columns sharing a
+footprint must get the same answer from PostgreSQL; if two did not, no rule over that footprint could
+be right about both, and the repair would be to widen what the query READS rather than to adjust its
+logic. That is a different question from every other assertion in the file, which ask whether the
+predicate got a known column right.
+
+WHAT IT CAUGHT ON ITS FIRST RUN WAS MINE, NOT THE PRODUCT'S:
+
+    excl_mixed and excl_sep have the same catalog footprint
+    (a:pg_class:true:#1 | a:pg_constraint:false:#2) and PostgreSQL disagrees about them:
+    refuse=false versus refuse=true
+
+Read literally that says the basis is insufficient. It is not. The shipped query separates those two
+perfectly - F311 made it do so, by following the internal edge's `refobjid` to the constraint that
+OWNS the blocking index. I had written the footprint from the query as it stood BEFORE that leg
+existed, so the grouping key was coarser than the real basis.
+
+The general shape, which is worth more than the instance: a grouping key COARSER than the predicate's
+true input basis manufactures impossibility, and one FINER merely proves less. Only coarser produces a
+false alarm, so when this assertion fires the first question is whether the key still matches what the
+query reads. Codex named this exact hazard when the design was reviewed and I built the omission in
+anyway, because the basis had grown under me between the review and the code.
+
+That failure is also the determinism assertion's mutation proof, obtained for free: it fired, with a
+precise message, on a real disagreement.
+
+A SECOND ASSERTION THAT NOTHING PREVIOUSLY COVERED. The fixture DDL and `SHAPES` are two hand-written
+lists that can drift apart, and a column added to the DDL and forgotten in the list was checked by
+nothing while the loop still reported `checked == SHAPES.len()`. The enumerated set is now pinned
+against the listed set.
+
+A MUTATION I GOT WRONG, recorded because the wrong one looked convincing. To prove the vacuity guard I
+first replaced the dense rank over `objid` with the raw oid, expecting every column to become unique.
+The test stayed GREEN: `idx_pred` and `idx_key` depend on the SAME index, so they share an oid and
+still group. The control did not move, so it proved nothing about the guard. Folding `attname` into
+the key does produce the guarded state:
+
+    every column has a footprint of its own, so the comparison above compared nothing; the
+    grouping key has become finer than the predicate's real input basis, or the fixture lost
+    the columns that used to share one
+
+A mutation that leaves the test green is not evidence the assertion is sound; it is evidence the
+mutation missed.
+
+STILL NOT FIXED BY ANY OF THIS. The fixture is hand-built, so a construct absent from it is absent
+from both bases. The second basis removes the judgement about which columns are comparable; it does
+not conjure columns nobody wrote. Codex's stronger suggestion stands unbuilt: generate columns from a
+CROSS-PRODUCT of construct kinds rather than one instance of each, which is what would populate the
+fixture from something other than imagination.
+
 ## F311 - the drop-column gate waved through a drop PostgreSQL rejects, and the oracle could not have caught it
 
 F300 fixed this predicate once and recorded fifteen shapes agreeing. Fifteen agreements, and the rule
