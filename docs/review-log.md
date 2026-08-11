@@ -8990,6 +8990,81 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F345 - the addon ships a build identity for a host to log, and the host neither types it nor logs it
+
+Swept the fourteen published napi exports for the #75 class - a shipped export with no
+consumer. Thirteen have host-side callers. One does not.
+
+    git grep -w <export> -- packages | grep -v /dist/ | grep -v node_modules | wc -l
+
+    applyIr 6   applyIrSqlite 10   genArtifacts 7   history 68   irVersion 39
+    loadVerify 7   previewSql 14   resolvePending 14   rollback 121   rollbackSqlite 3
+    status 273   statusIr 2   statusIrSqlite 4
+    buildInfo 0
+
+`buildInfo` is not untested - `crates/zero-migrate-node/__test__/build_info.mjs` drives it
+through the real N-API boundary and is wired into the addon package's `test` script. It is
+unconsumed, which is a different thing, and F343's lesson says to read the item's own stated
+purpose before calling that a defect. Here the purpose is explicit and it names the missing
+party:
+
+    crates/zero-migrate-node/src/api.rs:47      pub fn build_info() -> BuildInfo
+    __test__/build_info.mjs:1  // `buildInfo()` through the real N-API boundary: the build
+                               // identity a host logs
+
+This repo ships a host. It does not log it.
+
+### Two measured facts
+
+    packages/zero-migrate-cli/src/addon.ts:76
+      the `MigrateAddon` interface declares 13 methods - irVersion, loadVerify, previewSql,
+      applyIr, applyIrSqlite, status, statusIr, statusIrSqlite, rollback, rollbackSqlite,
+      resolvePending, history, genArtifacts - and omits `buildInfo`. The CLI's typed view of
+      the addon cannot reach it without a cast.
+
+    packages/zero-migrate-cli/src/cli.ts:1473-1474
+      if (args.command === "version") {
+        process.stdout.write(`${packageVersion()}\n`);
+        return 0;
+      }
+      `packageVersion()` (cli.ts:62) reads the CLI package's own package.json. The output
+      says nothing about which native binary is loaded.
+
+### Why this is operational rather than tidiness
+
+Stale addons are a REPEAT incident here, not a hypothetical. #36 was a checked-in
+`.node` months out of date failing 10 host tests; #45 shipped a host-suite refusal for an
+absent or stale addon; F328 recorded a green host suite that turned out to be exercising a
+stale binary. `buildInfo().sourceDigest` is a sha256 of the workspace source folded in at
+build time - precisely the value that separates "the code I think I am running" from "the
+binary that is loaded" - and the operator-facing command named `version` cannot show it.
+
+### Not shipped yet, because the fix is an output-compatibility decision
+
+`version` currently writes a bare scalar and a newline, which is the shape a shell script
+consumes as `$(zero-migrate version)`. Nothing pins it - no test asserts the output, no doc
+documents it - so the format is simultaneously unprotected and plausibly depended on, and
+nothing would catch a wrong change. Same shape as #11's Class B.
+
+Options, dispatched rather than picked: (a) keep line 1 byte-identical and append the addon
+identity below; (b) leave `version` alone and expose the identity through a separate verb or
+flag; (c) make `version` structured, matching whatever machine-readable convention the CLI
+already uses. Codex opinion dispatched; the Opus half is still unavailable (subagent limit
+200/200), so this will land as one opinion plus my own read, labelled as that.
+
+A THIRD SAME-NAMED-TOKEN TRAP, and I am counting them now. Checking whether tests pinned the
+output, `git grep '"version"' -- packages/zero-migrate-cli/tests` returned three hits that
+look like exactly that pin. All three are a `version` COLUMN in a table fixture
+(authoring.test.ts:212, e2e-pg.test.ts:150, mysql-authoring.test.ts:178), unrelated to the
+command. After the dispatch table (F342) and the `touched_tables` field (F343), this is the
+third time in one sitting that a plain identifier grep produced confident, wrong hits.
+
+VERIFIED BY ME: the fourteen-export list from `crates/zero-migrate-node/index.d.ts`; the
+per-export reference counts by the command above; every file:line quoted; that no test or doc
+pins `version`'s stdout.
+NOT VERIFIED: that no EXTERNAL consumer calls `buildInfo` - I can only see this repo, and the
+export is published, so "no caller" means no caller here.
+
 ## F344 - the structural validator has no dialectal hole, and the match arm that says otherwise
 
 Tested a hypothesis with a real failure mode behind it: an op hidden inside a dialectal leg
