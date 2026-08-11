@@ -8990,6 +8990,77 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F282 - a createTable's inline index gets the ownership probe its standalone peer already had
+
+#85 SHIPPED. #81 closed this collision for `Op::CreateIndex`; the same collision reached through a
+`createTable`'s inline `indexes: [...]` was left open, and the ticket said so while warning that
+its own premise was unverified.
+
+### Premise, confirmed by me before touching anything
+
+The ticket asked for that explicitly, because on #81 the premise that turned out wrong was mine.
+Both halves hold:
+
+`lower.rs:4532` calls `decl.lower_create_table(name, &snap, live, guard.map(Into::into), &inject)`,
+and inside it the per-index loop at `declarative.rs:8086-8110` stamped its probe only under
+`if let Some(dir) = guard`. No `else if` beside it - which is exactly the arm #81 added at
+`lower.rs:4724-4750`. And the statement is still `IF NOT EXISTS`, pinned by existing tests at
+`schema/query.rs:5188` (SQLite) and `:5209` (PostgreSQL), with `query.rs:2220` already describing
+the consequence in its own words: "a `CREATE INDEX IF NOT EXISTS` that the server skips".
+
+### RED, measured against a live server
+
+Table A owns `idx_inline_shared`; a later migration creates table C with that name inline:
+
+    apply RESOLVED and the journal grew
+      [create_table_inline_idx_c:applied/completed,
+       create_index_idx_inline_shared:applied/completed]
+    while inline_idx_c carries idx_inline_shared: false
+
+Two completed journal rows, one of them a `create_index` for an index that does not exist. That is
+the defect as a pair the server itself reports, not an engine return value. The control arm - same
+migration, free index name - passed in the same run, so the negative arm was not passing against a
+createTable path broken outright.
+
+That RED is also the mutation evidence. The rule is that a new gate must be broken to prove the
+right test fails; here the gate did not exist yet, and its absence produced exactly that: arm 1
+fails, control passes. Re-deriving it with an env-gated bypass would have measured the same thing
+twice.
+
+### The fix, and why it is a second site rather than a reroute
+
+An `else if self.dialect.supports(Capability::SchemaWideIndexNames)` arm in the same loop,
+ownership-only, `expect: None`, `IfNotExists` - mirroring #81's.
+
+The ticket floated routing the inline indexes through the `Op::CreateIndex` path instead, as the
+smaller change if it did not reorder statements. It does. `lower.rs:4522-4531` explains why the
+inline indexes are emitted inside `lower_create_table` at all: a single shared Table probe would
+SatisfiedNoop them away (unit 0 creates the table, units 1..N see it present), so each unit carries
+its own object-scoped probe and the CREATE TABLE plus its indexes stay one ordered unit list.
+Rerouting breaks that ordering, which the ticket forbade.
+
+The four scope caveats carry across from #81 in substance: not MySQL (per-table index names, no
+`IF NOT EXISTS`, no probe evaluation), not a collision the same unit creates before the statement
+runs (one catalog snapshot per unit, and the fold's duplicate check keys on the target table's own
+index list), no idempotence claim beyond ownership, and a same-table re-run stays the `IF NOT
+EXISTS` no-op crash recovery replays.
+
+### Not covered, and it is a gap rather than a handoff
+
+SQLite. It shares the schema-wide scoping, and `existence_guard_sqlite.rs` covers the `createIndex`
+shape there, but nothing covers the createTable-inline shape on SQLite. The new arm is dialect-gated
+so it applies, but no test observes it.
+
+### Gate
+
+    fmt 0, clippy --workspace 0, test 0, addon 0, index.d.ts drift 0, host 0
+    rust targets=113 passed=2493 failed=0 ignored=0, skip banners 0
+    host suite 137 pass, 0 fail, 0 skipped (135 before; the two new arms)
+
+Worth noting that the Rust totals did not move. No Rust test asserted on the probe an unguarded
+createTable stamps onto its inline indexes, which is consistent with the defect having survived
+this long.
+
 ## F281 - the option reading said was available, running says is not
 
 #197's blocking unknown, closed. The answer reverses the one I had from reading, which is the whole
