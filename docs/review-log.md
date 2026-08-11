@@ -8990,6 +8990,60 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F301 - #129 shipped: the drop guard rides on the migration, and the RED was reproduced before it was believed
+
+Built as F299 decided and committed as b59004ef, after cb7e1444 fixed the predicate it stands on.
+
+WHAT LANDED. A structured `Precondition::ColumnHasNoBlockingDependents { table, column }`, injected
+at the `Op::DropColumn` lowering arm and evaluated by the PostgreSQL backend under the project lock
+immediately before that migration's `up`. Three properties were checked in the code rather than taken
+from the report that produced it:
+
+  - PostgreSQL only. `if self.dialect == SqlDialect::Postgres` wraps the injection
+    (render/lower.rs:4940). Without it, sqlite/mod.rs:795 and mysql/mod.rs:872 refuse ANY non-empty
+    precondition list and every dropColumn on those dialects would break.
+  - Per unit. `units[0]` carries the authored column and `units[1]` carries `<col>_masked`, each
+    naming its own. Stamping the authored column on both is the silent skip #89/F286 fixed.
+  - One spelling of the rule. The evaluator calls `blocking_column_dependents` through the backend
+    (apply/precondition.rs, `drop_column_blockers`) instead of repeating its SQL, so the rule keeps
+    the two expressions its oracle measures and does not grow a third.
+
+THE RED, REPRODUCED BY ME AND NOT INHERITED. The agent reported a RED; that is its claim, not
+evidence. I suppressed only the injection with a temporary env gate that left every export intact -
+never by reverting a file, which can delete an export a new test imports and fail to compile, proving
+nothing:
+
+  test plain_drop_column_refuses_a_blocking_view_and_names_it ... FAILED
+  test masked_drop_column_checks_the_sibling_unit_and_names_its_blocker ... FAILED
+  test plain_drop_column_without_blockers_applies_with_its_guard ... FAILED
+  test result: FAILED. 0 passed; 3 failed; 0 ignored
+  RED_RC=101
+
+with the first two panicking on "expected a structured precondition refusal, got Plain(...)" - the
+raw `2BP01` mid-plan failure the guard exists to prevent. The probe was then removed and its absence
+confirmed by grep.
+
+GATE: fmt 0, clippy 0, 114 targets / 2498 passed / 0 failed / 0 ignored, zero live-database skip
+banners; addon `cargo test -p zero-migrate-node --no-default-features` 0. Baseline was 113 / 2495, so
+the delta is exactly the new suite's target and its three tests.
+
+TWO THINGS WORTH KEEPING FROM HOW THIS WAS RUN. The first gate attempt reported `TEST_RC=101` while
+the background job itself exited 0 - the wrapper trap, caught only because each stage echoes its own
+RC. The second was KILLED mid-clippy after writing 224 bytes; a killed job's partial output is not a
+result, and the stages were re-run in the foreground where they held. The run before that fail-fasted
+at a stale-artifact test, so 53 of 114 targets never ran and a truncated `passed=1775` could have been
+read as a pass. `--no-fail-fast` is what makes the count mean what it appears to mean.
+
+DECIDED HERE, not deferred: the new variant does NOT need an `ir_version` bump. It is additive, and
+the engine injects it onto the lowered `Migration` rather than emitting it into an envelope, so no
+existing document becomes invalid. An older engine meeting it fails closed on an unknown variant, and
+only if someone hand-authored one. `ir-envelope.schema.json` was regenerated because `MigrationIr`
+reaches the same enum.
+
+STILL OPEN, carried from F300: the shipped rename guard refused a CHECK-carrying column before
+cb7e1444. That the predicate no longer returns the constraint is VERIFIED; that an end-to-end online
+rename now succeeds is INFERRED and still wants a live test.
+
 ## F300 - the shipped drop-dependency predicate refuses a drop PostgreSQL performs, and the oracle has no CHECK shape to catch it
 
 The build stopped instead of shipping, and it was right to. The predicate at
