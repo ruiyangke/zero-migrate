@@ -8990,6 +8990,47 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F264 - a wrapper resolved its approval obligation at the wrong object
+
+Part of #80's tail: the first of the two public-API stragglers. One remains.
+
+`migration_requires_approval` (zero-migrate-ir/src/policy_approval.rs) answers whether a migration
+needs operator approval, by resolving the object-scoped `safety.require_approval` obligation at
+each op's target object. It resolved that object AT the wrapper for an `Op::Dialectal`, and a
+wrapper names nothing: `Op::touched_table()` and `Op::schema()` both return `None` for it, so
+`object_for_op` falls back to the migration's `default_schema`.
+
+So an op inside a leg inherited the DEFAULT SCHEMA's approval level rather than the level attached
+to the object it actually touches. Under a charter that requires approval only for a protected
+schema, wrapping the op in `dialect({ ... })` was a way to author past the obligation.
+
+The RED, with `always` scoped to `app_secret` only and the migration defaulting to `app_main`:
+
+    top-level  addColumn app_secret.t          -> requires approval   (control, passed)
+    wrapped    dialect({ pg: [same op] })      -> DID NOT require it  (the defect)
+    wrapped    dialect({ mysql: [same op] })   -> DID NOT require it
+
+EVERY leg, and the signature settles it again: the query takes no dialect, because whether a
+migration needs a human is a property of what it was AUTHORED to do rather than of one target's
+rendering. Over-asking costs a prompt; under-asking skips one. That is the same rule the ownership
+and checksum walkers follow (F259, F260, F262), and the third time in this ticket that "no dialect
+parameter" has decided the direction on its own.
+
+A third arm keeps the widening honest: a wrapper whose legs touch only UNSCOPED objects must still
+require nothing. A fix that returned `true` for any wrapper would pass the two defect arms and fail
+this one.
+
+DESCENDING ALSO SHARPENED `on_destructive`, which I did not set out to fix. The old code took ONE
+level from the default schema and applied it to `Op::is_destructive()`, which unions every leg. So
+a destructive op in an unselected leg could trip an `on_destructive` obligation resolved at an
+object none of it touches. Now the level and the destructiveness are both judged per inner op.
+
+WORTH NAMING: this is an authorization surface with no in-repo caller. `migration_requires_approval`
+is production-compiled public API that only tests call here, so none of our gates would ever have
+noticed - the bypass was real for an embedder and invisible to us. That is the same shape as the
+`driverFor` reachability gap from F255, pointing the other way: there, public-but-unreachable meant
+harmless; here, public-and-unreachable meant untested.
+
 ## F263 - the last walker, and the one where my leading candidate was wrong
 
 Closes the fix half of #80. Six of six production non-descenders now descend.
