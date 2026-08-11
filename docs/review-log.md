@@ -9054,6 +9054,36 @@ a shared constructor no string-literal grep can see. Then I almost recorded "UNI
 the same zero. It is covered, in another map. A zero from a grep is a fact about the grep. That is the
 #205 mistake twice more, caught this time before it reached a ticket.
 
+A THIRD CELL, AUDITED AFTERWARDS AND CLEARED. Asking F315's own question of every probe arm rather
+than the one #199 pointed at turned up `decide_named_type` (existence_probe.rs:231), which reads
+`live.named_types` - a map MySQL also leaves at `Default::default()`, and one part B's four PG-only
+kinds never enumerated. It is NOT a gap:
+
+    crates/zero-migrate/src/render/lower.rs:4356
+        if self.dialect.supports(Capability::MaterializedEnumType) { ... CREATE TYPE ... }
+        else { Vec::new() }                        <- MySQL and SQLite emit NOTHING
+    crates/zero-migrate/src/render/renderer.rs
+        Postgres => MaterializedEnumType => true
+        Sqlite   => MaterializedEnumType => false
+        Mysql    => MaterializedEnumType => false
+
+A `createEnum` on MySQL lowers to zero statements, so no enum type can exist and an empty map is
+correct - the same standing as `sequences` and `partitions`.
+
+WHY PART B MISSED IT, which is the transferable part: the other four PG-only kinds are refused by
+`op_support.rs` with a message naming the dialect. This one is silenced by a CAPABILITY GATE in
+`lower.rs`, a different mechanism in a different file with no message at all. An audit organised
+around "what does op_support refuse" cannot see it, and part B was organised exactly that way. Two
+mechanisms produce "this object cannot exist here"; enumerating one of them looks complete.
+
+So the final tally is two real gaps out of three cells - `views` and `UNIQUE` - and running the third
+was still worth it, because "not a gap" only counts once somebody has checked. I also corrected a
+guess of my own in the process: I had read `Op::CreateDomain { .. } => NEXTVAL_PG_ONLY`
+(op_support.rs:247) as being about a nextval default rather than the domain kind, from the constant's
+NAME, and said so while flagging that I had not read it. The text at op_support.rs:67 confirms it -
+"nextval sequence defaults are PostgreSQL-only" - but a guess from an identifier was load-bearing for
+a ticket until the capability gate settled the question by another route entirely.
+
 ## F314 - the extension arm closes the verb matrix, and three of its own ticket's specifics were wrong
 
 #193 is done: 32347c48. Rolling back a `dropExtension` reinstalls the extension, proven over the
