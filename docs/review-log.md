@@ -8990,6 +8990,46 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F330 - the correction I was about to send a consumer was refuted by running it, and the mechanism is still unnamed
+
+Having fixed #207, I went to correct ZERO-MIGRATE-2026-08-11-030, which told zeroship that `ifExists`
+was RULED OUT as a workaround for the MySQL view drop. Before sending I read
+`crates/zero-migrate-node/src/lower.rs:638` and found the MySQL hardcode untouched by my fix:
+
+    let verdict = if dialect == SqlDialect::Mysql {
+        ProjectionGuardVerdict::NotSatisfied
+    } else { ... };
+
+so I reasoned that my new passing arm only works because the snapshot now carries the view and the
+fold never consults the guard - and that a drop of a view that NEVER existed would still be refused.
+That distinction governs what a consumer can rely on, so I wrote it as an arm rather than a sentence:
+
+    not ok 6 - MySQL: an ifExists drop of a view that never existed is still refused
+      expected: /does not exist/
+      actual: 'ran'
+
+It succeeds. Three sites still read exactly as I described them - the fold's `..` at
+`crates/zero-migrate/src/render/fold.rs:2398`, the hardcode at `:638`, the refusal at `:713`, and the
+op-selector at `:1259` that should queue the op - and together they say "refused". The run says
+otherwise, so something between them either honours the guard by a route I did not find or drops the
+op before the fold sees it. I did not find it by reading, and I am not going to keep guessing at it.
+
+This is the third time this session that a confident read lost to a run, after F322 (a pipe made `$?`
+report tail's status) and F328 (a green host suite measuring a stale binary). The common shape is not
+carelessness about the code; it is trusting a chain of correct local readings to predict a global
+outcome. The reading was right at every site and wrong about the result.
+
+WHAT I DID NOT DO: bless it. The two candidate mechanisms have opposite meanings - either the guard
+works, or the op is silently elided and the guard is dead, which is the #92 family. `ifExists`
+semantics make them indistinguishable from outside, since both journal green and both leave no view.
+So the arm asserts only the operator-visible outcome, with the mechanism named as unknown in its
+comment, and #212 holds the question with the instrumentation recipe. A test that pins observed
+behaviour honestly fails loudly if it changes; one that pins a guessed mechanism launders the guess.
+
+The zeroship correction is HELD. The entire point of that message is which workaround they can rely
+on, and I cannot answer that yet. Sending "it works now" while unable to say why would be the fourth
+wrong claim to that consumer today, after -028's dialect, -029's scope and -030's own conclusion.
+
 ## F329 - #207 fixed: MySQL's snapshot reads its views, and the completeness pin that guards catalog scoping caught the new query
 
 `MysqlBackend::snapshot_schema` returned `SchemaSnapshot { tables, ..Default::default() }`, so `views`
