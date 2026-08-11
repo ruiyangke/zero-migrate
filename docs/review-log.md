@@ -8990,6 +8990,91 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F275 - one completed online rename blocks every rollback the project will ever run
+
+#195 DECIDED, not yet built. The decision reversed while I was tracing it, and the reversal is
+the part worth recording.
+
+The finding started as a lint: `verbs.rs:547` awaits `resolved_pending_contracts` under the
+project lock and never reads the answer, while its apply and status siblings pass theirs into
+the lowering. The question looked like "delete the dead query, or thread it through".
+
+### Why I expected to delete it
+
+`crates/zero-migrate/src/render/step.rs:248-256` makes `has_down` false for
+`PlanStep::OnlineRename(_)`, so `reversibility()` calls it `Irreversible`. A rollback crossing
+an online rename has no reverse SQL to run at all. The only thing `resolved_contracts` unlocks
+is `normalize_historical_renames`, which reconstructs the pre-rename catalog view so a
+completed rename can lower - and reconstructing it would let the lowering succeed only to hand
+the orchestrator a step it must then refuse. Dead query, delete it.
+
+That reasoning is correct about CROSSING the rename, and it is not what decides this.
+
+### What the trace actually showed
+
+The failure happens before the target is ever considered.
+
+    packages/zero-migrate-cli/src/index.ts:265-289   rollback takes the WHOLE authored set, and
+                                                     says so: "Unlike `apply`, this takes the
+                                                     WHOLE authored set"
+    crates/zero-migrate-node/src/verbs.rs:557-568    the verb lowers EVERY envelope with `?`,
+                                                     THEN builds the set, THEN constructs
+                                                     `RollbackRequest::new(target)`
+
+So one un-lowerable envelope anywhere in the history fails the whole rollback - including a
+rollback of a later migration that never touches the rename.
+
+Measured with a throwaway test against `lower_ordered_envelopes_to_plans_for_rollback`, which
+needs no live database because it takes a `SchemaSnapshot` as data. Envelope 1 renames
+`items.a -> items.b` and is already contracted, so the catalog carries only `b`; envelope 2 is
+a `createTable notes`, entirely reversible, different table:
+
+    rollback lowering over a completed rename: Err("IrAuthor::lower of renameColumn on
+    \"items\".\"a\" needs the live `a` column's type (LiveSchema::table_snapshots) to reconcile
+    the IR-carried type against the live column; it is absent - refusing to lower a rename from
+    an IR type alone")
+
+Envelope 2 is never reached. A project that has completed one PostgreSQL online rename cannot
+roll back ANYTHING through the Node host.
+
+### What the fix is, which is not what the ticket said
+
+Threading `resolved_contracts` is the small half. The substantive half is that the rollback
+lowering (`lower.rs:368-413`) lowers once and propagates with `?` at :398, while its sibling
+`lower_ordered_envelopes_to_plans_inner` (`lower.rs:553`) carries a RECOVERY block at :595-640
+that reconstructs the pre-rename view and retries. The contracts are read only inside that
+block, at :577 and :615.
+
+And the two halves cover different cases: `normalize_historical_renames` rebuilds the source
+column from the DESTINATION when it is present (`lower.rs:965-987`) and needs no contracts at
+all; the contract lookup at :991 is reached only when neither column survives in the live
+snapshot. The recovery fixes the measured case. The contracts fix a rarer one.
+
+### The thing to prove before building it
+
+`normalize_historical_renames` carries its own warning: "This never authorizes apply: its
+caller accepts the result only when the derived plan already has journal evidence", and the
+apply path guards it behind `strict_historical_apply` (`lower.rs:563`). The argument that
+rollback is structurally safe is that every envelope in a rollback set is already applied and
+`executed_history_ops(&artifact, journal_entries)` (`lower.rs:400`) already filters by the
+journal. That is an argument, not a proof. It has to be established before the recovery is
+wired in, or the fix quietly widens a gate that exists to keep apply honest.
+
+### Provenance
+
+Two opinions, both (b): `codex exec -s read-only`, and mine from reading. The
+whole-set-before-target argument came from codex; I had not considered it, and I verified both
+of its load-bearing citations myself before accepting it. The Opus half of the usual pair did
+not run - the session's subagent budget is spent (200 of 200) - so this was one independent
+opinion plus mine, not two.
+
+### Also, and separately
+
+Nothing lints the addon crate. `default-members` at `Cargo.toml:11` excludes
+`crates/zero-migrate-node`, so the workspace-root `cargo clippy --all-targets -- -D warnings`
+in the gate never compiles it. `Cargo.toml:4-10` states the exclusion as deliberate, so what is
+missing is a separate addon lint step - which cannot be added until this warning is resolved.
+
 ## F274 - a panicking engine future settles its promise instead of hanging the caller forever
 
 #49. The remedy chosen is (a) `catch_unwind` and reject, not `panic = "abort"`.
