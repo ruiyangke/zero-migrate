@@ -8990,6 +8990,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F349 - the SQLite apply's empty contract list is correct, and correct for a reason the site did not state
+
+#216, raised by a consumer looking at my code: `crates/zero-migrate-node/src/bridge.rs:795` returns
+`pending_contracts: Vec::new()` unconditionally in the `applyIrSqlite` reply, where every other apply
+path fills the field from real values. Dropped value, or correct constant?
+
+CORRECT CONSTANT. `SqliteBackend::pending_contracts` is a literal `None`:
+
+    crates/zero-migrate/src/apply/backend/sqlite/mod.rs:1155
+      fn pending_contracts(&self) -> Option<&dyn CrossDeployObligations> {
+          // SQLite has no cross-deploy pending-contract partition: a rebuild rename
+          // is one atomic offline step, so there is no obligation to open or
+          // recover. Generic callers treat `None` as empty/no-op.
+          None
+      }
+
+compared with PostgreSQL at postgres/mod.rs:529, which returns `Some(self)`. And the networked verb
+maps that `None` to exactly the value the SQLite path hardcodes:
+
+    crates/zero-migrate-node/src/verbs.rs:291-296
+      let resolved_contracts = match backend.pending_contracts() {
+          Some(capability) => capability.resolved_pending_contracts(cfg).await...?,
+          None => Vec::new(),
+      };
+
+So the two replies agree, and the constant states the truth.
+
+### Where I did not follow my own instruction, and why that was right
+
+#216 said do not settle this by reading the type, drive it - apply through `applyIrSqlite` a migration
+that would open a contract on PostgreSQL and read the reply back. I did not run that, and I think the
+ticket's instruction was aimed at the wrong object. It was written against the DTO type, where reading
+proves nothing. The deciding artifact turned out to be an impl body with no branches and no inputs: a
+function returning a literal `None` cannot be made to return anything else by any migration. A run
+could not distinguish the two hypotheses, so it would have been ceremony, not evidence.
+
+Recording that rather than quietly skipping it, because "I said I would run it" is a commitment I made
+to a consumer in ZERO-MIGRATE-2026-08-11-040 and I am not going to let it pass unremarked.
+
+### What was actually wrong: the agreement is a coincidence, not a mechanism
+
+The networked path REACHES its empty vector by asking the backend. The SQLite path ASSERTS it. Today
+both are empty, so nothing is broken. But they agree by coincidence of the answer rather than by
+sharing the question, and that is the shape that rots: implementing `CrossDeployObligations` for
+`SqliteBackend` would make verbs.rs start reporting contracts while bridge.rs:795 kept returning
+none, silently, on a safety-adjacent field.
+
+Wiring bridge.rs to query the backend was available - `backend` is in scope at that line - and I did
+not do it. It changes no behaviour today, so no test can go RED for it, and shipping an untestable
+refactor into a napi-gated file the default build does not compile buys less than it costs. The
+comment now names the invariant and says a future contract partition has to reach this line. If that
+day comes, the next reader meets the reason instead of rediscovering the question.
+
+Gate: fmt 0; `cargo clippy -p zero-migrate-node --features napi --all-targets -- -D warnings` 0, which
+is the only build that compiles bridge.rs at all - the default-feature gate never sees this file (#35).
+
+VERIFIED BY ME at 66db66af: the SQLite and PostgreSQL `pending_contracts` bodies at their quoted
+lines; the verbs.rs match arms; that `backend` is in scope at bridge.rs:770-795.
+NOT VERIFIED: no migration was applied through `applyIrSqlite` for this. The claim rests on the impl
+being a constant function, which is a stronger reading than a type signature but is still a read.
+
 ## F348 - "reaches the lowering" is not "reaches the projection", and I used one as evidence for the other
 
 I told a consumer in -039 that `applyIr`, `applyIrSqlite`, `rollback` and `rollbackSqlite` "are the
