@@ -8990,6 +8990,70 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F315 - a second probe map is wrong before #79 wires it, and "empty map" is the wrong thing to look for
+
+F290 recorded one MySQL snapshot gap: `views` is a top-level sibling map left at
+`Default::default()`, so a guarded `dropView` would read its own view as absent. #199 then asked for
+the CONSTRAINT variants to be audited for "the same empty-map shape" before the probe is wired. They
+do not have it, and looking for that shape is what would have missed the real one.
+
+`decide_constraint` (crates/zero-migrate/src/render/existence_probe.rs:798) reads THROUGH `tables`:
+
+    live.tables.get(table).and_then(|t| t.constraints.iter().find(|c| c.name == candidate))
+
+and MySQL populates `tables`. So no empty sibling map, no gap of the `views` kind. But:
+
+MySQL CAPTURES UNIQUE IN A DIFFERENT MAP THAN THE PROBE READS. From
+crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:
+
+    :320   the INDEX query selects `NON_UNIQUE AS non_unique`
+    :345   decoded as `unique: non_unique == 0`
+    :429   stored as `IndexSnapshot { unique: is_primary || parts.unique, .. }`
+
+so a UNIQUE constraint lands in `tables[].indexes`. `tables[].constraints` holds PRIMARY KEY (:416),
+FOREIGN KEY (:605, built by the shared `ir_fk_constraint_snapshot_for_columns` at :561) and CHECK
+(gated at :142 on `server_version >= [8, 0, 16]`). `decide_constraint` never consults `indexes`, so a
+guarded `dropConstraint` naming a UNIQUE would find nothing, take the `GuardDir::IfExists` arm, return
+`SatisfiedNoop`, and skip a drop MySQL would have performed.
+
+It is authorable: the `SqlDialect::Mysql` block at crates/zero-migrate/src/render/renderer.rs:105
+grants both `Capability::TableLevelUnique` and `Capability::AlterTableDropConstraint`, so nothing
+upstream refuses it the way it refuses sequences or schemas on MySQL.
+
+THE SHAPE, which is the part worth carrying forward:
+
+    views     the object is captured NOWHERE      - a sibling map left at Default::default()
+    UNIQUE    the object IS captured, in `indexes` - and the probe looks in `constraints`
+
+Both produce the same silent no-op. Only the first is an empty map. A reader who fixes "the empty
+maps" fixes views, sees nothing else empty, and ships the second one. The question that finds both is
+not "is any map empty" but "does the map this consumer reads contain the object this consumer is
+asked about" - which is the same consumer-side question F311 needed for the oracle, one layer over.
+
+LATENT ON THE SAME GROUND AS VIEWS, verified rather than taken from the comment at drift_sql.rs:637
+that asserts it. Every production call site of `existence_probe::decide`:
+
+    crates/zero-migrate/src/apply/backend/sqlite/mod.rs:604        SqlDialect::Sqlite
+    crates/zero-migrate/src/apply/backend/postgres/session.rs:719
+    crates/zero-migrate/src/apply/backend/postgres/session.rs:1053
+
+No MySQL call site; every other match is a doc comment or a test. So nothing reads either gap today,
+and both stop being harmless in the same commit.
+
+WHAT THE FIX IS NOT. Do not copy UNIQUE rows into `constraints`. That puts one object in two maps and
+leaves `decide_index` and `decide_constraint` able to disagree about what exists. Either
+`decide_constraint` falls through to a unique index on MySQL, or the MySQL leg routes a UNIQUE drop to
+`decide_index`. That is a DECISION, it is on #199 as C1, and it wants the usual split.
+
+TWO NEAR-MISSES IN ONE AUDIT, both the same error:
+
+    grep -cE '"FOREIGN KEY"|"UNIQUE"' drift_sql.rs   -> 0
+
+I almost recorded "MySQL records no FOREIGN KEY constraints" from that zero. FKs are covered, through
+a shared constructor no string-literal grep can see. Then I almost recorded "UNIQUE is uncovered" from
+the same zero. It is covered, in another map. A zero from a grep is a fact about the grep. That is the
+#205 mistake twice more, caught this time before it reached a ticket.
+
 ## F314 - the extension arm closes the verb matrix, and three of its own ticket's specifics were wrong
 
 #193 is done: 32347c48. Rolling back a `dropExtension` reinstalls the extension, proven over the
