@@ -8990,6 +8990,66 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F296 - the rule survives a major-version change: twelve fixtures, identical on PostgreSQL 16.14 and 18.4
+
+F295 named the last untested condition - a second major PostgreSQL version - and recorded that the
+compose file serves `postgres:18` alone. That is still true of the compose file, so the check was run
+against a throwaway container instead: `postgres:16` was ALREADY present locally (no image pulled),
+started on a free port, measured, and removed. `docker ps` confirms it is gone. No repository file and
+no other project's database was touched; the two PG16-based containers already running on 5432 and
+5433 belong to other projects and were deliberately left alone rather than borrowed for a scratch
+schema.
+
+    PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1) on x86_64-pc-linux-gnu
+
+ALL TWELVE FIXTURES PRODUCE THE SAME OUTCOME ON 16.14 AS ON 18.4:
+
+    1  generated column                    n  default value for column derived     REFUSED
+    2  view selecting the column           n  rule _RETURN on view vw_v            REFUSED
+    3  EXCLUDE, expression only            a  index ex_expr_lower_excl             REFUSED
+    4  EXCLUDE, plain column               a  constraint ex_plain_note_excl        allowed
+    5  EXCLUDE, plain + expression         a  constraint AND index                 allowed
+    6  no dependents                       -                                       allowed
+    7  partial index PREDICATE             a  index pi_b_idx, no constraint owner  allowed
+    8  index EXPRESSION KEY                a  index ie_expr_idx, no owner          allowed
+    9  gist EXCLUDE over expression        a  index + i constraint owner           REFUSED
+    9b same table, unrelated column        -                                       allowed
+    10 constraint-owned index via PREDICATE a index + i constraint owner           REFUSED
+    10b same table, key-named column       a  constraint ep_other_excl             allowed
+    11 partial UNIQUE INDEX via PREDICATE  a  index, no constraint owner           allowed
+
+The discriminating datum is present and unchanged. Exactly two `i` (DEPENDENCY_INTERNAL) rows appear
+in the whole PG16 run:
+
+     i       | constraint ex_gist_tstzrange_excl on table ex_gist
+     i       | constraint ep_other_excl on table ep
+
+and those are exactly the two constraint-owned indexes, which are exactly the two index-only cases
+that refuse. Cases 7, 8 and 11 have index dependents with no `i` row and all allow.
+
+THE RULE IS NOW ESTABLISHED ACROSS TWO MAJORS with no stated gap remaining:
+
+    column has a NORMAL dependent (generated column, view)            -> REFUSED
+    column has an AUTO dependent that is a CONSTRAINT                 -> allowed
+    column's only AUTO dependent is an INDEX owned by a constraint    -> REFUSED
+    column's only AUTO dependent is an INDEX with no constraint owner -> allowed
+    column has no dependents                                          -> allowed
+
+WHAT IS STILL NOT CLAIMED. This is twenty-four observations (twelve fixtures, two majors) and a
+one-variable control, not a reading of PostgreSQL's dependency-walk source. It predicts every case
+put to it, including three chosen to break it. It is strong enough to build a guard on and it is not
+a proof; a shape nobody here thought to construct could still fall outside it, and the honest posture
+for the guard is to refuse on the recognised blocking patterns rather than to claim exhaustiveness
+over what PostgreSQL permits.
+
+THE ARC THIS CLOSES. Four rules were proposed for one guard: "an EXCLUDE whose expression reads the
+column blocks" (F168, too broad), "refuse when the dependency kind is NORMAL" (F293, misses the
+motivating case), "the dependent's class separates them" (F294, misses two F168 cases), and the
+ownership-edge rule that survived. Three fell to measurements taken specifically to break them, and
+none of the three would have been caught by reading the code that was about to be written. The
+ticket's instruction to verify the joins before building is the whole reason a guard keyed on the
+wrong datum was never shipped.
+
 ## F295 - the fourth row holds, and a one-variable control isolates the INTERNAL edge as the cause
 
 F294 stated the rule and named what would test it: exercise the fourth row deliberately - a
