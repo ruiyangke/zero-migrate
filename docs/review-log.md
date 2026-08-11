@@ -8990,6 +8990,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F326 - the destructive view rollback is fixed to a refusal, and the option that decided it was answered by reading the executor rather than guessing
+
+#209 fixed at f33e742b. A `createView` carrying `replace` now synthesises no `down`, so rolling one
+back is REFUSED instead of dropping a view the migration never created.
+
+### The reading that chose the option
+
+Three repairs were on the table (F324): widen `down` to several statements, split per dialect, or
+refuse. Choosing needed one fact - what the rollback planner does with a `down: None` - because if it
+SKIPPED silently, refusing would trade a loud destructive bug for a quiet incomplete one.
+`crates/zero-migrate/src/apply/executor.rs:2563-2572`:
+
+    let Some(down) = m.down.as_deref() else {
+        if request.options.force && request.options.backup_acknowledged {
+            skipped_irreversible.push(version.to_string());
+            continue;
+        }
+        return Err(RollbackError::Irreversible { version: ..., name: ... });
+    };
+
+Refusal is loud: the whole rollback stops, naming the version and migration, and passing it requires
+BOTH `force` and an explicit `backup_acknowledged`, with the skip then recorded in
+`skipped_irreversible`. So the cheap option was also a safe one, and the expensive one could wait.
+
+A second opinion had been dispatched on exactly this question and was killed before answering -
+356KB of file content it had been reading, no conclusions. Answering it directly took one grep and
+two reads. The dispatch was not wasted effort so much as the wrong instrument for a question with a
+single decisive site.
+
+### Naming what the fix is not
+
+Safety, not capability. Strictly better than destroying, strictly worse than restoring - the previous
+body is still not put back. The commit message, the code comment and the test header all say so,
+because the failure mode here is a refusal reading as the finished answer six months from now.
+
+That is why the file keeps TWO arms. The shipped behaviour is pinned by
+`a_replace_is_refused_as_irreversible_rather_than_dropping_the_view`, which asserts both the
+`RollbackError::Irreversible` variant AND that the view is still standing afterwards - the error type
+alone would pass even if something else had removed it. The restoring contract stays as an ignored
+arm, re-labelled from "measured failing" to "aspirational", since it stopped describing a defect the
+moment the destruction was fixed and started describing a gap.
+
+A lone passing refusal test would have been tidier and would have erased the distinction.
+
+### Measurements
+
+fmt 0 after `cargo fmt` (the first `--check` failed on a hand-formatted assertion - reformatted by
+the tool rather than by eye), clippy 0 with zero output, `-p zero-migrate --tests` 102 targets /
+2195 passed / 0 failed / 1 ignored. That reconciles against the 102 / 2194 / 1 of the previous commit:
+one more passing arm, same ignored one. All four view-rollback arms across the three files pass,
+including the two pre-existing drop tests that the `down` change could have disturbed.
+
+NOT VERIFIED: PostgreSQL or MySQL - the arm is dialect-independent and the refusal is dialect-free,
+so no divergence is expected, but the run was SQLite only. #211 - the same shape in `createFunction` -
+is still unmeasured and unfixed, and refusal is the only repair available there since no prior body
+is recorded anywhere.
+
 ## F325 - the sweep F324 deferred found the same defect in a second op, and that one was never guarded by accident
 
 F324 closed by naming an unswept question: does any OTHER op render the undo of a MODIFY as a DELETE?
