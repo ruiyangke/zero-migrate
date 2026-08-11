@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F343 - no dead public function in zero-migrate-ir, and two more ways the reachability grep lies
+
+Swept zero-migrate-ir for the #75 class - a shipped `pub fn` with no production caller.
+Five candidates came back with no reference outside their own file:
+
+    id.rs               base62_to_uuid, new_v7
+    ir.rs               collect_touched_tables
+    migration.rs        timestamp_ms
+    policy_approval.rs  require_approval_level
+
+All five are reachable. Recording the negative so this is not swept again, and recording
+the two new instrument failures, which are different from F342's.
+
+    base62_to_uuid          called by `parse` at id.rs:130
+    new_v7                  called by `generate` at id.rs:121
+    require_approval_level  called by `op_requires_approval` at policy_approval.rs:183
+    collect_touched_tables  called by `MigrationIr::touched_tables` at ir.rs:4266,
+                            which is called at crates/zero-migrate/src/render/lower.rs:3013
+    timestamp_ms            public accessor on the wire-contract type; see below
+
+TRAP ONE - a same-named field. `git grep -w touched_tables` returned four confident-looking
+hits in zero-migrate-node and the engine, none of them this method: they are
+`artifact.touched_tables`, a FIELD on `LoweredArtifact`. Word-boundary matching cannot tell
+a method from a field with the same name, and the false hits pointed at exactly the crates a
+reader would expect a real caller in. Grepping `touched_tables()` with the parens found the
+single real call site. A same-named field is a plausible-looking answer, which is the
+dangerous kind.
+
+TRAP TWO - the in-file wrapper. Four of the five are private-in-practice helpers behind a
+public wrapper in the same file. "No reference outside this file" is not "no caller"; it is
+usually "the caller is the public function two definitions down". The check has to continue
+to the wrapper and ask whether IT is reached, or it reports every helper as dead.
+
+ON `timestamp_ms`, WHERE I STOPPED SHORT OF A FINDING. Its only uses are its own unit tests
+at migration.rs:749-755. That is the shape of the #75 defect, and I nearly filed it. Reading
+the doc first said otherwise: the `MigrationId` doc at migration.rs:37 cites
+`[MigrationId::timestamp_ms]` as the EXPLANATION of why string-sorting versions yields apply
+order, and this crate's own header calls itself the wire contract for "any external
+validator/checksummer". A public accessor on a published contract type is meant to be read
+by consumers, so an absent internal caller is what it should look like. Not a defect. Same
+lesson as before a field's exclusion is called a defect: read the item's own doc before
+filing it.
+
+Combined with F342, three distinct ways a reachability grep under-reports have now been paid
+for in one sitting - a generic dispatch table, a same-named field, and an in-file wrapper.
+None announces itself, and all three fail toward a finding rather than a green.
+
+VERIFIED BY ME: every file:line above read directly, and the parenthesised grep re-run.
+NOT VERIFIED: this covered `pub fn` only. Public structs, enum variants and trait methods in
+this crate were not swept, so "no dead public API in zero-migrate-ir" is not proven - only
+"no dead public function".
+
 ## F342 - the knob-enforcement partition had an unenumerated residual, and my first instrument would have filed four false findings
 
 Went looking for F145's defect class in the grown registry: a knob registered
