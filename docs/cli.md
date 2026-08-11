@@ -147,6 +147,23 @@ the CLI continues to work with flags, environment variables, and defaults.
 | `--json` | Emit machine-readable output where supported |
 | `--help` | Print help and exit 0 |
 | `--version` | Print the package version and exit 0 |
+| `--verbose` | `version` only: also report the loaded addon's identity |
+
+`zero-migrate version` prints one bare version string and nothing else, so
+`$(zero-migrate version)` stays usable, and it answers without loading the native
+addon. `zero-migrate version --verbose` additionally reports the loaded addon's
+crate version, IR floor, and a sha256 over the workspace source it was built from -
+the value that tells you whether the binary in memory matches the code in the tree.
+Add `--json` to that form for one machine-readable document:
+
+```
+{
+  "cliVersion": "0.1.0",
+  "addon": { "version": "0.1.0", "irVersion": 1, "sourceDigest": "<64 hex>" }
+}
+```
+
+`--json` without `--verbose` leaves `version` output unchanged.
 
 `--journal <path>` is an `apply`-only override for the separate SQLite
 migration journal. `--approve` is accepted by `apply` and `resolve` for reviewed

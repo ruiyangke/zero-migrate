@@ -8990,6 +8990,77 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F347 - the addon identity is reachable from the CLI, and the first RED was the wrong RED
+
+#215 built to the F345 decision: `version` and `--version` unchanged, the identity behind
+`version --verbose`, JSON behind `version --verbose --json`.
+
+    packages/zero-migrate-cli/src/addon.ts    `buildInfo(): BuildInfo` added to MigrateAddon
+    packages/zero-migrate-cli/src/cli.ts      `verbose` flag + `versionVerbose()`
+    packages/zero-migrate-cli/tests/host/cli.test.ts   four arms
+    docs/cli.md                               the flag table row and the contract
+
+The interface entry and its caller land together. A typed method nothing calls is the
+unexercised-branch defect (F208, F211), so shipping the declaration alone was never an option.
+
+Run against the rebuilt addon:
+
+    $ zero-migrate version
+    0.1.0
+    $ zero-migrate version --verbose
+    zero-migrate 0.1.0
+      addon version  0.1.0
+      addon ir       1
+      addon source   12efba0b68b3b0a1ea50978b96313c1827a41da4c04b2ca8e6001fbc799027c4
+
+### The first RED was the wrong RED
+
+Running the new test before implementing produced a failure, and it was NOT my failure. The
+host suite refused to start at all:
+
+    rebuild it with: pnpm --filter zero-migrate-node build
+      at resolveVerifiedAddon (packages/zero-migrate-cli/tests/host/addon.ts:80:11)
+
+That is the #45 staleness guard firing, because the `policy_registry.rs` test I added earlier
+today changed the workspace source the addon was built from. A green after rebuilding would
+have proved the suite runs, not that my change caused anything. Two different reasons to fail
+that look identical from the exit code.
+
+So I mutated instead. `if (!args.verbose)` became `if (!args.verbose || true)` - every export
+intact, the verbose path unreachable - and the test failed on the arm that should:
+
+    not ok 1 - version reports only the package version, and the addon identity on request
+      error: 'version --verbose must report the addon source digest, got "0.1.0\n"'
+
+Probe reverted before the gate; `grep -c 'args.verbose || true'` returns 0.
+
+### The compatibility arm is the one worth keeping
+
+`--json` is parsed in the global flag switch (cli.ts:284-287) and never validated against the
+command, so `version --json` already succeeded before this change and printed the bare scalar.
+One arm pins that it still does. Without it, a later reader would reasonably "finish the job"
+by teaching bare `version --json` to emit the document, silently changing the output of a
+command line that works today.
+
+### Two incidental corrections to older tickets
+
+The addon binary is NOT checked in. `crates/zero-migrate-node/.gitignore:4` is `*.node`, and
+`git ls-files --error-unmatch` reports it untracked. #36's framing of "the stale CHECKED-IN
+addon" no longer matches the tree - it is a build product, and the staleness guard is what
+stands in for tracking it. The guard demonstrably works: it stopped me running a suite against
+a binary that predated my own edit, which is exactly the F328 failure it exists to prevent.
+
+Gate at this change, against the compose databases: fmt 0, clippy 0, tsc 0, host suite
+151 tests / 151 pass / 0 fail / 0 skipped and zero LIVE-DATABASE COVERAGE SKIPPED banners
+(baseline 150, so +1 for the new test and nothing else moved); doc-examples 2/2.
+
+VERIFIED BY ME: the three CLI outputs above, run through the real binary with the rebuilt
+addon; the mutation failure and its message; every gate exit code read per stage.
+NOT VERIFIED: the failure path. `versionVerbose` returns 1 with a message when `loadAddon()`
+or `buildInfo()` throws, and no test drives that - I did not build a broken-addon fixture. So
+"plain `version` still answers when the addon is missing" is preserved by construction (the
+load sits inside the opt-in branch) rather than by a test.
+
 ## F346 - the projection guard is on the APPLY lowering path, so linking the addon does not buy it
 
 A consumer corrected their own earlier report: their build tier DOES link the addon (a vite
