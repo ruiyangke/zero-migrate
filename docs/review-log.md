@@ -8990,6 +8990,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F352 - the deploy queue stops borrowing the DDL budget, and the earlier fix failed because it removed a consumer
+
+#178: the SQLite project lock bounded its wait with `cfg.lock_timeout_ms()` - the PostgreSQL DDL
+availability budget, default 3 seconds. Two different questions were sharing one number. Tightening
+`lock_timeout` to keep a blocking statement off live application traffic also shortened how long a
+deploy would queue behind a peer deploy, and 3 seconds is shorter than many real migrations.
+
+Fixed by giving the concept its own config value rather than its own constant:
+
+    crates/zero-migrate/src/conn.rs      pub project_lock_timeout: Duration   (default 10s)
+                                         pub fn project_lock_timeout_ms(&self) -> u64
+    apply/backend/sqlite/mod.rs:499      reads project_lock_timeout_ms(), and names it in the
+                                         timeout message
+
+Ten seconds is not invented: it is `PROJECT_LOCK_TIMEOUT_SECS` from
+apply/backend/mysql/session.rs:62, which already separated these two concepts. MySQL was the
+reference implementation, not the outlier - the change promotes its constant to config and adopts it
+on SQLite.
+
+### Why the previous attempt failed, and why that detail decided the shape
+
+The ticket records an earlier attempt replacing the read with a fixed
+`const PROJECT_LOCK_TIMEOUT: Duration = Duration::from_secs(10)`. It failed:
+
+    test apply::backend::sqlite::lock_tests::project_lock_respects_the_configured_timeout ... FAILED
+    panicked at apply/backend/sqlite/mod.rs:1211: lock acquisition must remain bounded
+
+because that test sets a 25ms timeout, contends the lock, and asserts the acquire fails inside one
+second - it exploits the coupling to stay fast. A constant has no knob, so the second acquire waited
+ten seconds.
+
+The coupling therefore had TWO consumers: the production path (wrongly) and the test (for speed).
+A constant serves neither; a config value serves both. That is the whole argument for the shape, and
+it is only visible if you notice the test was a consumer.
+
+### The RED, and both failures are the right ones
+
+Mutating the fixed line back to the coupled read - one line, every export intact:
+
+    the_project_lock_wait_is_not_bounded_by_the_ddl_budget ... FAILED
+      the deploy queued for 25.082925ms, which is the 25ms DDL budget rather than the
+      300ms project-lock budget
+    project_lock_respects_the_configured_timeout ... FAILED
+    test result: FAILED. 2 passed; 2 failed
+
+The new test fails because the wait collapses to the DDL budget. The EXISTING test also fails,
+because it now sets the project-lock field, which the coupled code ignores - so it falls back to the
+3s default and blows its own 1s bound. Two different failures, each for its own correct reason.
+Restored: 4 passed, 0 failed.
+
+### Scope held deliberately
+
+This is the SQLite half only. Whether PostgreSQL should have a bound at all is the queue-versus-
+fail-fast question in #152, which is blocked. The two are separable in one direction: giving SQLite
+its own project-lock setting stops the DDL budget leaking into deploy queueing regardless of what
+#152 decides, because SQLite is bounded either way. MySQL keeps its constant for now - promoting it
+to read the new config is a follow-on, not a prerequisite.
+
+VERIFIED BY ME: the mutation failure and its message; the restored 4-pass run; every file:line above.
+NOT VERIFIED: that two concurrent SQLite deploys serialize in practice. These tests contend one lock
+file from two backends in one process. Two racing processes is what #178's original framing wanted
+and I did not build it.
+
 ## F351 - three probes at the SQLite export, three negatives, and the pattern is the finding
 
 Closing the line of inquiry F348 opened, because it has now produced the same answer three times and
