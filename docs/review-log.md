@@ -8990,6 +8990,61 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F323 - the materialized-kind refusal, and a gate total that looked like a defect and was an arithmetic error
+
+#210 fixed at 78cc1725. Teaching the fold to honour `replace` (#208) removed an accidental refusal
+along with the wrong one: the duplicate-name check had been blocking a plain replace aimed at a
+MATERIALIZED view, and without it the projection overwrites `materialized: true` with `false`.
+PostgreSQL rejects that statement, so the effect was to move a refusal from plan time into the middle
+of an apply. `FoldError::ViewKindChanged` puts it back at plan time without restoring the
+duplicate-name message that was wrong.
+
+Two of the three arms exist to stop the check overreaching. One pins the ordinary replace #208 exists
+to enable. The other pins a materialized replace over a materialized view - refused UPSTREAM at
+validation (`model/op_support.rs:240-243`), so the fold must not be the layer deciding it, and that
+arm fails if the condition is written as "materialized must be false" rather than "the kind must not
+change".
+
+The assertion matches the error VARIANT rather than its message. `DuplicateView` would also have been
+a refusal, so a test accepting any error would have passed against the accidental refusal being
+removed.
+
+### Writing the test and the fix together, then never seeing red
+
+Both were written before either ran, so the first execution was green and proved almost nothing.
+The mutation recovers what the RED would have given: disabling the kind check fails ONLY
+`a_plain_replace_over_a_materialized_view_is_refused_at_the_fold` and leaves both guard arms passing.
+Worth recording as a process failure rather than a footnote - "tests pass" after writing test and fix
+in one motion is close to no evidence at all, and the mutation is what turned it into evidence.
+
+### The gate total that looked like a defect
+
+Three consecutive full-gate runs were killed at the identical point, 91 bytes in, mid
+`Compiling zero-migrate` - a build-resource ceiling, not a test failure, and not worth retrying
+identically a fourth time. Splitting by scope completed: small crates 13 targets / 308, then
+`-p zero-migrate --lib` 1 target / 1131, then `-p zero-migrate --tests` 101 targets / 2194.
+
+Those summed to 3633 against a recorded baseline of 2500, which is the kind of gap F322 says to chase
+rather than wave through. Chased: the target SETS reconciled, and every shared target reported an
+IDENTICAL count in both runs - `pg_scenarios` 46 and 46, zero differing targets across the whole
+join. Same targets, same per-target numbers, different totals, which can only be an error in the
+summing.
+
+It was. `cargo test --tests` includes the LIB's unit tests, so running `--lib` separately and adding
+its 1131 to the `--tests` 2194 counted them twice. The honest total is 308 + 2194 = 2502 over 114
+targets, against 2500, the delta being the new file.
+
+Two things worth keeping. First, the discrepancy was reported as unresolved rather than resolved in
+whichever direction flattered the commit, and the resolution turned out to indict the measurement
+rather than the tree - which is the outcome that framing is FOR. Second, the diagnostic that settled
+it was comparing per-target counts rather than totals: identical parts with different sums localises
+the fault to the aggregation immediately, where staring at two totals does not. Note also that cargo
+interleaves parallel target output, so pairing each `Running` line with the next `test result:` line
+is unreliable in general; it happened to be safe here only because no target name repeated.
+
+Gate as it actually stands for this commit: fmt 0, clippy 0 with zero output, small crates
+308 passed / 0 failed, `-p zero-migrate --tests` 2194 passed / 0 failed, zero skip banners.
+
 ## F322 - the view replace fix shipped, and the gate that nearly certified it was measuring nothing
 
 #208 fixed at a1fe1047. `crates/zero-migrate/src/render/fold.rs` binds `replace` and skips only the
