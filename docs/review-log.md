@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F291 - #98 closes VERIFIED-NO-CHANGE: both halves were done, one under another ticket and one unlogged
+
+#98 CLOSED, no code change. It sat `in_progress` carrying two items, and its own description warned
+that the first was "REPORTED by the agent that made the fix, and I have NOT independently read those
+three sites - verify the line numbers before editing". Reading them first was the whole job.
+
+THE DOCS HALF IS DONE, and was done under #100. All three cited files already name the
+operator-reachable repair alongside the Rust-host API. `docs/dialects.md:374-378` puts the reachable
+one FIRST and frames the API as the alternative:
+
+    Any operator, including through the CLI and the Node SDK, restores and verifies the
+    complete pre-migration shape and then deletes that version's row from the mutable
+    `schema_migrations_inflight` side-table; the append-only `schema_migrations` event
+    table is never edited. A Rust host that embeds the crate can instead call
+    `MysqlBackend::recover_inflight_ddl` ...
+
+`docs/security-model.md:302-304` and `docs/embedding.md:143-150` carry the same pairing. So the
+defect #98 was filed for - three files understating the repair relative to the two that were
+corrected, leaving a reader unable to tell which framing is current - does not exist at HEAD.
+
+THE JUDGEMENT CALL IS ALSO MADE, and it went the way the ticket asked without the ticket recording
+it. `RollbackError::ChecksumDrift` (apply/executor.rs:2074) now carries its own wording and, more
+usefully, the reason it diverges:
+
+    /// Deliberately NOT worded like [`ApplyError::ChecksumDrift`]. That variant
+    /// points at a possibly-stranded inflight marker, because apply can reach it
+    /// while the recorded side is a marker recording a body that half-ran.
+    /// Rollback compares only against a record it already selected as applied, so
+    /// `recorded` here is always a completed event and no marker is involved. Do
+    /// not copy the apply wording across: the marker pointer would be false here.
+
+That is the option the ticket named as correct - divergent rather than copied - with the objection
+to divergence (two same-named variants reading as an oversight) answered by saying WHY at the site
+rather than leaving a reader to infer it.
+
+WHAT THIS COST AND WHAT IT WOULD HAVE COST. Four greps. Acting on the ticket as written would have
+meant editing three files that already say the right thing, and re-deciding a question already
+decided - churn that reads as work and leaves the tree no better. The ticket was not wrong when
+filed; it went stale because the work landed elsewhere and nothing closed the loop. That is the
+argument for the ticket's own instruction to verify line numbers before editing, and it is the
+fourth time this week that reading first changed what the work was.
+
 ## F290 - the view-rollback asymmetry I nearly filed does not exist, because a dropped object is not in the catalog
 
 #199's gate question ANSWERED, no code change, and the answer shrinks the ticket rather than growing
