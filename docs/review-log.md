@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F281 - the option reading said was available, running says is not
+
+#197's blocking unknown, closed. The answer reverses the one I had from reading, which is the whole
+reason I wrote "do not skip it: RUN it" into the ticket instead of designing around the read.
+
+F280 left the fix options depending on whether napi surfaces its `Error` `cause` field to a JS
+caller. Reading said yes, and said it clearly: napi writes the property with
+
+    napi-3.10.3/src/error.rs:620   napi_set_named_property(env, js_error, c"cause".as_ptr()...)
+
+inside `JsError::into_value`, and `js_values/deferred.rs:280` calls `into_value` on the rejection
+path. Two sites, both pointing the same way.
+
+Running it says no. Attach a cause to the ordinary-error arm of `run_in_process_verb`, rebuild the
+addon, reject through it, and inspect what the caller catches:
+
+    probe.set_cause(Error::from_reason("probe-cause-marker"));
+
+    code="GenericFailure"
+    has_own_cause=false
+    cause_type=undefined
+    cause_message=undefined
+
+So a structured marker on the error is not available over this reject path on this napi version,
+and #197 loses its only option that did not involve either prose matching or misusing a status
+value.
+
+### What I did not chase
+
+Which of the reject paths drops it. There are at least two - `js_values/deferred.rs:280` and
+`bindgen_runtime/js_values/promise_raw.rs:95`, the latter going through
+`ToNapiValue::to_napi_value` rather than `into_value` - and I did not determine which one the
+bindgen `Deferred` that `bridge.rs` holds actually takes. The product question is settled without
+it, and the alternative was spending the rest of the session inside napi internals to explain a
+result I already have. Recorded as unisolated rather than left implying I know.
+
+### Why this one is worth its own entry
+
+The read was not sloppy. It was two independent call sites saying the same thing, which is normally
+enough, and it was still wrong about what a caller observes. That is the same failure this session
+has now produced three times in a row - the `napi` feature, then `default-members`, now `cause` -
+and in each the reasoning was sound and the conclusion false, because the thing being reasoned
+about was one layer away from the thing being asked about. The question was never "does napi write
+cause"; it was "does a caller see it", and only running answers that.
+
+Cheap rule to carry: when the question is what a CONSUMER observes, no amount of reading the
+producer answers it.
+
 ## F280 - the panic fix left one fault class still indistinguishable, one level in
 
 #197 filed, not fixed. Found by a consumer's question rather than by looking, which is now the
