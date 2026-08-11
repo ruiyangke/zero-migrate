@@ -9017,10 +9017,16 @@ This repo ships a host. It does not log it.
 ### Two measured facts
 
     packages/zero-migrate-cli/src/addon.ts:76
-      the `MigrateAddon` interface declares 13 methods - irVersion, loadVerify, previewSql,
-      applyIr, applyIrSqlite, status, statusIr, statusIrSqlite, rollback, rollbackSqlite,
-      resolvePending, history, genArtifacts - and omits `buildInfo`. The CLI's typed view of
-      the addon cannot reach it without a cast.
+      the `MigrateAddon` interface declares 12 methods - applyIr, applyIrSqlite, history,
+      irVersion, loadVerify, previewSql, resolvePending, rollback, rollbackSqlite, status,
+      statusIr, statusIrSqlite - and omits BOTH `buildInfo` and `genArtifacts`. The CLI's
+      typed view of the addon cannot reach either without a cast.
+      (CORRECTED: I first wrote 13 methods omitting only `buildInfo`. Counted, it is 12 and
+      two are missing. `genArtifacts` is a second instance of this shape, weaker than
+      `buildInfo`: its seven host references are all in
+      packages/zero-migrate-cli/tests/host/gen-artifacts-dialect.test.ts, which declares its
+      OWN local addon interface at line 41 rather than using `MigrateAddon`. So it has a test
+      caller and no production one.)
 
     packages/zero-migrate-cli/src/cli.ts:1473-1474
       if (args.command === "version") {
@@ -9039,18 +9045,57 @@ stale binary. `buildInfo().sourceDigest` is a sha256 of the workspace source fol
 build time - precisely the value that separates "the code I think I am running" from "the
 binary that is loaded" - and the operator-facing command named `version` cannot show it.
 
-### Not shipped yet, because the fix is an output-compatibility decision
+### The output-compatibility decision, now made: option (b)
 
-`version` currently writes a bare scalar and a newline, which is the shape a shell script
-consumes as `$(zero-migrate version)`. Nothing pins it - no test asserts the output, no doc
-documents it - so the format is simultaneously unprotected and plausibly depended on, and
-nothing would catch a wrong change. Same shape as #11's Class B.
+`version` writes a bare scalar and a newline - the shape a shell script consumes as
+`$(zero-migrate version)`. No test asserts the exact bytes.
 
-Options, dispatched rather than picked: (a) keep line 1 byte-identical and append the addon
-identity below; (b) leave `version` alone and expose the identity through a separate verb or
-flag; (c) make `version` structured, matching whatever machine-readable convention the CLI
-already uses. Codex opinion dispatched; the Opus half is still unavailable (subagent limit
-200/200), so this will land as one opinion plus my own read, labelled as that.
+CORRECTION: I first wrote that no doc documents it either. False. `docs/cli.md:149` states
+the contract in words:
+
+    | `--version` | Print the package version and exit 0 |
+
+So the SEMANTICS are documented even though the bytes are unpinned, which strengthens the
+case for leaving the default output alone rather than weakening it.
+
+DECIDED: **(b)** - keep `zero-migrate version` and `zero-migrate --version` byte-identical and
+independent of addon loading; put the identity behind a new opt-in. The shipping contract:
+
+    zero-migrate version                     -> unchanged, bare version + newline
+    zero-migrate --version                   -> unchanged
+    zero-migrate version --verbose           -> labelled CLI and addon identity
+    zero-migrate version --verbose --json    -> one JSON document:
+      { "cliVersion": ..., "addon": { "version", "irVersion", "sourceDigest" } }
+
+MY OWN OPTION (a) WAS REFUTED, and the refutation is simple enough that I should have caught
+it: I argued "scripts reading line 1 keep working" if the identity is appended below. Command
+substitution does not read line 1 - `$(zero-migrate version)` captures the entire multi-line
+output. Preserving the first line is not preserving compatibility. Appending is a breaking
+change to every script that captures the value.
+
+A COMPATIBILITY TRAP THAT RULES OUT THE OBVIOUS (c). `--json` is parsed in the global flag
+switch at packages/zero-migrate-cli/src/cli.ts:284-287 and is never validated against the
+command, so `zero-migrate version --json` ALREADY succeeds today and prints the bare version,
+because the early `version` branch ignores `args.json`. Teaching bare `version --json` to emit
+a JSON document would silently change the output of a command line that works now. A new
+`--verbose` gate is genuinely additive; repurposing `--json` is not.
+
+The rest of the CLI supports (b): `--json` is documented as "Machine-readable output where
+supported" (cli.ts:1448) and the five verbs that support it - lint (867), plan (964), rollback
+(1103), status (1190), history (1391) - each emit one pretty-printed JSON value plus a newline.
+`version` is the only command whose entire stdout is an unlabelled scalar; every other human
+output is labelled. There is no existing doctor-shaped verb to put this in: dispatch at
+cli.ts:1492 is new, lint, plan, apply, rollback, status, history, resolve.
+
+Implementation note for whoever builds it: the opt-in path must load the addon inside the
+normal error-handling block. Plain `version` works today with the addon missing or
+`ZERO_MIGRATE_ADDON_PATH` broken, and that must survive.
+
+DECIDED BY: one codex read-only opinion plus my own read. The Opus half was unavailable for
+the fifth session running (subagent spawn limit 200/200), and I am recording that rather than
+presenting a one-sided result as a split. Codex corrected me on three things - the doc at
+cli.md:149, the 12-vs-13 method count, and the `$(...)` capture semantics that killed my own
+option (a).
 
 A THIRD SAME-NAMED-TOKEN TRAP, and I am counting them now. Checking whether tests pinned the
 output, `git grep '"version"' -- packages/zero-migrate-cli/tests` returned three hits that
