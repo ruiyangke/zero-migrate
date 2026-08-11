@@ -8990,6 +8990,58 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F365 - the creatable-escape check runs on the live path now, and the audit found a second one missing
+
+Two things: F364's step 1 built, and the audit item F364 left open, measured.
+
+### Built (97281cfd)
+
+`EffectivePolicy::check_creatable_escape` raises the `ComposeError` variant that already existed for
+the live path and had never been constructed. `effective_policy_from_charter_layers` calls it on the
+FINAL composition, not per layer, because the escape is a property of the stack - a later layer can
+narrow the creatable scope back inside the inject. `finalize_charter` and the live path now call one
+shared `creatable_escape_scope`, so the two composition paths cannot answer differently; them
+answering differently is how the check went quiet.
+
+Gate: 118 targets, 2525 passed, 0 failed, zero skip banners, fmt and clippy clean. No existing
+charter fixture trips the new refusal, which was the risk worth checking when adding one.
+
+MUTATION-PROVEN: with the check disabled behind a temporary env var, exactly
+`a_create_grant_escaping_a_mandatory_inject_is_refused` failed and the other two arms passed. The
+gate was removed and its absence verified in the committed tree.
+
+Three arms on purpose - the defect, the legitimate confined shape, and a NON-mandatory inject that
+must NOT constrain where tables are created. Without the third, the check could have been satisfied
+by refusing every charter carrying an inject at all.
+
+### The audit item, measured rather than left as a suspicion
+
+F364 recorded that `finalize_charter` also runs all-pairs inject/inject and inject/validate checks
+while `admit` compares charter-against-draft, and flagged - explicitly as a suspicion, not a finding -
+that a conflict WITHIN one layer never passes through `admit` as a draft.
+
+MEASURED. This charter composes to `Ok`:
+
+    policy_version = 1
+    [[inject]]
+    scope = { include = ["app_*"] }
+    columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
+    [[inject]]
+    scope = { include = ["app_*"] }
+    columns = [ { name = "created_at", type = "text", nullable = true } ]
+
+Both injects survive in the composed Base layer, same scope, same column name, incompatible shapes -
+one `timestamptz NOT NULL`, one `text` nullable. `finalize_charter`'s check (1) at compose.rs:1114 is
+for exactly this and does not run.
+
+CONSEQUENCE NOT MEASURED, and I am not asserting it: `ResolvedInject::for_object`
+(table_shape.rs:148) extends columns from each covering spec with no dedupe, which READS as
+producing a table carrying `created_at` twice. Whether that surfaces as a rejected CREATE TABLE, an
+earlier engine error, or something quieter was not run.
+
+So the suspicion is upgraded to a gap in the check, and left as a suspicion about the blast radius.
+The inject-vs-validate half (compose.rs:1138) was not probed at all.
+
 ## F364 - DECISION on #60: the live path becomes the only architecture, and the lint moves onto it first
 
 Both opinions reconciled - one codex read-only pass and my own reading plus the measurement in F363.
