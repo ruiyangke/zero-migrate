@@ -8990,6 +8990,53 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F320 - the untested third dialect carried the defect, and reports it in words the other one does not use
+
+F319 closed with SQLite untested on both operations and a prediction that it plausibly carried the
+`replace` defect. Measured. It does, and the run also produced something the prediction did not
+cover.
+
+    dropView across deploys           MySQL FAILS      PostgreSQL works    SQLite works
+    createView replace across         MySQL works      PostgreSQL FAILS    SQLite FAILS
+
+So the `replace` defect is two dialects of three. MySQL is the only engine where it does not fire and
+the only one where the drop fails, and both follow from the single fact that its catalog map is
+empty: nothing to trip the duplicate check, nothing to find for the drop.
+
+### The part the prediction missed
+
+The SQLite arm failed on its first run, and not on the outcome - on the text:
+
+    actual:   IR envelope deploy failed: migration "view_replace" failed during historical schema
+              projection: fold: view `view_drop_active` already exists
+    expected: failed to project pending schema after envelope "view_replace": fold: view
+              `view_drop_active` already exists
+
+Same `FoldError`, different host wrapper. SQLite surfaces it through the deploy path where
+PostgreSQL surfaces it through the pending-schema path. One defect, two operator-visible messages,
+selected by which database is behind the CLI.
+
+Both are now asserted verbatim rather than normalised to a shared pattern. Normalising would have
+been tidier and would have destroyed the finding: an operator who hits this on SQLite and searches
+for the PostgreSQL wording finds nothing, and a reader of one assertion would never learn the other
+exists. Whether the divergence is worth fixing is a separate question, deliberately not filed - it
+is a real question and I have not thought it through.
+
+### On the value of the failing first run
+
+The arm was written to record outcomes rather than to confirm the prediction - the drop half asserts
+only "ran", and the replace half was pointed at the PostgreSQL string because that was the
+prediction. Being wrong about the string is what surfaced the wrapper divergence. Had the arm been
+written loosely, matching on `/already exists/`, it would have passed on the first run and the
+divergence would still be unknown. A prediction that fails on a detail is worth more than a matcher
+loose enough never to fail.
+
+Host suite 145 tests / 145 pass / 0 fail / 0 skipped, zero skip banners.
+
+NOT VERIFIED: whether the two wrapper messages should be unified; whether any Rust-side test covers
+`replace` against a seeded catalog; the `ifExists` drop variant, still untested and still not
+inferred, now flagged as unchecked in three consecutive entries and in both consumer messages.
+
 ## F319 - asking what the fix would break found a second defect on the dialect that was supposed to be the control
 
 F318 measured the MySQL view-drop refusal and named three hazards for the fix, the sharpest being
