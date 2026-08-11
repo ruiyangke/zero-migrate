@@ -8990,6 +8990,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F348 - "reaches the lowering" is not "reaches the projection", and I used one as evidence for the other
+
+I told a consumer in -039 that `applyIr`, `applyIrSqlite`, `rollback` and `rollbackSqlite` "are the
+exports whose lowering reaches `lower_ordered_envelopes_to_plans_inner`". Three of those four names
+are wrong and two that belong are missing. They checked one of them and sent it back.
+
+Worse than the error is how I made it: my own measurement earlier the same day recorded that SQLite
+apply never projects. I contradicted a thing I had measured, by reasoning from the SHAPE of the export
+names - four verbs that apply or roll back, so four verbs that lower, so four verbs that project.
+
+### The measured map, all fourteen exports declared in bridge.rs
+
+    export           bridge.rs   route                              projects?
+    applyIr          625         apply_ir_with_locked_backend       YES, conditionally
+    applyIrSqlite    733         MigrationEngine::deploy_envelopes  NO
+    rollback         869         rollback_with_locked_backend       NO
+    rollbackSqlite   948         rollback_with_locked_backend       NO
+    statusIr         1077        status_ir_with_locked_backend      YES
+    statusIrSqlite   1158        status_ir_with_locked_backend      YES
+
+Of five public lowerers, exactly two reach the inner that owns `ProjectionGuardVerdict`:
+
+    lower_envelope_to_plan                        192   inner 0
+    lower_envelope_to_plan_with_live              214   inner 0
+    lower_ordered_envelopes_to_plans              294   inner 1
+    lower_ordered_envelopes_to_plans_for_apply    327   inner 1
+    lower_ordered_envelopes_to_plans_for_rollback 368   inner 0
+
+and the verbs.rs call sites: 304 (`_with_live`, the empty-priors apply branch), 315 and 334
+(`_for_apply`), 557 (`_for_rollback`, inside rollback), 690 (`lower_ordered_envelopes_to_plans`,
+inside status).
+
+THE TRAP, stated plainly: `rollback` DOES call a lowerer and still does not project, because the
+rollback lowerer is the one that does not descend. "Reaches the lowering" and "reaches the
+projection" are different predicates over the same call graph, and I used the first as evidence for
+the second without checking that the implication held.
+
+### Two things fall out that are worth more than the correction
+
+`applyIrSqlite` does not go through `crate::lower` at all - it calls `MigrationEngine::deploy_envelopes`
+directly (bridge.rs:733 to 776), and `grep -cE 'lower::|lower_ordered|crate::lower'` over bridge.rs
+returns 0. So the apply export that a SQLite host uses shares no lowering with the apply export a
+PostgreSQL host uses. That is a bigger structural fact than the projection question it came up in.
+
+`statusIrSqlite` projects while `applyIrSqlite` does not - the same asymmetry #99 recorded as "on
+SQLite, plan and status refuse a guarded migration that apply runs successfully". Independent
+corroboration of an already-closed finding, arrived at from the opposite direction. Told the consumer,
+because their dev tier is precisely SQLite-through-the-addon and they are the topology where it bites.
+
+### Filed rather than guessed
+
+The consumer also flagged `bridge.rs:795` returning `pending_contracts: Vec::new()` in the SQLite
+apply reply, where every other apply path builds the field from `backend.pending_contracts()`
+(verbs.rs:291) via the mapper at verbs.rs:85-91. Correct constant for a backend that cannot hold one,
+or a dropped value - I do not know, and the answer needs a run rather than a read. Filed as #216 with
+the trace already done, and I told them the answer would come from running it.
+
+VERIFIED BY ME at c141a5a8: every route in the table, read from its `#[napi]` declaration to the call
+it makes; the five inner-call counts; the five verbs.rs call sites and their enclosing functions;
+bridge.rs:795 and the verbs.rs contract mapper.
+NOT VERIFIED: the whole table is reachability from the call graph. I have not run a fold-refusing
+migration through any of the six paths, so no cell is an observed refusal.
+
 ## F347 - the addon identity is reachable from the CLI, and the first RED was the wrong RED
 
 #215 built to the F345 decision: `version` and `--version` unchanged, the identity behind
