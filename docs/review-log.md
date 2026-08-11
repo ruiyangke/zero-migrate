@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F302 - the shipped rename guard's CHECK refusal is now MEASURED, and it was the last inferred claim in F300
+
+F300 and F301 both closed with the same caveat: that `blocking_column_dependents` no longer returns
+a CHECK constraint was VERIFIED, but that an end-to-end online rename now succeeds was INFERRED from
+that plus a reading of the guard. Inferring across two verified facts is how F297 went wrong, so it
+was worth spending a test on rather than leaving as prose.
+
+`a_pg_rename_whose_old_column_carries_a_check_is_not_refused` (tests/pg_scenarios.rs, committed as
+ea5a9838) renames a column carrying `CHECK (qty >= 0)` and asserts the apply is not refused. It
+passes. Removing the qualifier cb7e1444 added makes it fail with the defect's own words:
+
+  a CHECK constraint does not stop PostgreSQL dropping the old column:
+  Plain(Apply(RenameSourceHasDependents { table: "chk_rename_items", column: "qty",
+    blockers: ["constraint chk_rename_items_qty_check on table
+               proj_..._1.chk_rename_items"] }))
+
+That mutation is the evidence, not the passing run. A test that passes proves the code does
+something; only breaking the branch it guards proves it is THAT branch being tested, and the right
+test failed while the generated-column refusal test kept passing.
+
+TWO THINGS THE TEST CORRECTED WHILE BEING WRITTEN, both mine:
+
+  - I first asserted the rename "ran to completion", expecting `qty` gone and `quantity` present.
+    The run returned `["id", "qty", "quantity"]`. That is not a bug: expand and contract are
+    different deploys, and the contract half drops the old column at N+1 once no running code reads
+    it. The assertion was wrong about the contract it was testing, so the assertion changed and the
+    comment now says why `qty` is expected to survive.
+  - Before writing it I grepped tests for `RenameSourceHasDependents`, found nothing, and nearly
+    filed "the shipped rename guard has no test". `git show --stat be15281` shows 94 lines added to
+    tests/pg_scenarios.rs. The guard IS covered by
+    `a_pg_rename_read_by_a_generated_column_is_refused_before_the_chain_starts`, which asserts on
+    behaviour rather than naming the error variant. Grepping for an identifier answers "who mentions
+    this name", never "what is covered".
+
+WHAT THE NEW TEST ADDS beyond the fix it guards: the two rename tests now bracket the guard from both
+sides. The older one asserts the new column was NEVER ADDED, which is what distinguishes a preflight
+refusal from a late C2 failure. The new one asserts the new column WAS added, which is what
+distinguishes an allowed rename from a refused one. Either alone is satisfied by outcomes the other
+rejects.
+
+ALSO CLOSED, unremarked until now: `blocking_column_dependents` appears in no test file by name, and
+before b59004ef its only production caller was the rename guard. The drop-guard suite now exercises
+the shipped query through `drop_column_blockers`, so the function has direct coverage on two paths
+rather than one.
+
+GATE: fmt 0, clippy 0, 114 targets / 2499 passed / 0 failed / 0 ignored, zero live-database skip
+banners. One test more than F301's 2498, which is this one.
+
 ## F301 - #129 shipped: the drop guard rides on the migration, and the RED was reproduced before it was believed
 
 Built as F299 decided and committed as b59004ef, after cb7e1444 fixed the predicate it stands on.
