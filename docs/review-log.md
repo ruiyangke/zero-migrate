@@ -8990,6 +8990,98 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F277 - every N-API export now catches its own panic, and the abort is measured on both sides
+
+#196 SHIPPED. F276 measured the defect; this is the fix, the option that beat the one I filed,
+and a gate for the thing a reviewer cannot see.
+
+### The measurement, both directions
+
+Same temporary panic at the top of `gen_artifacts`, same rebuilt addon, same script - the only
+difference is the attribute.
+
+    without catch_unwind:  fatal runtime error: failed to initiate panic, error 5, aborting
+                           Aborted (core dumped)                        node_rc=134
+    with catch_unwind:     THREW: Error: probe: a panic inside a synchronous napi export
+                           PROCESS SURVIVED THE CALL                    node_rc=0
+
+The script's trailing `console.log("PROCESS SURVIVED THE CALL")` prints in the second and not the
+first. That pair is the whole justification: the attribute is not a style choice, it is the
+difference between a core dump and a catchable `Error`.
+
+### The option that won was not one of the three I filed
+
+I filed (a) the five sync exports, (b) also restructure the async decode prefix, (c) do nothing.
+The answer is the all-export attribute - fourteen exports, sync and async - with no restructuring,
+which is (a) widened rather than (b).
+
+What makes (b) unnecessary: the attribute wraps the WHOLE generated body, including napi's own
+argument conversion and the handwritten decode prefix each async verb runs before it spawns. So
+the prefix gets covered without moving it. And moving it would have cost something real - an
+argument error currently throws synchronously, and relocating the decode into the worker closure
+would turn every one of those into a promise rejection, a contract change at nine entry points to
+fix a panic path.
+
+What makes (c) wrong is already written down: F274 rejected `panic = "abort"` for the async path
+because killing an embedding Node process is not an acceptable outcome. A sync export that aborts
+is the same outcome by a different route.
+
+The one I was most tempted by, and rejected: routing a caught panic into `genArtifacts`'s existing
+`ok=false` + `error` shape, which would have preserved the "never throws" wording exactly. It is
+the wrong shape. `ok=false` means the SOURCE was rejected; a panic means the engine broke. Folding
+them together would let a caller's `if (!reply.ok)` branch report an internal defect as bad schema
+- the same class of wrong conclusion the abort caused, just quieter. The doc now states the
+distinction instead of the old blanket "never a throw".
+
+### The gate, and why it reads source instead of provoking a panic
+
+`crates/zero-migrate-node/tests/napi_exports_catch_panics.rs`. The shipped code has no panic to
+provoke on demand, and adding one to reach a test would put the hazard into the product to prove
+the product is safe from it. What actually needs guarding is COMPLETENESS: a reviewer reading one
+diff hunk cannot see that an export elsewhere was added without the attribute.
+
+It nearly shipped broken. `cargo fmt` wraps three of the fourteen attributes across lines:
+
+    #[napi(
+        js_name = "applyIrSqlite",
+        ts_return_type = "Promise<ApplyReply>",
+        catch_unwind
+    )]
+
+A line-at-a-time scan sees a bare `#[napi(` for those three and would have reported all three as
+unguarded - a false failure that would have been "fixed" by loosening the check until it passed on
+nothing. The scanner accumulates until parentheses balance, and a second test pins that behaviour
+against both the wrapped-and-guarded and wrapped-and-unguarded shapes, because the main gate
+passing tells you nothing about which of those it can tell apart.
+
+Mutation-tested by removing the attribute from one single-line export and one wrapped export:
+
+    test every_napi_export_opts_into_catch_unwind ... FAILED
+    bridge.rs:104: #[napi(js_name = "buildInfo")]
+    bridge.rs:728: #[napi(js_name = "applyIrSqlite",ts_return_type = "Promise<ApplyReply>")]
+
+Both shapes caught, each named with its line.
+
+### One thing I got wrong about my own gate command
+
+My gate script ran `cargo test -p zero-migrate-node`, which fails to link with
+`undefined symbol: napi_typeof` on four pre-existing integration targets. That is not a
+regression and not a defect - the documented invocation is
+`cargo test -p zero-migrate-node --no-default-features` (CONTRIBUTING.md:28, .github/workflows/ci.yml:79),
+under which every target including the new one is green. I had reported `node_rc=101` before
+checking which command the project actually uses.
+
+### Gate
+
+    fmt 0, clippy 0, cargo test 0
+    rust targets=113 passed=2493 failed=0 ignored=0, skip banners 0
+    zero-migrate-node --no-default-features: all targets green, 47 lib + 2 new
+    addon rebuilt 0, host suite 135 pass 0 fail 0 skipped
+
+`index.d.ts` moved, and intentionally: napi copies rustdoc into the published types, so the
+`genArtifacts` and `loadVerify` doc changes propagate. No signature changed - the attribute itself
+is invisible to TypeScript.
+
 ## F276 - the async panic fix stops at the call thread, and a sync export aborts the process
 
 #196 filed. Found by a consumer's question rather than by looking: they asked whether F274's
