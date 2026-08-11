@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F358 - #79's snapshot prerequisite is fully cleared, and the remaining empty fields are correct
+
+#79 is blocked on a stated prerequisite: "Populate `views` (and audit the constraint variants) or
+explicitly retain native handling BEFORE adding any probe call." The views half shipped as #207
+(6e6333e1). The audit half had not been done, and this is it.
+
+MySQL's snapshot still ends with a defaulted tail:
+
+    crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:679
+        Ok(SchemaSnapshot { tables, views, ..Default::default() })
+
+So `partitions`, `named_types`, `sequences`, `roles` and `schemas` are all empty on MySQL. The
+question is whether any of them is another #207 - an empty map silently answering "absent" to a
+question something actually asks.
+
+`partitions` is the only candidate that survives a first look, because MySQL genuinely has
+partitioning and because the field IS read, in both directions, by structural drift:
+
+    crates/zero-migrate/src/apply/drift.rs:1645-1656
+        for name in expected.partitions.keys() { if !actual.partitions.contains_key(name) { ... } }
+        for name in actual.partitions.keys()  { if !expected.partitions.contains_key(name) { ... } }
+
+An empty `actual` against a non-empty `expected` would report every partition as missing.
+
+It cannot happen. `crates/zero-migrate/src/model/op_support.rs:170-173` refuses all four partition
+lifecycle ops:
+
+    Op::CreatePartition { .. }
+    | Op::AttachPartition { .. }
+    | Op::DetachPartition { .. }
+    | Op::DropPartition { .. } => "partition lifecycle operations are PostgreSQL-only",
+
+with op_support.rs:161 refusing partitioned tables on the same ground. No MySQL migration can author
+a partition, so the fold cannot put one in `expected`, so both sides are empty and agree. The other
+four fields are PostgreSQL-only concepts by definition - named enum/domain types, standalone
+sequences, cluster roles, and vendor-managed schemas.
+
+CONCLUSION: leaving those five empty on MySQL is correct rather than a gap, for a measured reason
+rather than by omission. #79's prerequisite is now fully cleared and its two decided halves - (A)
+authorized re-scoping, (B) the physical-type signature - are unblocked.
+
+WHY THIS WAS WORTH CHECKING RATHER THAN ASSUMING: #207 was exactly this shape and was real. The
+difference is that `views` had a reachable MySQL op behind it (`dropView` carries a native IF EXISTS)
+and partitions do not. "Empty map" is not itself the defect; an empty map that a reachable op
+consults is.
+
 ## F357 - undoing a function's body change deleted the function, and said it worked
 
 #211's repair was decided by elimination long before this. What it recorded as unproven was the
