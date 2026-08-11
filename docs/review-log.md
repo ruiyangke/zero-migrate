@@ -8990,6 +8990,124 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F340 - #11 measured: 87 percent of the non-ASCII is decoration, and the naive em-dash rule would rewrite the fixture that proves em dashes are handled
+
+#11 has sat in the queue reading like the cheapest task on it - convert the tree to ASCII, no
+behaviour involved. I measured it before starting, and the measurement is the finding: the task
+splits into three classes with different risk, plus a decision, and one plausible sweep rule
+silently weakens a test.
+
+### The corpus
+
+    git ls-files '*.rs' '*.ts' '*.js' | grep -v node_modules
+      -> 366 tracked code files, of which 207 carry at least one non-ASCII character
+         152 .rs, 34 .ts, 21 .js, 20612 non-ASCII characters in total
+
+By character, counted with `perl -CSD -ne 'while(/([^\x00-\x7F])/g){$h{$1}++}'` over the same
+file list:
+
+    U+2500 BOX DRAWINGS LIGHT HORIZONTAL      7355
+    U+2550 BOX DRAWINGS DOUBLE HORIZONTAL     6576
+    U+2014 EM DASH                            4085
+    U+2192 RIGHTWARDS ARROW                    930
+    U+2026 HORIZONTAL ELLIPSIS                 746
+    U+21D2 RIGHTWARDS DOUBLE ARROW             261
+
+Three characters are 18016 of 20612, or 87 percent. The two box-drawing rules alone are 13931,
+and they are comment banners - nothing reads them, nothing asserts on them, and substituting
+`-` and `=` cannot change a single behaviour. That is Class A, and it is genuinely mechanical.
+
+### Class B is a product change wearing formatting clothes
+
+253 Rust lines carry non-ASCII OUTSIDE a comment - measured by dropping every line whose trimmed
+start is `//`, `/*` or `*`. They are operator-facing advisory text:
+
+    crates/zero-migrate-guard/src/analysis/analyze.rs:327
+      "use CREATE INDEX CONCURRENTLY on a populated table - but it cannot run inside \
+    crates/zero-migrate-guard/src/analysis/analyze.rs:437
+      "RENAME {what} '{}' -> '{}' breaks running code that still reads the old name \
+
+(shown here with the substitution already applied; the tree has an em dash and a `->` arrow.)
+Rewriting these changes what an operator reads out of a failed migration. That is defensible and
+probably right, but it is a change to shipped output, and it belongs in its own commit with a
+before/after rather than inside a formatting sweep. I checked whether any test pins the text:
+
+    git grep -n 'breaks running code that still reads the old name' -- crates packages
+      -> only the definition site
+
+So the compiler and the suite would both stay green through a wrong rewrite here. Nothing catches
+it, which is the argument for isolating it, not for treating it as safe.
+
+### Class C is why this is not a sweep, and the em-dash rule is the trap
+
+Three sites hold non-ASCII ON PURPOSE, as the input under test:
+
+    crates/zero-migrate-guard/src/guard/mod.rs:4522
+      let body = "EXECUTE 'cafe [lambda] pg_read_file [CJK][arrow] done'";
+    crates/zero-migrate-guard/src/guard/mod.rs:4526
+      the expected extraction for the same body
+    crates/zero-migrate/src/schema/query.rs:4617
+      for name in &["cafe", "naive", "[CJK]", "user[EM DASH]id", "field name"] {
+
+(bracketed here to keep this paragraph readable; the tree carries the real characters.)
+
+The guard site feeds multi-byte text through the body scanner deliberately. The query site is an
+identifier-quoting fixture whose entire purpose is names the ASCII path would mangle. Converting
+either leaves a passing test that no longer tests anything - the exact false-green shape F49, F53
+and #83 keep producing from different directions.
+
+And the fourth entry of that array is `user` + U+2014 + `id`. A sweep rule of "replace em dash
+with hyphen" is the single most obvious rule anyone would write for this task - em dash is the
+third most common character in the corpus - and applied here it rewrites the fixture into
+`user-id`, an identifier the ASCII path handles fine. The test still passes. It has stopped
+covering the case it was written for, and nothing says so.
+
+So Class C is not "skip for now". It must stay non-ASCII permanently, with a comment at each
+site saying why, or the next person to run the sweep will make the same edit.
+
+### The fourth item is notation, and it is a decision
+
+    git ls-files '*.rs' | xargs perl -CSD -ne \
+      'if (/[\x{2291}\x{2293}\x{2294}\x{22A4}\x{2229}\x{222A}\x{2216}\x{2208}\x{2205}]/) { print "$ARGV\n"; close ARGV }'
+      -> 23 files, across zero-migrate-guard, zero-migrate-ir, zero-migrate-policy and zero-migrate
+
+These are doc comments using U+2291, U+2293, U+2294, U+22A4, U+2229, U+222A, U+2216, U+2208,
+U+2205 to state the policy lattice - `forbid [subsumes] warn [subsumes] allow` and similar. That
+is notation carrying meaning, not decoration, so there is no substitution that is obviously
+correct: `<=` reads numeric on a lattice that is not ordered by magnitude, `[=` is obscure, and
+prose is clearest but reflows every line it touches. Wants the usual split before anyone types
+it. (I said "twelve files in the guard and IR crates" when I first looked at this; the measured
+figure is 23 files across four crates.)
+
+### The open question answered itself
+
+I had left "does #83's NUL/encoding gate interact with a deliberate-non-ASCII allowlist" as an
+open item. It does not, because that gate does not exist:
+
+    grep -n "name:" .github/workflows/ci.yml
+      -> no encoding or NUL step among the 24 named steps
+
+F52 records Part A shipping and leaves Part B - the gate itself - explicitly open; F54 then measured
+three candidate detectors against a planted NUL and picked two that work. Neither was ever installed.
+Task #83 is marked completed, which overstates it by the whole gate. So
+#11 has no existing gate to reconcile with. It also means a sweep has nothing holding the line
+afterwards, and the obvious follow-up - gate the tree as ASCII - is exactly what Class C forbids
+as a blanket rule. Any such gate needs a by-path exemption from the day it lands.
+
+### Decided, and written into the ticket
+
+Three commits in this order, not one: Class A with Class C excluded by path; the notation
+convention after it is decided; Class B as an explicit change to operator-facing output. Class C
+converts never.
+
+VERIFIED BY ME, all commands above run on this checkout at `5d14c0dd`: the 366/207 file counts,
+the per-character frequencies, the 253 non-comment Rust lines, the three Class C sites at their
+quoted line numbers, the 23-file notation spread, the absent test pin on the advisory string, and
+the absence of any encoding step in `ci.yml`.
+NOT VERIFIED: that Class A is behaviour-free in every one of its 13931 instances - I checked the
+character frequencies and the shape of the banners, not each site. Nor have I run the sweep, so
+"the suite stays green through a Class B rewrite" is read from the absent grep hit, not observed.
+
 ## F339 - #197's soft-return premise is now RUN rather than read, and a wrong probe nearly refuted it
 
 #197 argues for making the async verbs mirror the sync ones, and its footing is that soft-returning is
