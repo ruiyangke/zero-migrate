@@ -8990,6 +8990,45 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F298 - correcting F297: it is not one call site, because the plan step does not say which column is dropped
+
+F297 ended by narrowing #129 to "one call site and its refusal". That is wrong, and I found it by
+starting the build rather than by re-reading. Correcting it here before anyone acts on it.
+
+The rename guard works because its step is TYPED. `apply_plan_locked` matches
+`PlanStep::OnlineRename(RenameStep::PgExpandContract(plan))` and reads
+`OnlineIntent::RenameColumn { table, from, .. }` straight off it (engine.rs:1834-1836). Table and
+column are structured data on the step.
+
+A plain column drop is not. It arrives as `PlanStep::Ddl(Migration)` - render/step.rs:108 - whose
+payload is "an existing [`Migration`] (single `up: String`, no parameter slot)". The SQL text is all
+there is. And `apply_plan_locked` takes `steps: &[PlanStep]` and nothing else (engine.rs:1786-1788),
+so the `op_spans` that DO carry the typed op alongside their step ranges are not in scope there.
+
+So the guard has no way to learn "this step drops column X of table T" without one of:
+  (a) parsing the rendered DDL, which this codebase deliberately does not do for safety checks - the
+      sibling `PlanStep::Dml` variant carries `target_schema` and `target_table` precisely so
+      "backends use this instead of parsing rendered SQL for safety checks" (render/step.rs:126-130);
+  (b) carrying the drop intent structurally onto the step, the way `OnlineRename` and `Dml` already
+      do; or
+  (c) running the check earlier, where the typed `Op::DropColumn` is still in hand.
+
+That is a design choice among three, not a call site. It is still much smaller than the two-layer
+build #129 originally described - the predicate and its rule are done and correct - but "one call
+site" understated it in exactly the way the ticket's earlier text overstated it, and I made that
+error one entry after criticising the ticket for the same thing.
+
+WHAT I SHOULD HAVE DONE: F297's claim came from finding a single caller and reading the loop it sits
+in. I did not check what the guard could SEE at that point, which is the question that decides
+whether a second caller is possible at all. Counting call sites answers "where is this used"; it does
+not answer "where could it be used", and I wrote the second conclusion from the first evidence.
+
+NOT YET DECIDED, and it wants the usual split before code: which of (b) or (c). (a) is excluded by
+the codebase's own stated convention. (b) keeps the check under the lock against the live catalog,
+which is where it belongs for a live-schema question. (c) sees the typed op naturally but runs before
+the lock, so its answer can be stale by the time the DDL executes - the same staleness the rename
+guard avoids by asking under the lock.
+
 ## F297 - the rule F293-F296 derived was already shipped, and #129's remaining work is one call site
 
 Before building #129 I checked whether the preflight seam already existed. It does, and so does the
