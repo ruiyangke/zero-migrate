@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F287 - the masked-sentinel gap is unreachable from the engine, so it closes without a fix
+
+#90 CLOSED, no code change. The ticket wrote its own deciding test - "if only an out-of-band edit
+can cause it, this is a low-value hardening; if a rebuild path can, it is the same class as #86 and
+worth a RED" - and left reachability unestablished. Establishing it answers the first way.
+
+The mechanism is real and unchanged: the masked sibling's probe verifies the column's presence and
+`(data_type, nullable)`, never its `zero-migrate:mask` sentinel, so a sibling present but unmarked
+reads as SatisfiedNoop and the sentinel is never rewritten. The question was only ever whether
+anything but a human can produce that state.
+
+Route 1, a partial apply between the ADD COLUMN and the COMMENT: closed, because they are not two
+units. `render_add_column_with_statements` (declarative.rs:7588-7605) joins the emitter's statement
+list into ONE migration's `up`, and its own doc says so - "join(";\n") over the statements is
+byte-identical to the migration's `up`". `MigrationFlags::default()` is `transactional: true`
+(zero-migrate-ir/src/migration.rs:259-262) and nothing overrides it here, so a crash between the
+two rolls back both.
+
+Route 2, the SQLite 12-step rebuild: closed by design. On SQLite the sentinel is not a COMMENT -
+the emitter bakes `/* zero-migrate:mask:... */` inline in the CREATE text, and `sqlite_master.sql`
+keeps it verbatim. drift_sql.rs:28-36 says this and names the contrast that makes it work: "SQLite
+keeps comments in the stored schema text, unlike PG which discards them at parse". The rebuild
+renders from `stored_create_sql`, so the sentinel survives the same way CHECKs and generated
+expressions do.
+
+Route 3, a PostgreSQL path that recreates a column without its comment: none found. PG uses ALTER
+and has no rebuild. Recorded as checked-by-absence, which is weaker than the other two and is
+labelled that way in the ticket.
+
+### Why not harden it anyway
+
+Because the cost is not small and the precedent cuts against it. `GuardProbe::Column`'s
+`expect: Option<(String, bool)>` carries data_type and nullable only, so verifying a sentinel means
+widening the probe type. #81 deliberately chose ownership-only over shape-verify on a related probe
+because shape-verify broke the crash-recovery no-op - proven there by mutation, not argued. Paying
+that risk to defend a state the engine cannot reach is the wrong trade.
+
+### The shape worth keeping
+
+Three tickets in this family in a row - #85, #89, #90 - and they landed differently: a fix with a
+live RED, a fix with a live RED, and a close with no change. What separated them was not how
+plausible the mechanism sounded. All three mechanisms were real and all three were verified by
+reading. What separated them was reachability: two were reachable from an authored op, one needs a
+human with psql. The ticket that got that question written into it up front is the one that closed
+cleanly, and it was written that way by the agent that filed it rather than by me.
+
 ## F286 - dropping a masked column takes its sibling, and the add path's own comment wrote the fix
 
 #89 SHIPPED, after three iterations of establishing it: the claim confirmed, the consequence
