@@ -8990,6 +8990,88 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F356 - one stray terminate had two victims, and the suite hung rather than failed
+
+Found by running `test:host` after F355 and watching it stop dead. The output file sat at 9136 bytes
+for fifteen minutes with the runner still alive. Not a slow suite - a deadlock.
+
+### What the server said
+
+```
+pid | state | wait_event_type | wait_event | q | age
+1319788 | active | Lock | advisory | SELECT pg_advisory_lock(hashtext($1)::bigint) | 00:24:50
+```
+
+Two advisory locks existed: one granted to an IDLE session whose last statement was
+`SELECT pg_terminate_backend($1)`, and one waiting. `pg_advisory_lock` is unbounded, so the waiter
+was never coming back.
+
+### The defect
+
+`killAdvisoryLockWaiter` in `packages/zero-migrate-cli/tests/host/cli.test.ts` chose its victim by
+wait state alone:
+
+```sql
+WHERE pid <> pg_backend_pid()
+  AND wait_event_type = 'Lock' AND wait_event = 'advisory'
+  AND query LIKE '%pg_advisory_lock%'
+```
+
+Nothing in that predicate ties the backend to the lock the probe holds. `node --test tests/host/*.test.ts`
+runs the files CONCURRENTLY, and `rollback-live.test.ts` parks a backend in exactly that state on
+purpose, to prove PostgreSQL queues rather than fails (#177). So the kill landed on the wrong session,
+and one stray terminate produced two casualties:
+
+  - `rollback-live.test.ts` failed at 5.4s with `failed to acquire project lock: db error:
+    terminating connection due to administrator command`
+  - `cli.test.ts` then waited forever on a child nobody killed
+
+The duration is what proves the ordering: `duration_ms: 5393` on the rollback failure against a
+25-minute wait on the hang. The rollback died first, and my own later `pg_terminate_backend` while
+diagnosing was not its cause.
+
+### The RED, measured in isolation
+
+Rather than chase the interleaving, both predicates were run against a deliberately parked foreign
+waiter - probe holds key 111, a third session waits on key 222:
+
+```
+OLD predicate (ships today): 1 victim
+NEW predicate:               0 victims
+```
+
+The shipped one selects a backend waiting on a lock the probe does not hold. That is the whole bug,
+independent of timing.
+
+### The fix
+
+The victim is now chosen by joining the probe's OWN granted lock, so a waiter is only killable if it
+is waiting for the lock this probe is holding:
+
+```sql
+JOIN pg_locks AS held
+  ON held.locktype = 'advisory' AND held.granted AND held.pid = pg_backend_pid()
+ AND waiter.classid = held.classid AND waiter.objid = held.objid
+ AND waiter.objsubid = held.objsubid
+```
+
+No key arithmetic and no schema parameter: the probe already holds the lock it cares about, so the
+lock itself is the identity. `test:host` is 151/151 with both previously-colliding tests passing,
+and no hang.
+
+### Why this was invisible until now
+
+The unfiltered predicate was correct while `cli.test.ts` was the only file parking a backend on an
+advisory lock. #177 added the second parker. The collision depends on interleaving, which is why the
+suite passed at c141a5a8 and hung here - a flake that presents as a hang has no timeout to trip, so
+CI would burn its whole job budget rather than report a failure.
+
+### Also corrected
+
+Two comments in `rollback-live.test.ts` that F355 had left stale: one still described the MySQL
+acquire as a deleted `PROJECT_LOCK_TIMEOUT_SECS` constant, and one justified a two-piece regex by an
+em dash that F355 had already turned into a hyphen. Both now describe what the code does.
+
 ## F355 - MySQL reads the project-lock budget, and the one test that matters is the zero
 
 F354's rule built. `project_lock_timeout` now reaches both dialects that have a bound at all, so an
