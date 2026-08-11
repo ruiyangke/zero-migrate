@@ -8990,6 +8990,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F270 - the schema leak is real, still growing, and not the shape the ticket describes
+
+#50 re-measured and re-scoped. No fix yet, and the reason the fix did not ship is that the
+measurement changed what it should be.
+
+RE-MEASURED against the same live PostgreSQL the ticket used:
+
+    select count(*) from pg_namespace where nspname not in
+      ('public','information_schema','pg_catalog','pg_toast')
+      and nspname not like 'pg_temp%' and nspname not like 'pg_toast%'
+
+    ticket (at f0613c9): 49
+    now:                 85
+
+So it is live and it grew by 36 - during a session in which every suite run was GREEN. That alone
+does not fit the ticket's diagnosis, which is "a test that panics between creating the project
+schema and its cleanup".
+
+GROUPING THE NAMES BY SHAPE, which is what turned a count into a lead:
+
+    36  proj_<pid>_<nanos>_<n>
+    29  meta_<pid>_<nanos>_<n>
+     3  zm_dep_oracle_<ts>
+     1 each: vc_*_varchar255, vc_*_text, guardfold_adopt_pg_* (+ _migrations), s1..s5, ...
+
+65 of 85 are the proj_/meta_ pair, and the 36 proj_ entries match the session's growth exactly. The
+generator is `token()` - `format!("{pid}_{nanos}_{n}")` - which is COPIED into about ten PG test
+files, each with its own private definition (index_name_scheme_alias_pg.rs:44,
+fts_index_name_truncation_pg.rs:35, fold_rename_column_index_cascade_pg.rs:55, and others).
+
+TWO FACTS THAT RESHAPE THE FIX:
+
+  Every file that creates a schema also drops one. 32 files contain `CREATE SCHEMA`, 33 contain
+  `DROP SCHEMA`, and the set difference of creators-without-droppers is EMPTY. So this is not
+  "tests forget to clean up" - the cleanup exists and some path skips it.
+
+  A green run of one of these files leaks nothing. `cargo test -p zero-migrate --test
+  fold_drop_column_check_cascade_pg` passed 7/7 and the count was 85 before and 85 after. So the
+  leak is not universal across the suite, and a blanket RAII retrofit over all thirty-two files
+  would be mostly no-op churn.
+
+WHAT THAT MEANS FOR THE FIX, and why it is not "add a Drop guard everywhere": the question is now
+WHICH ARMS skip their drop - an early `return`, a `?`, an assertion before the cleanup line, or a
+second schema created after the first drop was scheduled. That is a per-file audit against a
+measured before/after, not a sweep. The asymmetry in the leaked names points at it directly: 36
+proj_ against 29 meta_ means seven project schemas outlived the migrations schema that pairs with
+them, so at least one site drops one and not the other.
+
+NOT DONE, deliberately: dropping the 85 schemas. Same reasoning the ticket already recorded - a
+mass `DROP SCHEMA CASCADE` against the developer's test database is irreversible and some may be
+load-bearing for a suite I have not read. The count is also the only evidence the leak is live, and
+resetting it destroys the measurement that would prove a fix works.
+
+The honest state: the ticket's premise (schemas leak) is CONFIRMED and worse than recorded; its
+mechanism (panics) is UNPROVEN and does not explain growth on green runs; and its proposed fix (a
+Drop guard in the harness) is aimed at the wrong granularity until the leaking arms are named.
+
 ## F269 - the missing optionalDependencies are supposed to be missing, and I had warned a consumer about them
 
 Closes #46 VERIFIED-NO-CHANGE. No code. One correction sent to the downstream consumer.
