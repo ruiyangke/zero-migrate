@@ -9050,7 +9050,46 @@ covers that window; arming after a successful build does not.
 The explicit trailing DROP stays. The guard's own drop is IF EXISTS, so the two do not fight, and the
 explicit one keeps the happy path readable at the point a reader is looking for it.
 
-#202 IS NOT DONE. The catalog-signature basis is designed and measured but unwritten. Enumerating the
+SWEPT ebcf7d52, nineteen more files, and the second guard SHAPE got its own control. The oracle's
+guard names one schema; the fold and rollback suites name two, because the engine creates a meta
+schema beside the project one. A proof of the first shape says nothing about the second, so it was
+measured separately, counting every non-system schema in the database rather than one family:
+
+  guard armed, ZM_LEAK_PROBE=1   -> test result: FAILED. 0 passed; 7 failed   schema count 88
+  guard removed, same probe      -> test result: FAILED. 0 passed; 7 failed   schema count 102
+
+102 - 88 = 14 = seven tests times two schemas, which is the predicted number rather than merely a
+larger one. The stranded fourteen were all named fold_check_cascade_pg_3820540_{0..6} and their
+_migrations siblings - one process id, the control run - and were dropped afterwards, so the database
+is back at 88.
+
+TWO FILES ARE DELIBERATELY NOT IN THAT SWEEP. pg_primary_key.rs and synchronize_identity_pg.rs create
+their schema through a shared helper, so guarding them changes the helper's signature and every
+caller. That is a different change and #203 keeps it.
+
+#202 IS NOT DONE, AND ITS PLAN CHANGED. The codex read-only opinion did land, late, and it is better
+than mine on the main point. The cheapest STRONGER first step is not the signature grouping at all:
+enumerate the fixture table's live columns, call the SHIPPED `blocking_column_dependents` itself,
+attempt the real drop, and assert `!blockers.is_empty() == drop_failed`. That closes a hole the
+signature idea leaves wide open - the oracle runs its own `predicate_sql` spelling, and the shipped
+query's doc comment says so outright at
+crates/zero-migrate/src/apply/backend/postgres/mod.rs:273-281, "an edit here would not fail it". I had
+read that comment earlier in the same session and did not draw the conclusion from it.
+
+It also caught a scope error in the paragraph above this one: enumerating every column in the fixture
+SCHEMA would pull in the view's and the indexes' own attributes, whose DROP failures come from
+relation kind rather than dependencies. Restrict to the base table.
+
+And it named a composition the fixture lacks, where the shipped predicate may be wrong rather than
+untested. The ownership subquery never reads `i.refobjid`, so it learns that an index is
+constraint-owned but not WHICH constraint owns it, and the final leg then asks only whether ANY direct
+AUTO pg_constraint edge exists (mod.rs:340-344). So an expression-only EXCLUDE plus a SEPARATE plain
+EXCLUDE on the same column may be indistinguishable from the single mixed EXCLUDE that `excl_mixed`
+already covers, while the server may treat them differently. NOT VERIFIED by codex or by me - nobody
+built that column. If the server refuses it and the predicate allows it, that is a product defect of
+the F300 family, not a gate gap.
+
+The catalog-signature basis is designed and hand-measured but unwritten. Enumerating the
 fixture's columns by the multiset of (deptype, classid, is-the-object-internally-owned-by-a-constraint)
 tuples pg_depend holds against them yields four non-singleton groups over the current 15 columns -
 {idx_expr, idx_key, idx_pred}, {excl_expr, excl_pred}, {excl_plain, excl_pred_key} and
