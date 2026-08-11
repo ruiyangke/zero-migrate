@@ -8990,6 +8990,111 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F299 - #129 decided: the staleness objection the decision was framed on is false, and the check belongs on the step that drops
+
+The second opinion refuted the premise of the question I asked it. F298 framed #129 as a choice
+between (b) carrying the drop intent structurally on the plan step and (c) checking earlier where the
+typed `Op::DropColumn` is in hand, and it ranked (b) above (c) for one reason: (c) "runs before the
+lock, so its answer can be stale by the time the DDL executes". That reason does not hold. Production
+lowering already runs UNDER the project lock, on both paths, and I verified each by reading rather
+than taking the report:
+
+  crates/zero-migrate/src/engine.rs:443   backend.acquire_project_lock(exec_cfg).await?
+  crates/zero-migrate/src/engine.rs:445   deploy_envelopes_locked(...)
+    :471  backend.snapshot_schema(exec_cfg)
+    :501  author.load_and_lower_guarded(...)
+    :526  apply_applied_plan_with_touched_and_depends(..., LockMode::AlreadyHeld)
+  crates/zero-migrate/src/engine.rs:450   backend.release_project_lock(exec_cfg)
+
+  crates/zero-migrate-node/src/verbs.rs:279  backend.acquire_project_lock(cfg)
+    :282-368  snapshot, then lower
+    :369      apply_applied_plan_with_touched_and_depends(..., LockMode::AlreadyHeld)
+
+The addon path states the invariant in its own doc at verbs.rs:255-258: "Snapshot, lower, and apply
+one authored envelope inside one project-lock bracket. The catalog facts used by lowering must
+describe the same serialized database state that the executor mutates; taking the snapshot before the
+lock would leave a check-then-use window for a concurrent deploy." I had read that seam before and
+still wrote the opposite into F298, because I reasoned about where lowering sits in the pipeline
+instead of reading where the lock is taken around it. Pipeline order is not lock order.
+
+WHAT ACTUALLY DECIDES IT, once staleness is off the table. Two properties, one found on each side:
+
+1. Per unit, not per op. One authored `dropColumn` can lower to TWO physical drops - the named column
+   and its `<col>_masked` sibling read from the live schema (render/lower.rs:4929-4938). That arm
+   already documents paying for a per-op decision once, with existence guards: a single main-column
+   probe stamped on both "would have unit 1 decide on `<col>` rather than on `<col>_masked`", the
+   silent skip #89/F286 fixed. Both opinions reached this independently.
+
+2. Intra-plan staleness, which the second opinion raised and I had missed. A whole-plan preflight
+   answers before the plan's own earlier steps have run. A plan that creates a view over a column in
+   an early step and drops that column in a later one has no blocker at preflight and a real one at
+   execution; the mirror case, a plan that drops the blocker first, is refused for a blocker that no
+   longer exists. This is not a concurrency window, so holding the lock does not close it. It rules
+   out an up-front whole-plan loop, which is what BOTH (b) and a post-lowering (c) would be.
+
+DECIDED: neither (b) nor (c), but the mechanism this engine already ships for "assert against the
+live database immediately before this migration's up runs" - a structured `Precondition`
+(crates/zero-migrate-ir/src/precondition.rs), injected at lowering where the typed op is in hand and
+evaluated by the backend under the lock. Chain walked from the entry point:
+
+  engine.rs:2323  apply_with_lock_backend (contiguous Ddl run, AlreadyHeld)
+    -> executor.rs:741   apply_locked
+    -> executor.rs:1056  execute_pending
+    -> executor.rs:1115  for &m in pending
+    -> executor.rs:1166  backend.evaluate_preconditions(cfg, m)
+    -> executor.rs:1200  backend.apply_one(cfg, m, ...)
+
+Both properties fall out of that shape rather than being engineered onto it. Evaluation and apply sit
+in the same loop iteration, so a precondition is answered after every earlier migration in the batch
+has committed, which is exactly what property 2 requires. And preconditions ride on a `Migration`, so
+the masked sibling - its own unit, its own journal row - carries its own, which is property 1.
+The comment at executor.rs:1150 already states the guarantee: "Evaluate preconditions (read-only)
+BEFORE the `up`, under the advisory lock so the checked state is stable."
+
+WHY NOT (b), measured rather than asserted. `PlanStep` is publicly exported (lib.rs:333-335) and
+`Ddl` is a tuple variant (render/step.rs:105-108), so restructuring it is a public API break, and a
+new variant instead would force every exhaustive consumer to treat it exactly like DDL for
+coalescing, checksums, approval, status, rollback and preview - 238 production `PlanStep::` mentions
+across 12 files, including the N-API seam. The decisive objection is narrower: the declarative path
+knows the table and column where it authors a live-only drop (render/declarative.rs:5795-5804) and
+then reduces to `Vec<Migration>` (declarative.rs:5014-5023), and `PlannedMigration` carries only a
+`Migration` plus its report (engine.rs:58-69). Intent bolted onto the step cannot survive that
+reduction; a precondition can, because it rides on the `Migration` itself.
+
+TWO CONDITIONS THE BUILD MUST MEET, both measured, neither optional:
+
+  - PostgreSQL only. Both non-PG arms fail closed on ANY non-empty precondition list -
+    apply/backend/sqlite/mod.rs:795 "sqlite backend: precondition evaluation is not supported on
+    SQLite (descriptor migrations carry none)" and apply/backend/mysql/mod.rs:872 "mysql backend:
+    precondition evaluation is not supported on MySQL". An ungated injection breaks every dropColumn
+    on those two dialects. Lowering knows its dialect (render/lower.rs:3126), so the gate is
+    available, but it is a condition of correctness, not a detail.
+  - One spelling of the rule. The evaluator arm must call `blocking_column_dependents`
+    (apply/backend/postgres/mod.rs:288), not re-write its SQL. The oracle's own doc already warns that
+    the predicate and the oracle's `predicate_sql` are two independently maintained expressions of one
+    rule; a third would be worse, and nothing would fail if it drifted.
+
+CHECKED AND CLEARED: `Checksum::of_ir` DOES fold preconditions
+(crates/zero-migrate-ir/src/migration.rs:442-464), so an injected precondition looked like it would
+make every already-applied dropColumn report drift on upgrade. It does not. The plan anchor is
+`authoritative_ir_checksum(ir)` over the authored IR (render/lower.rs:9031) and `restamp_ir_migration`
+overwrites each step's checksum with that anchor, so injecting onto the STEP cannot move it. This was
+the one objection that would have killed the option outright, which is why it was checked first.
+
+KNOWN COST, not designed away: the refusal surfaces as `PreconditionFailed` rather than the precise
+`RenameSourceHasDependents { table, column, blockers }` the rename guard returns. The variant has to
+carry enough to name the blocking objects or this trades a good error for a cheap one.
+
+NOT COVERED BY ANY OPTION: a raw `.sql` plan built by an embedder through
+`AppliedPlan::single_step`, whose payload is one `up: String` with no typed intent anywhere. Only
+parsing rendered DDL would reach it, and that is excluded by the codebase's own convention
+(render/step.rs:126-130).
+
+THE SPLIT WAS DEGRADED, as in F289. The Opus half was unavailable - the Agent tool returned "Subagent
+spawn limit reached (200 of 200 agents spawned)" - so this was one read-only codex job reconciled
+against my own reading, not two independent opinions. Every load-bearing claim it made was verified
+against the code before being used, and the one that mattered most was the one that proved me wrong.
+
 ## F298 - correcting F297: it is not one call site, because the plan step does not say which column is dropped
 
 F297 ended by narrowing #129 to "one call site and its refusal". That is wrong, and I found it by
