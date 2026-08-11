@@ -8990,6 +8990,76 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F310 - 22 live-PG test files leak their schema on unwind, and the database holds 88 leftovers proving it
+
+I went looking for a place to hang a second enumeration basis on the drop-dependency oracle (#202) and
+found something more concrete in the same file: it creates a schema and never arms the guard that
+removes one on a panic.
+
+THE COUNT, measured against the working tree at 1347f08b:
+
+  files calling support::PgDevSession::connect            34
+  files that also call support::SchemaGuard::arm           9
+  of the remaining 25, files that run CREATE SCHEMA       22
+
+  for f in $(grep -rl 'PgDevSession::connect' crates/zero-migrate/tests/); do \
+    grep -q 'SchemaGuard::arm' "$f" || echo "$f"; done
+
+NOT INFERRED FROM THE SOURCE. The live container at 127.0.0.1:5434 holds 88 leftover schemas:
+
+  SELECT count(*) FROM pg_namespace
+   WHERE nspname !~ '^pg_' AND nspname NOT IN ('information_schema','public');   -> 88
+
+and five of them carry the oracle test's own format string, `zm_dep_oracle_{}` over
+std::process::id():
+
+  zm_dep_oracle_2232609  zm_dep_oracle_2510846  zm_dep_oracle_2685943
+  zm_dep_oracle_2687546  zm_dep_oracle_2688443
+
+By family: proj_* 37, meta_* 30, zm_* 7, guardfold_* 4, then singletons.
+
+THIS CORRECTS SOMETHING I WROTE. I had attributed the 37 proj_* schemas to my own SIGKILLed gate runs,
+reasoning that the drop-on-unwind from #50 covers a panic but not a signal. That reasoning is fine and
+the SIGKILL cases are probably real, but it is not the whole story and I generalised it too far: the
+zm_dep_oracle_* schemas come from a test with no guard at all, so no signal was needed to strand them.
+I have NOT apportioned the 88 between the two causes - I checked the mechanism, not the provenance of
+each schema.
+
+IT ALSO CORRECTS THE RECORDED SCOPE OF #50, which reads "a live-PG test drops its schemas on unwind,
+all 66 sites". Whatever 66 counted, it was not "every test file that creates a schema": 22 such files
+have no guard today. I have not read 16d905a7 or 9bcf1a7d to decide whether the 66 were call sites
+inside the nine guarded files or whether these 22 arrived afterwards, so I am not writing that history
+down yet. #203 carries it.
+
+MUTATION-PROVEN, WITH A CONTROL THAT MOVES. The happy path proves nothing here - the test already ends
+with an explicit DROP SCHEMA, so a passing run cleans up with or without the guard. What the guard
+changes is only reachable through an unwind, so I forced one with a temporary env-gated panic placed
+after the fixture is built, and counted schemas on both sides:
+
+  guard armed, ZM_LEAK_PROBE=1  -> test result: FAILED. 0 passed; 1 failed   zm_dep_oracle_* count 5
+  guard removed, same probe     -> test result: FAILED. 0 passed; 1 failed   zm_dep_oracle_* count 6
+
+Same failure both times, so the test outcome is not the signal; the schema count is, and it moved. The
+probe and the control were both reverted, and the schema the control stranded was dropped, so the
+container is back at the 5 quoted above.
+
+WHY THE GUARD GOES BEFORE THE FIRST CREATE, not after the fixture: the batch that builds the fixture
+can fail halfway, having already created the schema. Arming on the line after the name is computed
+covers that window; arming after a successful build does not.
+
+The explicit trailing DROP stays. The guard's own drop is IF EXISTS, so the two do not fight, and the
+explicit one keeps the happy path readable at the point a reader is looking for it.
+
+#202 IS NOT DONE. The catalog-signature basis is designed and measured but unwritten. Enumerating the
+fixture's columns by the multiset of (deptype, classid, is-the-object-internally-owned-by-a-constraint)
+tuples pg_depend holds against them yields four non-singleton groups over the current 15 columns -
+{idx_expr, idx_key, idx_pred}, {excl_expr, excl_pred}, {excl_plain, excl_pred_key} and
+{chk_single, chk_multi_a, chk_multi_b} - so an assertion that a shared signature implies a shared
+server answer would not be vacuous. That measurement was taken by hand against the live container, not
+committed. The design split it wants did not happen: the Agent tool is capped at 200 of 200 spawned for
+this session, and the codex read-only job ran past its window echoing file contents without answering.
+So this is one opinion, mine, and #202 stays open.
+
 ## F309 - the oracle's blind spot has a name and a second basis, and I was wrong that there is no fix for it
 
 F300 recorded that the drop-dependency oracle reported twelve shapes and twelve agreements while the
