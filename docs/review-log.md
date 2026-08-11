@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F292 - #129's placement rests on one of its two reasons; the other is SQLite-scoped and cannot bear on a PostgreSQL-only defect
+
+#129 asked for exactly this before any code: "re-check the placement claims above, which no second
+instrument corroborated". They were single-sourced from codex because the Opus half was unavailable.
+Both are now checked. The conclusion holds; one of the two arguments for it does not.
+
+The conclusion under test: the exclusion-aware drop refusal does NOT belong in the fold's
+`DropColumn` arm as its primary site.
+
+ARGUMENT 1 - "the engine applies an artifact and then folds, so a new FoldError can report failure
+after a successful journaled apply." TRUE AS A FACT, IRRELEVANT TO THIS DEFECT.
+
+Inside `deploy_envelopes_locked`'s `for envelope in envelopes` loop the apply really does precede a
+fold: `apply_applied_plan_with_touched_and_depends` at engine.rs:525, `fold_to_field_defs` at
+engine.rs:604. A `FoldError` at :604 would indeed surface after a journaled apply.
+
+But :604 sits inside `if dialect == SqlDialect::Sqlite` (engine.rs:573). The else branch re-snapshots
+and folds nothing. And #129 is about EXCLUDE constraints, which are PostgreSQL-only
+(`PG_ONLY_EXCLUSION_CONSTRAINT`; MySQL's capability row sets `ExclusionConstraint => false`). So on
+the dialect this defect can occur on, the deploy loop performs no post-apply fold at all, and the
+hazard the argument names cannot arise from this path. The other production folds
+(`zero-migrate-node/src/lower.rs:606` and `:729`) run during LOWERING, before anything is applied or
+journaled.
+
+ARGUMENT 2 - "by the time that arm runs the fold no longer RETAINS the expression". TRUE, DIALECT-
+NEUTRAL, and it is the argument that actually carries the conclusion. `exclusion_cascade_columns`
+(render/fold.rs:3396) discards expression elements outright:
+
+    .filter_map(|element| match &element.target {
+        ColumnOrExpr::Column { name } => Some(name.clone()),
+        ColumnOrExpr::Expr { .. } => None,
+    })
+
+So the fold cannot tell an expression that reads the dropped column from one that does not - it never
+kept the expression. A fold-only fix needs new retained provenance, not merely a new check, which is
+what makes the fold the wrong primary site regardless of ordering.
+
+WHY THE DISTINCTION IS WORTH RECORDING RATHER THAN SHRUGGING AT. The two arguments fail differently
+under repair. If someone later moves or removes the post-apply fold - a plausible independent change
+- argument 1 evaporates and a reader holding both would conclude the fold is now available as the
+primary site. It is not: argument 2 is untouched by that change, and the missing provenance is the
+real blocker. Recording which reason is load-bearing is what stops a future correct-looking
+inference from being wrong.
+
+WHAT THIS DOES NOT CHANGE: the two-layer design (declared-state analysis during validation, plus a
+whole-plan live-catalog preflight inside the plan lock) stands, as does the corrected rule keying on
+PostgreSQL's dependency KIND rather than on the shape's name. Neither depended on argument 1.
+
 ## F291 - #98 closes VERIFIED-NO-CHANGE: both halves were done, one under another ticket and one unlogged
 
 #98 CLOSED, no code change. It sat `in_progress` carrying two items, and its own description warned
