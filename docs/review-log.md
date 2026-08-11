@@ -9036,6 +9036,33 @@ it is a shared cross-dialect family classifier and this is not its job.
 NOT DONE, stated plainly: the build. This entry converts (B)'s premise from read to measured and
 leaves the implementation unstarted. No behaviour changed.
 
+### The obvious cheap fix is wrong, and this is why
+
+PostgreSQL solves the same problem by recomposing the length back into `data_type` during
+introspection - `crates/zero-migrate/src/apply/drift.rs:930`, "Recompose a length-qualified type's
+LENGTH into `data_type`". Mirroring that one line into the MySQL introspection would look like the
+whole fix and would be a regression.
+
+The reason is that MySQL folds BOTH sides, not just the live one:
+
+    crates/zero-migrate/src/render/lower.rs:821
+        SqlDialect::Mysql => crate::schema::query::mysql_canonical_type(data_type),
+    crates/zero-migrate/src/render/lower.rs:1072
+        SqlDialect::Mysql => crate::schema::query::mysql_canonical_type(&snapshot_database_type),
+
+The EXPECTED side is canonicalised through the same function that discards the length. So today both
+sides say "text" and agree - blind, but symmetric and quiet. Recomposing the length into the actual
+side alone would make every bounded MySQL string column disagree with its own declaration, turning a
+silent blind spot into false drift for every MySQL user. High blast radius, and it would look like
+the fix working.
+
+SO THE CHANGE IS FOUR SITES, not one, and they must land together: produce the signature during
+introspection (mysql/drift_sql.rs:210), produce the same signature on the expected side
+(lower.rs:821 and :1072), carry it on `ColumnSnapshot` serde-defaulted, and consume it in the
+comparator. That is what #79's "feed the SAME signature to structural drift so guard and differ
+cannot disagree about one column" means in file terms, and it is why this was not attempted as a
+quick change.
+
 ## F358 - #79's snapshot prerequisite is fully cleared, and the remaining empty fields are correct
 
 #79 is blocked on a stated prerequisite: "Populate `views` (and audit the constraint variants) or
