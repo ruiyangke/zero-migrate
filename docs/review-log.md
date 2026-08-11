@@ -8990,6 +8990,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F318 - the MySQL view drop is measured, and the two control arms are what turn it from a symptom into a diagnosis
+
+F317 predicted, from reading four sites, that dropping a view an applied migration created would be
+refused on MySQL. Measured now, commit e474f0a9, against the live container at 127.0.0.1:3306:
+
+    failed to project pending schema after envelope "view_drop_drop": fold: view `view_drop_active` does not exist
+
+Character for character what F317 predicted, and the prediction was committed before the run, so this
+is confirmation rather than a text fitted to the output afterwards.
+
+### Why one arm would not have been enough
+
+A single MySQL arm showing a refusal is consistent with at least three different defects, and they
+have different fixes. The other two arms exist to kill the wrong ones:
+
+    MySQL, two deploys        REFUSED, view still present afterwards
+    MySQL, one migration      SUCCEEDS, view gone
+    PostgreSQL, two deploys   SUCCEEDS, view gone
+
+The PostgreSQL arm rules out "view drops are broken" - same authored migrations, same verb, different
+dialect, works. The same-migration arm rules out "dropView is broken on MySQL" - same dialect, same
+verb, works when the create is in the same fold. What is left is the catalog map, reachable only
+across deploys, which is both the diagnosis and the address of the fix.
+
+The same-migration arm was written specifically to test the CAUSAL STORY rather than the symptom. If
+an in-batch create had also failed, the refusal would still have reproduced and the explanation in
+F317 would still have been wrong. Confirming a symptom that a wrong model also predicts is how a
+finding survives long enough to be built on.
+
+### What the test does deliberately
+
+`packages/zero-migrate-cli/tests/host/mysql-view-drop-across-deploys.test.ts` asserts the BROKEN
+behaviour, matched against the exact message rather than a loose pattern, and its header says so. A
+fix that lets the drop through fails here and has to come back and change the file. Matching the full
+string also means a future unrelated failure cannot quietly pass as this one.
+
+Before this file, no host test on ANY dialect exercised `createView` or `dropView`. This was uncovered
+ground rather than a regression, which is worth separating: nothing broke it, it never worked.
+
+### Measurements
+
+Full host suite 142 tests / 142 pass / 0 fail / 0 skipped, zero skip banners - the 139 baseline plus
+three. With both live-DB env vars unset: 3 skipped, 0 pass, 0 fail, so a contributor without databases
+is unaffected.
+
+`pnpm test:host` cannot run in this environment - it aborts with
+`ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` and asks to purge `node_modules`. The suite was run
+through the underlying command instead rather than letting a test run wipe an install:
+
+    cd packages/zero-migrate-cli && NODE_ENV=test ZERO_MIGRATE_MYSQL_URL=... ZERO_MIGRATE_TEST_PG_URL=... \
+      node --import tsx --import ./tests/host/addon.ts --test "tests/host/*.test.ts"
+
+The fix is not written. #207 carries the repair shape - the rollback path's
+`merge_recovered_definitions` already solves this problem for a different consumer - and four hazards
+that have to be handled with it rather than after, the sharpest being that populating the map naively
+starts failing legal `replace:true` migrations because `CreateView` never consults `replace`.
+
 ## F317 - the MySQL views gap fails LOUD, not silent, and it is reachable by an ordinary deploy rather than waiting on #79
 
 F290, F315 and #79 all record the same sentence about MySQL's empty `views` map: populate it "or
