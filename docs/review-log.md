@@ -8990,6 +8990,82 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F317 - the MySQL views gap fails LOUD, not silent, and it is reachable by an ordinary deploy rather than waiting on #79
+
+F290, F315 and #79 all record the same sentence about MySQL's empty `views` map: populate it "or
+dropView becomes a silent no-op". Scoping the work for #79 says that sentence has the failure mode
+backwards and the timing wrong. Filed as #207; not yet measured.
+
+### The chain
+
+Each link was read; the conclusion composes them and is INFERRED, not run.
+
+`crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:643-646` leaves the map empty:
+
+    Ok(SchemaSnapshot {
+        tables,
+        ..Default::default()
+    })
+
+The Node apply lowering seeds its fold from that snapshot and nothing else -
+`crates/zero-migrate-node/src/lower.rs:578` is `let base_snapshot = snapshot;`, handed to
+`fold_ops_onto(&base_snapshot, &candidate, ...)` at `:607`. And the fold treats an absent view as a
+hard error rather than a no-op, at `crates/zero-migrate/src/render/fold.rs:2348-2351`:
+
+    Op::DropView { name, .. } => {
+        if views.remove(name).is_none() {
+            return Err(FoldError::MissingView(name.clone()));
+        }
+    }
+
+Node maps that to a refusal at `lower.rs:635-640` and `:713-717`.
+
+An already-applied `CreateView` does not rescue it: `ops_without_completed_journal_evidence`
+(`lower.rs:601`) excludes ops that already carry journal evidence, so the create is not in
+`pending_ops`, and on MySQL it is not in `base_snapshot.views` either. Within a single deploy the
+fold re-folds every pending op from base, so a create and drop in the SAME batch still resolve. The
+broken case is the ordinary one - create a view in an early migration, deploy it, drop it in a later
+one.
+
+### Why rollback does not have it, which is also the shape of the repair
+
+The rollback path calls `merge_recovered_definitions` (`lower.rs:424-452`), which replays proven
+history onto an explicitly empty snapshot and lends the live schema definitions the catalog cannot
+show, via `live.views.entry(name).or_insert(view)`. Its doc says why the snapshot is empty rather
+than the catalog: replaying creates over the catalog is what made an earlier attempt fail with
+``fold: table `notes` already exists``. The apply path has no equivalent.
+
+### What this corrects
+
+"Silent no-op" describes what the existence PROBE would do, and the probe has no MySQL call site -
+which is how the gap kept getting classified as latent and deferred behind #79. The FOLD is a
+different consumer, it runs on MySQL today with no probe involved, and it fails loudly. Louder is
+better than silent, but it moves the gap from "prerequisite for future work" to "inferred broken
+now".
+
+This is the second time in two entries that a gap's reachability turned on finding the consumer
+nobody had enumerated. F316 was the drift comparison's two halves; this is the fold versus the probe.
+The recurring error is answering "is this reachable" from the one consumer already in hand.
+
+### Three hazards that make populating the map non-trivial
+
+Found in the same pass, all INFERRED, all to be handled WITH the fix rather than discovered after it.
+`CreateView` rejects a same-name view without consulting `replace` (`fold.rs:2317-2329`), so once
+catalog views exist a legal MySQL `replace:true` can begin failing `DuplicateView`, even though the
+renderer supports `CREATE OR REPLACE VIEW` (`render/renderer.rs:566-578`). Rollback's `or_insert`
+(`lower.rs:450-452`) keeps the FIRST entry, and a catalog entry carries `authored_query=None` where a
+recovered history entry may carry `Some(query)` - so populating the catalog map can let a `None` win
+and make a drop irreversible that history could have inverted, since rollback requires `Some(query)`
+at `render/lower.rs:8418-8421`. And MySQL has no materialized views (`op_support.rs:246`, `:388`), so
+a populated entry must set `materialized: false` rather than leaving it unknown.
+
+VERIFIED by reading: the four chain sites, the op_support view arms, and that
+`merge_recovered_definitions` is called on the rollback path and not the apply path.
+NOT VERIFIED: that the refusal fires end to end, or the error text a user actually sees. The measure
+has to go through the host CLI suite against the live MySQL container, since there is no Rust harness
+for live MySQL (F256). The three hazards come from a codex read-only pass I have not independently
+confirmed.
+
 ## F316 - MySQL's UNIQUE placement is deliberate on BOTH sides, and the fix I proposed for it would have created the drift defect I went looking for
 
 F290 and F315 recorded MySQL filing a UNIQUE key under `indexes` while PostgreSQL and SQLite file it
