@@ -8990,6 +8990,50 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F351 - three probes at the SQLite export, three negatives, and the pattern is the finding
+
+Closing the line of inquiry F348 opened, because it has now produced the same answer three times and
+the repetition is worth more than a fourth probe.
+
+    what the export appears to skip     where the work actually is
+    ---------------------------------   -------------------------------------------------
+    pending contracts (F349)            SqliteBackend::pending_contracts is a literal None,
+                                        sqlite/mod.rs:1155 - there are none to report
+    lowering + guard (F350)             deploy_envelopes -> load_and_lower_guarded per envelope,
+                                        engine.rs:427, lower.rs:2915 - guarded, just not crate::lower
+    the project lock (this entry)       deploy_envelopes acquires it itself:
+                                          engine.rs:443  backend.acquire_project_lock(exec_cfg).await?
+                                          then deploy_envelopes_locked(...)
+                                          then let release = backend.release_project_lock(...)
+                                        `grep -cE 'lock|acquire'` over bridge.rs:733-800 returns 0
+
+Each time I read `crates/zero-migrate-node/src/bridge.rs` and saw an export doing three visible things
+- open a backend, build an `ExecutorConfig`, call one engine method - next to a networked verb doing
+eight. Each time the missing work was one layer down.
+
+THE ACTUAL DIFFERENCE, now that three probes agree, is WHO OWNS the step rather than WHETHER it
+happens. The networked verb owns its lock (verbs.rs:278 acquires, and the four-arm release
+reconciliation at 396-399 handles both failure orders); the SQLite export delegates ownership to the
+engine, which acquires and releases around `deploy_envelopes_locked`. Caller-owned versus
+engine-owned. That is #178's "three different mechanisms" seen from the addon side, and it is a
+design difference, not a hole.
+
+WHY I AM RECORDING A THIRD NEGATIVE INSTEAD OF A FOURTH PROBE. A thin call site next to a fat one is
+a strong-feeling signal and it has been wrong three times running here. The signal is not "this path
+skips checks", it is "this path's checks live at a different layer" - and I only get to charge the
+investigation to something once. The next reader who notices bridge.rs looks under-defended should
+read this entry before re-deriving it.
+
+Pivoting off this seam. The one asymmetry here that DOES bite is still #99 - on SQLite, status
+projects and apply does not - and it is already filed.
+
+VERIFIED BY ME at a5f260cd: the acquire/locked/release sequence inside `deploy_envelopes` at
+engine.rs:443 and following; the zero lock references in bridge.rs:733-800; verbs.rs:278 and the
+release reconciliation at 396-399.
+NOT VERIFIED: that the two lock mechanisms give the same exclusion in practice. I read who calls
+acquire, not whether two concurrent SQLite applies actually serialize - that would need two processes
+racing a real journal file, which #178 is the place for.
+
 ## F350 - the second lowering entry point is guarded too, so the structural fact F348 flagged is benign
 
 F348 recorded that `applyIrSqlite` shares no lowering with `applyIr` and called that "a bigger
