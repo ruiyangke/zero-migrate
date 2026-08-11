@@ -8990,6 +8990,79 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F273 - the schema leak is closed by an RAII guard, and the mutation says it is the guard doing it
+
+#50 SHIPPED. F272 confirmed the mechanism; this is the fix and its proof.
+
+`SchemaGuard` in `crates/zero-migrate/tests/support/mod.rs` holds the session and the schema names
+and issues the DROP from `Drop`, so cleanup happens on an unwind as well as on a return. Every PG
+target that creates a project schema now gets it from the helper that creates the schema:
+
+    #[must_use = "the guard drops the schemas when it falls out of scope"]
+    async fn ensure_project_schema<'a>(
+        session: &'a PgDevSession,
+        cfg: &ExecutorConfig,
+    ) -> support::SchemaGuard<'a> {
+
+The helper that creates hands back the thing that destroys, so the two cannot drift apart. Eight
+files, 66 call sites: `declarative_require_rls_pg` 5, `fts_index_name_truncation_pg` 1,
+`index_exact_name_shape_pg` 4, `index_name_scheme_alias_pg` 4, `pg_declarative` 2, `pg_scenarios`
+43, `timeout_budget_pg` 6, `truncated_identifier_pg` 1.
+
+### Measured, on the FTS truncation target with the same probe F272 used
+
+Counting `proj_%` and `meta_%` in `information_schema.schemata` before and after one run:
+
+    guarded, probe panic armed      before 37|30   after 37|30   test result: FAILED
+    guard's Drop short-circuited    before 37|30   after 38|30   test result: FAILED
+    guarded, no probe               before 37|30   after 37|30   test result: ok
+
+The middle row is the mutation: an env-gated early return at the top of `Drop`, nothing reverted
+and every export intact. It puts the leak back, which is what proves the guard is the thing
+removing it rather than some other cleanup on the path. The schema that row leaked
+(`proj_1023930_1786411052758219099_0`) was mine and I dropped it; the other 37 predate this
+session and are untouched.
+
+The third row matters as much as the first: the trailing `drop_schemas` statement is GONE from
+that test, so the guard is the only cleanup left on the green path too.
+
+### Two decisions inside the guard, neither of which the compiler would have caught
+
+The DROP goes over the test's own pinned connection, not a fresh one. An unwind can leave a
+transaction open until the `Client` is dropped, and the guard is dropped BEFORE the session it
+borrows - so `DROP SCHEMA ... CASCADE` from a second connection would block on locks the first
+connection still holds, for as long as the guard lives. A hung suite in place of a leaked schema is
+a worse trade. Reusing the pinned connection sees those locks as its own. The fresh-connection path
+survives only as a fallback, and it sets `lock_timeout` and `statement_timeout` first so it can
+report rather than hang.
+
+`Drop` uses `try_borrow_mut`, never `borrow_mut`. A panic raised while the seam holds the client
+leaves the `RefCell` borrowed, and a panicking `Drop` during an unwind aborts the process instead
+of failing the test. For the same reason a cleanup failure is written to the process stderr handle
+and never panics - libtest captures the print macros, so a notice that only appears under
+`--nocapture` would be the silent leak this guard exists to end.
+### The forgetting case, and why `must_use` sits on the type
+
+An `#[must_use]` on an `async fn` marks the FUTURE, and `.await` consumes the future - so a caller
+who awaits the guard and drops it on the spot slips past it and gets no cleanup at all. The
+attribute is on `SchemaGuard` itself, where dropping the awaited value is the unused expression.
+Mutation-tested by rewriting one call site back to the bare form:
+
+    $ cargo clippy -p zero-migrate --test truncated_identifier_pg -- -D warnings
+    error: unused output of future returned by `ensure_project_schema` that must be used
+
+### Gate
+
+    fmt_rc=0  clippy_rc=0  test_rc=0
+    targets=113 passed=2493 failed=0 ignored=0
+    skip_banners=0  guard_notices=0
+    schemas_before=37|30  schemas_after=37|30
+
+113 is the whole set for these four crates, not a subset: 105 integration test files
+(`zero-migrate` 98, `zero-migrate-guard` 4, `zero-migrate-policy` 3) plus 4 lib targets is the 109
+`Running` lines, plus 4 doc-test targets. `guard_notices=0` means no cleanup failure was reported
+by any guard across the run, and the schema counts confirm it independently from the server side.
+
 ## F272 - the mechanism the ticket filed first is the one that survives, and now it is measured
 
 #50's mechanism CONFIRMED. Three rounds of re-scoping ended by returning to the hypothesis the
