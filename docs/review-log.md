@@ -8990,6 +8990,78 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F300 - the shipped drop-dependency predicate refuses a drop PostgreSQL performs, and the oracle has no CHECK shape to catch it
+
+The build stopped instead of shipping, and it was right to. The predicate at
+apply/backend/postgres/mod.rs:288 treats EVERY `deptype = 'n'` row as a blocker. A CHECK
+constraint produces one, and PostgreSQL drops the column anyway, auto-dropping the constraint.
+Measured against the live server rather than argued:
+
+  CREATE TABLE t (col_check int CHECK (col_check > 0),
+                  a int, b int, CONSTRAINT two_col CHECK (a > 0 AND b > 0));
+
+   deptype |                dependent
+  ---------+-----------------------------------------
+   a       | constraint t_col_check_check on table t
+   n       | constraint t_col_check_check on table t
+
+  BEGIN; ALTER TABLE t DROP COLUMN col_check; ROLLBACK;
+  ALTER TABLE          <- accepted
+
+The two-column form behaves identically: `a` and `n` from `two_col`, and the drop is accepted.
+So the predicate answers "refuse" where the server answers "allow", which is the TOO WIDE failure
+mode the oracle's own header names as the one that "has already reversed several fixes in this
+review".
+
+THIS IS NOT ONLY THE NEW WORK. `blocking_column_dependents` has a shipped production caller: the
+online-rename guard at engine.rs:1834-1841, which refuses when the returned list is non-empty. A
+column carrying a CHECK constraint therefore returns a blocker there too, so an online rename of
+such a column is refused today, by code that landed under #167 (be15281). I have VERIFIED the
+predicate returns the constraint for that shape and that the guard refuses on a non-empty list by
+reading both; I have NOT yet run an end-to-end rename against a live server to see the refusal
+surface, so the user-visible half is INFERRED from those two facts and should be proven with a test
+before the fix is called complete.
+
+WHY THE ORACLE MISSED IT, which is the part worth keeping. tests/pg_column_drop_dependency_oracle.rs
+compares the rule against a real drop for twelve shapes and reports twelve agreements. Its twelve
+shapes are generated columns, views, four exclusion-constraint forms, three index forms, and a
+control. NONE of them is a CHECK constraint. The oracle is sound and its agreement count is honest;
+the shape set simply has a hole exactly where the rule is wrong. F296 recorded the rule surviving a
+major-version change across twelve fixtures, and that is still true and still says nothing about
+CHECK. An oracle proves the rule over the shapes it enumerates, and enumerating shapes is the part
+no amount of agreement can check for you.
+
+THE DISCRIMINATOR, measured across shapes in one fixture:
+
+   col       | deptype | dependent
+  -----------+---------+---------------------------------------------
+   chk       | a       | constraint t_chk_check on table t
+   chk       | n       | constraint t_chk_check on table t
+   view_src  | n       | rule _RETURN on view v
+   gen_src   | n       | default value for column gen_out of table t
+   excl_expr | a       | index c_expr
+   plain     |         |
+
+A dependent PostgreSQL auto-drops carries BOTH an `a` and an `n` edge from the SAME object. One it
+refuses carries `n` alone. So the `n` branch needs the test the `a` branch already has: the
+predicate's own doc says "where the constraint ALSO depends on the column directly, PostgreSQL drops
+the whole constraint and the drop succeeds", and that reasoning was applied to the exclusion branch
+and never to the NORMAL branch.
+
+CANDIDATE RULE, NOT YET MEASURED: a NORMAL dependency is blocking unless the same (classid, objid)
+also has an AUTO edge on that column. It predicts correctly for all six shapes above, but predicting
+correctly for shapes I chose is exactly the reasoning that produced the current bug. It is not the
+rule until the oracle carries CHECK shapes and agrees against a real drop.
+
+WHAT IS IN THE TREE, uncommitted and NOT to be read as a deliverable: the #129 build wrote the
+precondition variant, the PG evaluator arm, the lowering injection, and
+tests/pg_drop_column_dependency_guard.rs. Its three new tests pass and it reports fmt 0, clippy 0,
+and three PRE-EXISTING tests failing - `drop_column_cascades_a_standalone_check_the_way_postgresql_does`,
+`drop_column_cascades_a_table_level_check_the_way_postgresql_does`, and
+`drop_of_one_column_cascades_a_two_column_check` - which is this defect firing on migrations that
+apply cleanly today. Nothing is committed and the gate is RED, so #129 stays open behind the
+predicate fix.
+
 ## F299 - #129 decided: the staleness objection the decision was framed on is false, and the check belongs on the step that drops
 
 The second opinion refuted the premise of the question I asked it. F298 framed #129 as a choice
