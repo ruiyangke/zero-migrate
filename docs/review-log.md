@@ -8990,6 +8990,62 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F265 - a validator that checked the legs' shape and never their columns, and #80 closes
+
+Closes #80. Eight fixes, six production walkers and both public-API stragglers.
+
+`validate_op_resolved` (model/validate.rs) is the apply-seam check that resolves authored column
+references against the LIVE catalog - the pass that catches an `Update` setting a column the table
+does not have. An `Op::Dialectal` fell through to its structural catch-all,
+`other => validate_op(other, ..)`, which validates the legs' SHAPE and never receives
+`live_columns`. So nested `Update`/`Delete`/`Backfill`/`Insert`/`SetColumnType` skipped
+resolved-ColRef checking entirely, and the caller got a weaker guarantee than the function's name
+promises.
+
+The RED is the existing unresolved-ColRef fixture with one wrapper added around it: an `Update`
+setting `name` from a nonexistent `ghost` column, which the top-level test already proves is
+refused, sails through when wrapped.
+
+SELECTED leg. This resolves against a live catalog, so it judges what THIS target will run; an op
+in an inactive leg is never executed here and its columns are not this catalog's to satisfy. The
+dialect was already in scope - `validate_ir_resolved` and `validate_op_resolved` both take
+`target_dialect` - which is the fourth time in this ticket that reading the signature answered the
+direction question before any reasoning about semantics.
+
+TWO-SIDED PROOF, env-gated, no file reverted:
+  restoring the structural fall-through failed exactly
+    `..._rejects_an_unresolved_colref_inside_a_selected_leg`;
+  unioning every leg failed exactly
+    `..._ignores_an_unresolved_colref_in_an_unselected_leg`.
+Each mutation fails one arm, and a different one. A third arm - a RESOLVABLE ColRef inside the
+selected leg still passing - keeps the first from being satisfied by refusing wrappers wholesale.
+
+The diagnostic keeps the OUTER op index, so an author is pointed at the wrapper they wrote rather
+than at a position inside a leg that does not exist in their file. That is asserted, not assumed.
+
+=== WHAT #80 ADDS UP TO ===
+
+Eight fixes over one defect class: a walker that predates `Op::Dialectal` and was never taught to
+descend. The enumeration the ticket demanded first was worth its cost - the known set was two, the
+real set was six production walkers plus two public-API functions, and fixing the two known ones
+alone would have left six.
+
+The rule that decides each one is NOT "what does the fold do". It is "is this output
+DIALECT-SPECIFIC, or is it IDENTITY":
+
+  SELECTED leg  F258 runtime metadata, F261 SQLite repeat-rename refusal,
+                F263 partition recording, F265 resolved ColRefs
+  EVERY leg     F259 injected table shape (checksum), F260 ownership registry,
+                F262 touched-table interlock, F264 approval obligation
+
+And a shortcut that held four times out of eight: read the SIGNATURE. No dialect parameter means
+identity, and makes every-leg the only answer that compiles.
+
+Two of the eight were invisible to every gate this repo has, because they are public API with only
+test callers here - F264, an approval bypass, and F265, a silently weaker validator. Both were real
+for an embedder. That is the sharpest thing this ticket surfaced: "no in-repo caller" is a
+statement about our coverage, not about whether the code runs.
+
 ## F264 - a wrapper resolved its approval obligation at the wrong object
 
 Part of #80's tail: the first of the two public-API stragglers. One remains.
