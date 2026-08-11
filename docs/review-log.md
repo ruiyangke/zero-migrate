@@ -8990,6 +8990,49 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F305 - #199 part C: the constraint probe has no empty-map hazard, and its one conditional is a version fact rather than a gap
+
+#199 part C asked whether the probe's CONSTRAINT variants carry the same empty-map shape that makes a
+guarded MySQL `dropView` a silent no-op. They do not, and the reason is structural rather than lucky.
+
+WHERE THE CONSTRAINT PROBE READS. `decide_constraint` (render/existence_probe.rs:788) resolves through
+`live.tables.get(table).constraints` - it hangs off the `tables` map, which is the ONE map MySQL's
+snapshot populates. The `views` hazard exists because `views` is a sibling top-level map left at
+`..Default::default()`; constraints are not a sibling, they are a field of an entry in the map that is
+filled.
+
+THAT IS NOT ENOUGH ON ITS OWN, so the level below was checked too. A per-table `constraints` vector
+initialised and never pushed to would reproduce the same silent-noop one level down. It is pushed to,
+twice, in backend/mysql/drift_sql.rs: the PRIMARY KEY at :416 and a constraint built earlier at :605,
+with the vector initialised at :161.
+
+THE ONE CONDITIONAL, and why it is not the `views` shape:
+
+    let supports_check_constraints = server_version >= [8, 0, 16];   // :142
+    if supports_check_constraints { ... }                            // :235
+
+CHECK constraints are read only from MySQL 8.0.16 up. That looks like the same shape and is not: on
+an older server there is no CHECK constraint in the catalog to miss, because MySQL parsed and ignored
+CHECK clauses until 8.0.16 and `information_schema.CHECK_CONSTRAINTS` does not exist before it. So
+this is the fourth instance of the pattern F290 already named - a map empty because the object kind
+CANNOT EXIST on that target, not because the read was forgotten - and it sits alongside sequences,
+schemas, extensions and partitions.
+
+VERIFIED versus INFERRED, because the distinction is the whole finding here:
+  VERIFIED by reading: the probe's resolution path; that MySQL fills per-table constraints at :416 and
+  :605; the version gate at :142 and :235.
+  INFERRED, not measured: that MySQL below 8.0.16 has no CHECK constraints to report. That is a claim
+  about MySQL's history, not about this tree, and I did not run an old server to confirm it. I also
+  could not confirm the local container's version - the `mysql` client is not in the dev shell and the
+  query returned nothing.
+
+WHAT WOULD SETTLE IT: if the version floor ever matters, the honest check is a `SELECT VERSION()`
+against the target plus an attempt to read `information_schema.CHECK_CONSTRAINTS` on a pre-8.0.16
+server. Until someone runs a server that old, the branch is untested in both directions here.
+
+#199 part C is now answered. Part A remains, and remains bound to the #79 probe wiring for the reason
+this ticket already records: alone it has no observable to write a RED against.
+
 ## F304 - #25's premise is refuted: the recorder has no down phase to un-ignore, and a grep collision is probably why it said otherwise
 
 #25 says authored `down()` is nearly free because the plumbing exists and is merely inert: "ops.ts:353
