@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F338 - #204 closed by deletion, and the split's value was the wording rather than the verdict
+
+`ColumnInfo::default_volatility` and its correlated subselect are removed. Both halves of the split
+chose (a) independently.
+
+WHY (a), and the argument is about (b) rather than about (a): fixing `MIN` to `MAX` repairs only the
+mixed user-defined case. PostgreSQL stores no `pg_depend` row from a `pg_attrdef` to a BUILT-IN
+function, so the field stays NULL for `now()` and `gen_random_uuid()` exactly as it does for
+`DEFAULT 7`. A corrected-but-still-blind field is worse than an absent one, because a future consumer
+would wire up something silently ignoring the defaults people actually write. (b) is the option that
+looks right at a glance.
+
+WHAT I ESTABLISHED, re-run rather than inherited from the ticket:
+  - No reader. All 17 mentions were the declaration, the construction, or `: None` in a fixture.
+  - `ColumnInfo` is named in EXACTLY ONE FILE across the whole workspace - not the addon crate, not
+    the CLI, not any test outside `schema/diff.rs`. So nothing in-tree could break.
+  - The ticket's own citation was wrong: `pub mod diff` is at `schema/mod.rs:45`, not `schema.rs:45`,
+    a file that does not exist. Same line, different file; substance unaffected.
+
+WHAT THE SPLIT ADDED, which is the part worth recording. The verdict was never really in doubt once
+the workspace grep came back. What codex contributed was a correction to MY framing: I had written
+that being unpublished makes deletion "cheap". Its qualification is more accurate -
+
+    "cheap" means acceptable breakage now, not non-breaking
+
+because `ColumnInfo` derives no `#[non_exhaustive]` and has all-pub fields, so a path-dependency
+consumer outside this workspace still gets a compile break. docs/embedding.md:9 actively recommends
+path dependencies, so that consumer is not hypothetical. The honest claim is that pre-publication is
+the right moment to remove a defective public field, not that removing it costs nobody anything.
+
+It also independently confirmed the trap I had left on the ticket: the `default_expr` in
+crates/zero-migrate/src/apply/backend/postgres/backfill_sql.rs:1469 is an unrelated local, so a bare
+grep would wrongly suggest `ColumnInfo::default_expr` has readers. Same collision class that made
+#25's premise false.
+
+`default_expr` KEPT, both halves agreeing: it is correct metadata, and sharing an
+`#[allow(dead_code)]` does not couple an accurate field's fate to an inaccurate one.
+
+Gates: fmt 0, clippy 0, lib 1131 passed, 103 targets / 2196 passed / 0 failed / 2 ignored, zero
+LIVE-DATABASE COVERAGE SKIPPED banners - identical to the pre-deletion baseline, which is what
+removing an unread field should produce.
+
+PROCESS: `cargo test -p zero-migrate --tests` was killed twice, the second time at 91 bytes
+mid-`Compiling`, matching the earlier triple-kill this session. Narrowing to `--lib` completed
+immediately and covers this change's blast radius, since the deletion touches only `schema/diff.rs`
+and its in-file tests; the full `--tests` run then succeeded on a later attempt and is the figure
+quoted above.
+
 ## F337 - #213 built: the decided "move the gate" turned out to be "add a precondition", because the two layers speak different error types
 
 F213's decision was option (b), move the single-top-level-SELECT gate inside
