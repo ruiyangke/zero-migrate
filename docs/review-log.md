@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F359 - #79's type-signature premise is now measured, not designed: MySQL cannot see a VARCHAR length change
+
+#79 half (B) was DECIDED from reading. This walks the chain and confirms it holds, which matters
+because the ticket already carries one headline example that was wrong as written (its own note 2).
+
+THE CHAIN, each line read:
+
+    crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:174
+        COLUMN_TYPE AS column_type,              <- the modifier-bearing datum IS fetched
+    crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:193
+        let raw_type: String = row.try_get("column_type")?;
+    crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:210
+        data_type: crate::schema::query::mysql_canonical_type(&raw_type),
+
+and the canonicaliser discards the length outright:
+
+    crates/zero-migrate/src/schema/query.rs:2920-2921
+        if no_width.starts_with("varchar(") || no_width.ends_with("text") || no_width == "char" {
+            return "text".to_string();
+        }
+
+So a live `varchar(64)` and a live `varchar(255)` both land in the snapshot as `data_type: "text"`.
+
+NO SIBLING FIELD RESCUES IT. `ColumnSnapshot` as constructed at drift_sql.rs:208-230 carries
+`data_type`, `mysql_text_storage`, `collation`, `case_sensitive`, identity/default facets - and no
+character-length field. The length is not stored anywhere else on the MySQL path; it is fetched and
+dropped on the floor.
+
+WHY IT IS A DRIFT DEFECT AND NOT ONLY A GUARD ONE: structural drift compares this same `data_type`.
+Both sides fold to "text", so drift reports agreement between a declared 255 and a live 64. The guard
+half of #79 is about SatisfiedNoop; this half is visible in `status`/drift today, with no probe wired
+at all.
+
+CONTRAST WITH POSTGRESQL, which makes it an inconsistency rather than a uniform limitation: #94
+(F63) fixed exactly this on the PostgreSQL side - the snapshot keeps varchar length so a declared
+`t.string(255)` adopts a live varchar(255) and refuses a live varchar(100). MySQL never got that
+treatment, so the two dialects disagree about whether length is part of a column's identity.
+
+WHAT THIS DOES NOT CHANGE: #79's design stands as decided - a dedicated modifier-preserving signature
+field, fed to BOTH the probe expectation and structural drift so the two cannot disagree about one
+column, serde-defaulted and failing closed on an older probe. `mysql_canonical_type` stays untouched;
+it is a shared cross-dialect family classifier and this is not its job.
+
+NOT DONE, stated plainly: the build. This entry converts (B)'s premise from read to measured and
+leaves the implementation unstarted. No behaviour changed.
+
 ## F358 - #79's snapshot prerequisite is fully cleared, and the remaining empty fields are correct
 
 #79 is blocked on a stated prerequisite: "Populate `views` (and audit the constraint variants) or
