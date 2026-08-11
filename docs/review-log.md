@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F353 - MySQL rounds a fractional GET_LOCK timeout to whole seconds, so 0.25s means try-once
+
+F352 gave the SQLite project lock its own config value and noted MySQL's hardcoded
+`PROJECT_LOCK_TIMEOUT_SECS = 10` as a follow-on. That follow-on is now a trap I created: an operator
+who sets `project_lock_timeout` gets it honoured on SQLite and silently ignored on MySQL. Half-applied
+config is worse than none.
+
+Before threading the value through I measured the one thing the conversion depends on, because
+`project_lock_timeout` is milliseconds and `GET_LOCK` takes seconds. Against the compose MySQL
+(8.4.11), with the lock held by a second session:
+
+    SELECT NOW(6); SELECT GET_LOCK('probe_c2', 2);    SELECT NOW(6);
+      -> 0   after 2.003s   (19:41:26.377035 -> 19:41:28.380364)
+    SELECT NOW(6); SELECT GET_LOCK('probe_c2', 0.9);  SELECT NOW(6);
+      -> 0   after 1.0006s  (19:41:28.380364 -> 19:41:29.380944)
+    SELECT NOW(6); SELECT GET_LOCK('probe_contend', 0.25); SELECT NOW(6);
+      -> 0   after 0.000536s (19:41:08.018308 -> 19:41:08.018844)
+
+Uncontended, `GET_LOCK(name, 0.25)` returns 1 and raises no error, which is what makes this quiet.
+
+SO: MySQL ACCEPTS a fractional timeout and then ROUNDS IT to whole seconds. `0.9` waits one second.
+`0.25` rounds to zero and becomes try-once - it returns 0 in half a millisecond, having never waited.
+No warning, no error, and the uncontended path looks perfectly healthy.
+
+### Why this stopped the change rather than being a detail inside it
+
+The naive conversion is `ms / 1000.0`. Under it, every `project_lock_timeout` below 500ms silently
+turns MySQL into try-once while SQLite genuinely waits that long - the two dialects diverging on the
+same config value, in the direction where MySQL fails a deploy that would have succeeded. The 25ms
+value the SQLite tests use to stay fast is exactly in that range, so the first test written against
+a threaded MySQL would have encoded the divergence as expected behaviour.
+
+The conversion therefore needs a decision rather than an expression: floor at one second, round up,
+or refuse a sub-second value on MySQL and say so. That is an operator-visible contract question on a
+value pinned by #177's contention test, so it gets the usual split rather than my first instinct.
+
+Filed as #217 with this measurement attached. Not shipped, and I would rather leave MySQL honestly
+hardcoded for one more cycle than ship a conversion whose failure mode I found ninety seconds before
+writing it.
+
+VERIFIED BY ME just now against the running compose MySQL, `docker exec zero-migrate-mysql-1`: the
+three contended timings above with microsecond `NOW(6)` boundaries, the uncontended fractional
+acquire returning 1, and `SELECT VERSION()` = 8.4.11.
+NOT VERIFIED: whether other MySQL versions round the same way. Everything above is 8.4.11 only, and
+the compose file pins `mysql:8`, so a deployment on 8.0 could differ and I have not checked.
+
 ## F352 - the deploy queue stops borrowing the DDL budget, and the earlier fix failed because it removed a consumer
 
 #178: the SQLite project lock bounded its wait with `cfg.lock_timeout_ms()` - the PostgreSQL DDL
