@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F309 - the oracle's blind spot has a name and a second basis, and I was wrong that there is no fix for it
+
+F300 recorded that the drop-dependency oracle reported twelve shapes and twelve agreements while the
+rule it certified was wrong, because none of the twelve was a CHECK. That was written as bad luck. It
+is a NAMED failure mode, and it has a partial fix I had explicitly denied existed.
+
+THE MODE, distinct from the two this review already knows:
+
+  1. one instrument wrong                        caught by a control that must move
+  2. two instruments agreeing                    caught by independence of failure mode
+  3. a SOUND instrument, INDEPENDENT sides,      caught by neither
+     applied to an INCOMPLETE input set
+
+The oracle is class 3. Its two sides are genuinely independent - a catalog predicate against a real
+`ALTER TABLE ... DROP COLUMN` on a live server - and a server cannot fail the way an expression of a
+rule fails. Independence is exactly what it had, and independence says nothing about COVERAGE.
+
+WHY IT IS THE DANGEROUS ONE, in a downstream consumer's words which are better than mine: a coverage
+hole does not produce a wrong answer reliably enough to be caught by the answer being wrong. It
+produces a right answer most of the time and a wrong one occasionally, with identical-looking
+evidence. So the fix has to be at the BASIS, before the run, not in the verdict.
+
+THE FIX I SAID DID NOT EXIST. I claimed you cannot make an oracle enumerate shapes nobody thought of,
+so class 3 has no instrument-level remedy. That is too strong. An enumeration has a BASIS, the basis
+is a choice, and a SECOND enumerator on a different basis bounds the hole without anyone naming what
+is missing - the DISAGREEMENT between them is the signal. What you cannot do is make ONE enumeration
+self-certifying, which is the narrower true claim.
+
+APPLIED HERE, and filed as its own ticket rather than done: the oracle's SHAPES list is enumerated by
+construct - "a generated column reads it", "a view reads it", four exclusion forms, three index forms,
+a control. That basis means "dependents I thought of". The second basis is the CATALOG: enumerate the
+distinct `(deptype, classid)` pairs `pg_depend` can hold for a column, and assert every pair the
+fixture can produce has a shape. A CHECK is `('a', pg_constraint)` PLUS `('n', pg_constraint)` on one
+object - a pair none of the twelve produced - so a catalog basis shows a gap without anyone thinking
+of CHECK.
+
+INFERRED, NOT MEASURED, and it must stay labelled that way until someone builds it: that a catalog-
+basis enumerator WOULD have surfaced CHECK. It follows from the pair being absent among the twelve,
+but the enumerator does not exist and has not been run.
+
+VALUE, stated honestly so it does not get picked up as urgent: the CHECK bug is fixed (cb7e1444) and
+the oracle is at fifteen shapes. This finds no known defect. It changes the oracle from "correct on
+the shapes someone listed" to "listed shapes, plus a check that the list covers what the catalog can
+express". Worth doing when the queue is clear, not ahead of anything carrying risk.
+
+The same idea shipped one level down in b51bd871 (#201): assert every `oneOf` branch is SEEN by the
+extractor, rather than that the seen ones match. Coverage of the enumeration, not agreement within it.
+
 ## F308 - the last leg read, and it refutes F307's expectation: the check IS reachable, and the entry point is exported with no production caller
 
 F307 predicted #30 would resolve the way F133 did - method unreachable, delete it - and said plainly
