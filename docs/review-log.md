@@ -9040,10 +9040,36 @@ that asserts it. Every production call site of `existence_probe::decide`:
 No MySQL call site; every other match is a doc comment or a test. So nothing reads either gap today,
 and both stop being harmless in the same commit.
 
-WHAT THE FIX IS NOT. Do not copy UNIQUE rows into `constraints`. That puts one object in two maps and
-leaves `decide_index` and `decide_constraint` able to disagree about what exists. Either
-`decide_constraint` falls through to a unique index on MySQL, or the MySQL leg routes a UNIQUE drop to
-`decide_index`. That is a DECISION, it is on #199 as C1, and it wants the usual split.
+WHAT THE FIX IS - AND I GOT THIS WRONG FIRST. I originally wrote here, and into #199 as C1, "do not
+copy UNIQUE rows into `constraints`, that puts one object in two maps", and framed the repair as a
+DECISION between two designs. Then I checked the other two dialects - the two where the probe actually
+RUNS - and the question turned out to be already settled in the tree:
+
+    PostgreSQL   crates/zero-migrate/src/apply/drift.rs:1266  `con.contype IN ('p','f','u','c','x')`
+                 and :1278 `"u" => "UNIQUE"`.  UNIQUE is a CONSTRAINT.
+    SQLite       crates/zero-migrate/src/apply/backend/sqlite/drift_sql.rs:604-613, with the
+                 convention written out at :599-603:
+
+        // A UNIQUE-constraint auto-index (origin 'u') is a CONSTRAINT, surfaced in the
+        // constraint bucket (matching the PG snapshot, where UNIQUE is a
+        // pg_constraint row, not a pg_index row in the index bucket).
+        ...
+        // Do NOT also push it into the index bucket if it is a SQLite auto-index;
+
+So the convention is not merely established, it is documented at the site and one dialect was written
+deliberately to match the other: UNIQUE belongs in `constraints`, and is EXCLUDED from `indexes`, not
+duplicated across both. `decide_constraint` reading only `constraints` is correct against that
+convention. MySQL is the single deviant - it files UNIQUE in `indexes` and nowhere else.
+
+That inverts the framing. It is not "the probe looks in the wrong map"; it is "the MySQL snapshot
+files UNIQUE where its two siblings deliberately do not". The repair is to make MySQL match, the same
+way SQLite was made to match PostgreSQL, and my "one object in two maps" objection was an argument
+against something nobody was proposing - the siblings do not duplicate either.
+
+A SECOND-ORDER DIVERGENCE FALLS OUT, and I have NOT chased it: MySQL's `indexes` map therefore
+CONTAINS unique-constraint indexes that PG and SQLite deliberately exclude. So `decide_index` sees a
+different population on MySQL than on the other two. Whether any guarded `dropIndex` depends on that
+is unchecked.
 
 TWO NEAR-MISSES IN ONE AUDIT, both the same error:
 
