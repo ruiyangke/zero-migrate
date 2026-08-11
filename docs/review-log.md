@@ -8990,6 +8990,59 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F337 - #213 built: the decided "move the gate" turned out to be "add a precondition", because the two layers speak different error types
+
+F213's decision was option (b), move the single-top-level-SELECT gate inside
+`check_raw_view_body_text` so the public entry point carries its own precondition. Implementing it
+found something the decision had not accounted for.
+
+The gate cannot MOVE. It lives in `validate_raw_view_body_sql`
+(crates/zero-migrate/src/model/validate.rs:5445) and produces `AuthoringError` carrying the target
+dialect, the op index, the TS source location and a repair hint per failure mode - "remove
+semicolon-chained statements from the view body", and so on. The guard crate speaks `GuardError` and
+has none of that context. Moving it would either destroy the diagnostics or drag authoring concerns
+into the security layer.
+
+So what shipped is a minimal PRECONDITION at the public boundary, with the diagnostics left where
+they can be written properly. Both layers now check the shape; that duplication is deliberate and the
+comment at the site says which layer owns what.
+
+THE FOOTGUN WAS PINNED BEFORE IT WAS FIXED, and it was real. The first version of the test asserted
+the old behaviour and passed:
+
+    test the_public_body_scanner_admits_text_that_is_not_a_view_body ... ok
+
+A bare `ALTER TABLE app1.widgets RENAME COLUMN tenant_id TO t` handed straight to the public scanner
+was ADMITTED. That is exactly the input for which the permissive `is_injected_shape` answer is
+unsound - the scanner reports "not injected" for every element, which is only safe for text that
+cannot carry a rename.
+
+Now refused as `view_body_not_a_select` for three shapes (bare DDL, semicolon-chained statements,
+INSERT), with a genuine single top-level SELECT still admitted.
+
+MUTATION-PROVEN, per the standing rule. Disabling the `SelectStmt` branch with `if false &&`:
+
+    test the_public_body_scanner_refuses_text_that_is_not_a_view_body ... FAILED
+    test result: FAILED. 17 passed; 1 failed
+
+Exactly one test failed and it is the one that guards the branch. Restored, back to 18 passed.
+
+NO BEHAVIOUR CHANGE FOR THE PRODUCTION CALLER, which was the risk worth checking rather than
+asserting: `validate_raw_view_body_sql` already refuses the same shapes one layer up, so the new
+check never fires for it. Full `-p zero-migrate --tests` is unchanged at 103 targets / 2196 passed.
+
+A NOTE ON THE INSTRUMENT, because it nearly produced a false green. The first gate run was killed
+mid-clippy, leaving `FMT_RC=0` and no other RC - but a 191KB `s-tests.txt` sat beside it with 102
+passing result lines, which reads exactly like a completed run. That file was HOURS old: an earlier
+iteration had used the same name and nothing wiped it. Only the mtime separated them. Fixed
+structurally rather than by vigilance - the gate now writes into a per-task directory that is
+`rm -rf`'d before use, so a stale file cannot wear a fresh run's name. Fourth instance today of an
+instrument answering confidently about the wrong subject (F322 pipe, F328 stale binary, F331
+priors-free fixture, this).
+
+Gates: clippy 0, tests 0, small 0; 116 targets / 2506 passed / 0 failed / 2 ignored, zero
+LIVE-DATABASE COVERAGE SKIPPED banners.
+
 ## F336 - #214's documentation half shipped: the Rust boundary is stated, and it says the refusal MOVES rather than disappears
 
 F335 established the fact and killed the safety claim. This writes the surviving half where a reader
