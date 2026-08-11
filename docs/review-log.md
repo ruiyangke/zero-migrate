@@ -8990,6 +8990,64 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F329 - #207 fixed: MySQL's snapshot reads its views, and the completeness pin that guards catalog scoping caught the new query
+
+`MysqlBackend::snapshot_schema` returned `SchemaSnapshot { tables, ..Default::default() }`, so `views`
+was always empty on MySQL while PostgreSQL and SQLite both populated it. The fold reads that map, so a
+`dropView` in a second deploy could not find the view an earlier deploy had created, and the deploy
+failed rather than dropping it. Measured at e474f0a9.
+
+The fix adds one `information_schema.VIEWS` read scoped by `TABLE_SCHEMA = ?`, building a
+`ViewSnapshot` per row. The field choices come from `ViewSnapshot`'s own documentation at
+`crates/zero-migrate/src/model/snapshot.rs:943-970` rather than from my judgement:
+
+- `materialized: false` - MySQL has no materialized views, and `op_support` already scopes both
+  variants to PostgreSQL.
+- `authored_query` / `authored_schema` stay `None` - the doc states an introspected snapshot should
+  leave them unset. The typed body a drop's inverse needs comes from replaying proven history, not
+  from the catalog.
+- `definition` is diagnostic. The three backends already store different formats there, which is
+  itself the evidence that nothing compares it across dialects.
+
+Three things this run corrected that I would not have predicted:
+
+The fix also repaired the guarded case. The `ifExists` arm in
+`packages/zero-migrate-cli/tests/host/view-ops-across-deploys.test.ts` flipped from a refusal to
+`"ran"`. That is correct - the guard was only ever refused because the view was missing from the map.
+It makes F321's finding, "`ifExists` is not a workaround", obsolete: the question is moot now that the
+underlying defect is gone. The arm now asserts the guarded drop removes the view, and it does.
+
+The MySQL render tests carry a completeness pin at
+`crates/zero-migrate/src/apply/backend/mysql/mod.rs:2493` that counts how many catalog queries carry
+the project-database bind. It failed:
+
+```
+assertion `left == right` failed: every catalog query scopes itself with the project database bind
+  left: 5
+ right: 4
+```
+
+That is the pin working. It proved the new read is schema-scoped rather than cluster-wide. Raising the
+count alone would have left the pin arithmetic-only, so the query is now also named positively by
+`information_schema.VIEWS` and `VIEW_DEFINITION AS view_definition` in the same assertion - removing the
+read fails on content, not just on a number.
+
+The source comment at the snapshot claimed `views` was a gap that "Nothing reads the gap today". My own
+measurement at e474f0a9 had already disproved it: the fold reads it, and a deploy failed. Three test
+titles and the host file's header had gone stale the same way, all describing the refusal as correct
+behaviour. Rewritten to a matrix in which every cell now works.
+
+Left open: `inflight_projection_already_reflected` at `crates/zero-migrate-node/src/lower.rs:1561` tests
+`!snapshot.views.contains_key(name)`, which was unconditionally true on MySQL and is now a real check.
+Crash-recovery coverage for that branch is not built. Also still uncovered: whether PostgreSQL view
+rollback works through the addon and CLI path, which no test exercises.
+
+Gates: fmt 0, clippy 0; 103 targets / 2195 passed / 0 failed / 2 ignored for `-p zero-migrate --tests`,
+plus 13 / 308 / 0 / 0 for the three small crates - 116 targets and 2503 passed against a 2500 baseline,
+with zero LIVE-DATABASE COVERAGE SKIPPED banners. The two ignored are the aspirational view-restore arm
+and the blocked function harness (#211). Host suite 146 pass / 0 fail against an addon rebuilt from this
+tree, per the freshness rule F328 paid for.
+
 ## F328 - a regression I predicted was refuted by a comment I had already read, and a green host suite turned out to be testing a stale binary
 
 Two corrections, both to claims I had made with confidence in the previous hours.
