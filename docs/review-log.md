@@ -8990,6 +8990,80 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F286 - dropping a masked column takes its sibling, and the add path's own comment wrote the fix
+
+#89 SHIPPED, after three iterations of establishing it: the claim confirmed, the consequence
+corrected, the prior gap-note found, and now the RED and the fix.
+
+### RED, measured against a live server
+
+Table with `ssn: t.string().mask({ kind: "last4" })`, applied; then `table(T).column("ssn").drop({})`:
+
+    the catalog still holds ["id","ssn_masked"]
+    and the journal recorded [drop_column_masked_drop_people_ssn:applied/completed]
+
+Both halves, which is the shape #86 established as necessary: the orphan in the catalog AND the
+green journal row. Either alone would be the wrong story - a refusal also leaves the sibling.
+
+The fixture asserts BOTH columns exist before the drop, so the test cannot pass on a table that
+never had a sibling to orphan. That assertion passed on the pre-fix run, which is what makes the
+failure below attributable.
+
+### The fix, and the comment that wrote it
+
+`Op::DropColumn` reads the sibling from the LIVE schema rather than from the op, because a drop
+names only the column and carries no mask facet:
+
+    let sibling = format!("{column}_masked");
+    let masked_sibling = live_schema.table_snapshots.get(table)
+        .is_some_and(|snap| snap.columns.iter().any(|c| c.name == sibling));
+
+and emits a second unit when it is there. A column with no sibling lowers exactly one unit, as
+before.
+
+The probe half is where this could have gone wrong, and the add path had already paid for the
+lesson. #86/F58 fixed a masked `addColumn` that stamped ONE main-column probe on BOTH units via the
+generic bottom-of-function stamp: unit 1 probed `<col>`, read it present and matching, returned
+SatisfiedNoop, skipped its own ADD and journaled green. The drop side would have failed the same
+way in the opposite direction - unit 1 probing `<col>`, reading it already ABSENT, returning
+satisfied and skipping the sibling's DROP. So this arm stamps an object-scoped probe per unit and
+leaves `probe == None`, exactly as the add arm does, and the comment says which sibling defect it
+is avoiding rather than just asserting the shape.
+
+That is the whole reason to read the neighbouring arm before writing a mirror: the hazard was
+already discovered, already fixed once, and already explained in place.
+
+### Mutation
+
+The pre-fix RED is the mutation evidence, as with #85's PostgreSQL arm: the branch did not exist,
+the assertion failed on exactly the orphan, and the fixture's own precondition passed in the same
+run. Re-deriving it with an env-gated bypass would measure the same thing twice.
+
+### Two self-inflicted gate failures, both mine, both already-known shapes
+
+`clippy_rc=101` on `redundant clone` at lower.rs:4963 - `sibling` was moved-from at its last use and
+did not need the `.clone()` the add path's analogous line carries (there the value IS used again).
+Copying a neighbouring line without checking its lifetime.
+
+Then `host_rc=1` with 21 tests / 0 pass / 21 fail, which is the addon staleness gate again: fixing
+the clippy error touched `lower.rs` after the last `.node` build. I diagnosed this identical
+failure two iterations ago (F283) and still spent a gate cycle on it. The rule is mechanical and I
+keep not applying it: any edit to a crate the addon compiles means rebuild the addon before the
+host suite, including a one-character edit.
+
+### Gate
+
+    fmt 0, clippy --workspace 0, test 0, addon 0, index.d.ts drift 0, host 0
+    rust targets=113 passed=2495 failed=0 ignored=0, skip banners 0
+    host suite 138 pass, 0 fail, 0 skipped (137 before; the new arm)
+
+### Not covered
+
+SQLite and MySQL. The sibling mechanism is dialect-neutral and the fix is too, but this asserts
+against `information_schema.columns` on PostgreSQL only. Neither other dialect has an arm for this
+shape here or anywhere else - a gap, not a handoff. #90 (a sibling present but missing its sentinel
+COMMENT reads as satisfied) remains open and is untouched by this.
+
 ## F285 - I filed a finding this log already contained, and the answer was in a file I did not open
 
 #198 REFUTED as filed, by me, one iteration after I filed it. Withdrawn rather than worked.
