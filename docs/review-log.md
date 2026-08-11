@@ -8990,6 +8990,81 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F311 - the drop-column gate waved through a drop PostgreSQL rejects, and the oracle could not have caught it
+
+F300 fixed this predicate once and recorded fifteen shapes agreeing. Fifteen agreements, and the rule
+was still wrong on a sixteenth nobody had built. This is the third time on this one function that
+agreement-count was not evidence, and the fix this time is to the INSTRUMENT as well as the rule.
+
+WHY THE ORACLE COULD NOT HAVE CAUGHT IT, which is the more useful half. The oracle carried its own SQL
+spelling of the predicate in `predicate_sql` and compared THAT against the server. The shipped query
+was never executed by any test. The shipped function's own doc comment said so plainly:
+
+    What that oracle checks is the RULE, not this query: it runs its own SQL spelling of the
+    same predicate ... an edit here would not fail it.
+
+I read that comment earlier in the same session while fixing something else, and did not draw the
+conclusion. The codex read-only opinion did, and it is the reason this defect surfaced at all.
+
+MEASURED, not reasoned. Against PostgreSQL in zero-migrate-postgres-1 (127.0.0.1:5434):
+
+    CREATE TABLE t (excl_sep text);
+    ALTER TABLE t ADD CONSTRAINT c_sep_expr  EXCLUDE USING btree (lower(excl_sep) WITH =);
+    ALTER TABLE t ADD CONSTRAINT c_sep_plain EXCLUDE USING btree (excl_sep WITH =);
+    ALTER TABLE t DROP COLUMN excl_sep;
+
+    ERROR:  cannot drop column excl_sep of table zm_sep.t because other objects depend on it
+    DETAIL:  constraint c_sep_expr on table zm_sep.t depends on column excl_sep of table zm_sep.t
+    HINT:  Use DROP ... CASCADE to drop the dependent objects too.
+
+The shipped predicate answered refuse=false for that column. So `blocking_column_dependents` returned
+an EMPTY blocker list, the precondition passed, and the drop would have failed at apply - which is the
+exact outcome the precondition exists to prevent, and the dangerous direction of the two.
+
+THE CAUSE. The second leg asked whether ANY direct AUTO `pg_constraint` edge exists on the column,
+never correlating it to the constraint that owns the blocking index - the ownership subquery did not
+read `i.refobjid` at all. With two SEPARATE exclusions, `c_sep_plain` supplies an unrelated AUTO
+constraint edge that cancels the block `c_sep_expr`'s index raised. `excl_mixed` cannot expose this,
+because there the owning constraint and the directly-depending constraint are the same object.
+
+THE FIX. Ask about the OWNING constraint, read from the internal edge's `refobjid`:
+
+    AND EXISTS (SELECT 1 FROM pg_depend i
+                 WHERE i.classid='pg_class' AND i.objid=dep.objid
+                   AND i.deptype='i' AND i.refclassid='pg_constraint'
+                   AND NOT EXISTS (SELECT 1 FROM dep owner_edge
+                         WHERE owner_edge.deptype='a'
+                           AND owner_edge.classid='pg_constraint'
+                           AND owner_edge.objid = i.refobjid))
+
+Verified against the live server over all sixteen columns before writing any Rust: the corrected rule
+differs from the shipped one on `excl_sep` alone and matches the server 16/16, where the shipped one
+matched 15/16. Server refuses gen_src, view_src, excl_expr, excl_pred, excl_sep and allows the other
+eleven.
+
+TDD, in the order it happened:
+
+  1. Rebound the oracle to call `PostgresBackend::blocking_column_dependents` and deleted
+     `predicate_sql`. Still green - 1 passed - so the rebind alone changed no verdict.
+  2. Proved the rebind by mutating the SHIPPED query (`deptype = 'n'` -> `deptype = 'MUTATED'`):
+
+       blocking_column_dependents disagrees with the server for gen_src: it named [],
+       actual refuse=true. The shipped gate would wave through a drop PostgreSQL rejects here
+
+     That edit would have left the old oracle green. Restored.
+  3. Added the `excl_sep` shape. RED through the shipped code path:
+
+       blocking_column_dependents disagrees with the server for excl_sep: it named [],
+       actual refuse=true. The shipped gate would wave through a drop PostgreSQL rejects here
+
+  4. Correlated the ownership edge. Green.
+
+WHAT I HAVE NOT DONE. I have not looked for other places that ask "does any constraint depend on this"
+where they mean "does THIS constraint depend on this". The same uncorrelated shape could exist in the
+drift and fold predicates, which reason about the same catalog; I did not read them. And the oracle is
+still enumerated by hand - sixteen shapes I thought of - so #202's remaining question, whether the
+predicate's input basis is sufficient at all, is untouched.
+
 ## F310 - 22 live-PG test files leak their schema on unwind, and the database holds 88 leftovers proving it
 
 I went looking for a place to hang a second enumeration basis on the drop-dependency oracle (#202) and
