@@ -8990,6 +8990,59 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F325 - the sweep F324 deferred found the same defect in a second op, and that one was never guarded by accident
+
+F324 closed by naming an unswept question: does any OTHER op render the undo of a MODIFY as a DELETE?
+Swept immediately rather than left as a footnote, because an unverified item repeated across entries
+stops reading as a caveat (F321).
+
+Two DROP-shaped downs exist in `lower.rs` - `create_sequence_` at :8126 and `create_trigger_` at
+:8712 - and both are fine: they undo genuine creates, where dropping IS the inverse. So the shape is
+not duplicated by literal DROPs.
+
+The real generalisation is narrower and it does have a second instance: **an op carrying a flag that
+turns a create into a modify, whose down still assumes the create**. Exactly two ops in the IR carry
+a `replace` flag - `CreateView` at `zero-migrate-ir/src/ir.rs:3312` and `CreateFunction` at :3740,
+the only two matches. The second has the identical bug, at
+`crates/zero-migrate/src/render/vendor.rs:641` onward:
+
+    let or_replace = if replace.unwrap_or(false) { ... };            // replace reaches the UP
+    let down = format!("DROP FUNCTION IF EXISTS {qname}({args_sql})"); // and never the down
+
+### Why this one is worse than the view case despite being the same shape
+
+The view defect was blocked by ACCIDENT. The fold's duplicate-name check refused a replace against a
+view an applied migration had created, so the bad arm was unreachable across deploys until a1fe1047
+removed that accidental guard - which is why #209 is mine and new.
+
+Functions have no such accident. The fold does not model them: `Op::CreateFunction` sits in the
+structural no-op arm at `render/fold.rs:2497`, under a comment saying vendor ops "do not contribute
+to this structural snapshot", and `SchemaSnapshot` has no functions map at all. No duplicate check
+ever fired, so the across-deploys function replace has ALWAYS been applicable and its rollback has
+ALWAYS been destructive. Pre-existing, never guarded, and nobody had looked.
+
+### The same reason it is harder to fix
+
+For views the prior body is recoverable - the fold carries `authored_query`, and the `dropView` arm
+already reconstructs from it. For functions there is nothing to recover FROM, for the same reason it
+was never guarded: the fold does not track them, and `fold.rs:2642` says the IR "intentionally
+carries only a function name". So the restore option available to views is not available here without
+new state, and the likely answer is the refusal option - `down: None` and reported irreversible
+rather than a down that destroys.
+
+The property that made the defect reachable is the same property that removes the nicest repair. That
+is worth noticing as a shape: an object the engine declines to model cannot be guarded against
+duplication OR restored on rollback, and both consequences arrive together.
+
+### Not measured, and deliberately not sent to a consumer
+
+Everything here is read. The view sibling was measured and behaved exactly as its read predicted,
+which raises confidence and does not settle it. Filed as #211 with the measurement named as the next
+step. No consumer message yet: zeroship has had three messages from me on the view thread, and
+sending a fourth on an unmeasured claim would spend the credibility the measured ones earned. The
+`-032` case is the precedent for when to send early - a destructive defect they could hit before a
+pin bump - and this does not clear that bar until it is run.
+
 ## F324 - rolling back a view replace destroys the view, measured; and the fix was stopped at the point it stopped being a patch
 
 #209 confirmed at ab5b2d73, and it is the sharpest thing the view work turned up. Measured through
