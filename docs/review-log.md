@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F306 - #30's premise CONFIRMED, and the near-miss is the interesting part: the right claim about the wrong crate would have refuted it
+
+#30 said `BodyScopeDecisions::is_injected_shape` returns false unconditionally, and marked itself "not
+independently confirmed by me yet". Two tickets in a row had just turned out to rest on false
+premises (F304), so this was checked the same way - and it holds:
+
+    crates/zero-migrate-guard/src/guard/mod.rs:1128
+    fn is_injected_shape(&self, _object: &ObjectName, _element: &ShapeElement) -> bool {
+        false
+    }
+
+Both parameters underscored, no branch, on `BodyScopeDecisions` (declared :1053, constructed :2733).
+
+HOW THIS ALMOST GOT REFUTED WRONGLY, which is worth more than the confirmation. Grepping the name
+first lands on `zero-migrate-policy`'s `compose.rs:762`, a fully implemented method that iterates
+covering injects, name-matches Column / Index / PrimaryKey, and has both-directions coverage in
+tests/compose_oracle.rs:1291-1295. On that evidence the ticket looks plainly wrong. It is a DIFFERENT
+method: the guard declares its own `is_injected_shape` on the `GuardDecisions` trait (mod.rs:999) with
+three impls - :537 delegating to the effective policy, :1044, and :1128 the constant. Same name, two
+crates, opposite behaviour.
+
+A refutation written after reading the policy crate would have been confident, specific, and wrong.
+The check that saved it was looking for the TYPE the ticket named rather than the METHOD - and
+`BodyScopeDecisions` exists exactly where the ticket said.
+
+WHAT THE CONSTANT COSTS, traced to its consumers rather than assumed. Three sites read the answer, all
+in guard/mod.rs, and each denies only when it is TRUE:
+
+    :1604   RENAME COLUMN <subname> - denied INJECTED_SHAPE_IMMUTABLE if the OLD name is injected
+    :1743   the rename TARGET column
+    :1758   the target PRIMARY KEY
+
+Each is additionally gated on NOT holding `KEY_SCHEMA_ALTER_INJECTED`. So under `BodyScopeDecisions`
+the injected-shape immutability rule does not fire at all: the denial is unreachable inside a body
+scope regardless of policy.
+
+NOT ESTABLISHED, and NOT to be written up as a live defect until it is:
+  - REACHABILITY. Whether a function body walked with `BodyScopeDecisions` can actually carry an
+    `ALTER TABLE ... RENAME COLUMN` that the top-level walker would deny. The constant makes the rule
+    inert; it does not by itself prove a reachable statement exists that would otherwise be caught.
+  - INTENT. Whether the constant is deliberate. #30 links F14, where the body scan already missed
+    privilege verbs the top level denies, so there may be a stated reason for body scope deciding less
+    - or this may be the same gap a second time. The site carries no comment either way, which is
+    itself worth fixing whichever answer is right.
+
+Both are reads, not runs, and neither was done here. #30 stays open with its premise now confirmed
+instead of assumed.
+
 ## F305 - #199 part C: the constraint probe has no empty-map hazard, and its one conditional is a version fact rather than a gap
 
 #199 part C asked whether the probe's CONSTRAINT variants carry the same empty-map shape that makes a
