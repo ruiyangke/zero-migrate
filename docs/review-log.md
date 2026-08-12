@@ -8990,6 +8990,143 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F406 - #227 decided: resolve a MySQL constraint the way the fold already resolves one, and fail closed where it cannot
+
+DECISION for #227, which blocks #79. The ticket named two candidate shapes and said explicitly "do
+NOT pick by taste - (a) touches the differ, (b) touches a shared decision path, and they fail
+differently". Both were measured. (a) is refuted by a shipped test; (b) is the shape the codebase
+already uses for this exact catalog collapse. A third shape proposed by the second opinion was
+rejected as new machinery for a problem that already has a convention.
+
+### The crux, and it is not the one the ticket put first
+
+The ticket asked whether `ConstraintSnapshot` participates in structural drift, because that decides
+whether (a) is cheap or a differ change in disguise. It participates twice:
+
+`apply/drift.rs:1845-1860` passes the two `constraints` name lists to `diff_named` under the object
+prefix `"constraint "`, so a name present only on the ACTUAL side is reported as an unexpected
+object. `apply/drift.rs:2642-2663` then compares `kind`, comparable `definition` and `comment` for
+every same-name pair. Independently, `model/snapshot.rs:1166-1173` includes `self.constraints ==
+other.constraints` in `TableSnapshot`'s equality.
+
+So (a) - filing a named MySQL UNIQUE into `tables[].constraints` - is a differ change in disguise.
+
+### (a) is refused by a shipped decision, not by my reasoning
+
+The expected side already made this call and wrote down why. `render/fold.rs:3729`:
+
+```rust
+fn unique_constraint(name: &str, columns: &[String], dialect: SqlDialect) -> FoldedConstraint {
+    FoldedConstraint {
+        constraint: (!matches!(dialect, SqlDialect::Mysql)).then(|| ConstraintSnapshot {
+```
+
+with the reason on the function: "MySQL collapses `CONSTRAINT name UNIQUE (...)` and `UNIQUE KEY
+name (...)` to the same `STATISTICS`/`SHOW INDEX` object, so its authoritative snapshot retains only
+the ordered unique index. Keeping a synthetic MySQL constraint here would make a clean apply report
+that constraint as missing on every re-introspection."
+
+(a) is that same mistake taken from the other end. The expected side would hold no constraint and
+the live side would hold one, so `diff_named` reports it unexpected on every re-introspection of
+every MySQL project that authors a named UNIQUE. A test already pins the current behaviour:
+`apply/backend/mysql/mod.rs:3861-3874` asserts the folded MySQL table carries the unique INDEX and
+no constraint of that name, with the assertion message "MySQL cannot recover whether a unique key
+was authored as CONSTRAINT or INDEX", and `:3981` asserts `diff_snapshots(&expected, &actual)` is
+clean. (a) breaks that test, and breaking it is the defect, not the fix.
+
+### (b) is not a new idea, it is the convention
+
+`render/fold.rs:2275-2290` already resolves a MySQL `DropConstraint` in exactly the order the probe
+needs: retain out of `constraints` first, and only if nothing was removed AND the dialect is MySQL,
+remove the same-name UNIQUE index instead. Its comment states the same catalog fact the probe has to
+model. So the fix is to teach `decide_constraint` the resolution order the fold already uses for the
+same op on the same dialect, not to invent a place to put the answer.
+
+Constraint-first is load-bearing, not stylistic. MySQL normalizes `PRIMARY` to `<table>_pkey` and
+files it BOTH as a `ConstraintSnapshot { kind: "PRIMARY KEY" }` at
+`apply/backend/mysql/drift_sql.rs:423` and as an index at `:434`. Constraint-first finds it once
+through its constraint and never reaches the index fallback. An index-first or union lookup would
+let `GuardDir::IfNotExists` compare a live kind of `UNIQUE` against an expected `PRIMARY KEY` at
+`existence_probe.rs:824-827` and report drift on a correct schema.
+
+A dialect-aware `decide_constraint` is also not a new precedent in that module: `decide_index`
+already changes its name-resolution semantics per dialect through `SchemaWideIndexNames`, and
+`decide_table` / `decide_column` route their type comparison through `schema_renderer(dialect)`.
+
+### The half the ticket got wrong, which widens it
+
+#227 and F405 both said MySQL files a named CHECK into `tables[].constraints` at `drift_sql.rs:612`.
+That is false, and I did not check it before writing it down. `:612` is the push at the end of the
+FOREIGN KEY loop. There are exactly two `constraints.push` sites in the MySQL snapshot - `:423`
+PRIMARY KEY and `:612` FOREIGN KEY - and the CHECK loop at `:242-320` pushes nothing: it either
+`continue`s past a clause it does not recognize at `:288-290`, or folds a recognized format check
+into column metadata (`id_default`, `value_format`, `catalog_uuid_format_check`). The constraint
+NAME is read at `:262` and used only in error text.
+
+So MySQL retains no CHECK identity anywhere in the snapshot. No lookup order can resolve one, and a
+guarded `dropConstraint` naming a live CHECK is legal - `Op::DropConstraint` is kind-blind and MySQL
+marks it Portable. Under (b) alone that op would resolve `SatisfiedNoop` and silently skip a real
+DROP. The build therefore carries a second obligation: where MySQL cannot prove absence, REFUSE.
+A loud stop is the only correct answer for an identity the snapshot cannot carry.
+
+### The refusal is scoped to one direction, or it eats the guard
+
+Naively "MySQL + unresolved -> refuse" would refuse the ordinary case the guard exists for: a
+`dropConstraint ifExists` naming something genuinely absent, which is the idempotent re-run every
+guard is written for. `Op::DropConstraint` carries only `table` and `name` - no kind - so the probe
+cannot narrow the ambiguity from the op either.
+
+The two directions are not symmetric, and only one of them is unsafe:
+
+`GuardDir::IfExists` unresolved is genuinely ambiguous - either the constraint is absent, or it is a
+live named CHECK the snapshot cannot see - and the two want opposite actions. Guessing `SatisfiedNoop`
+skips a real DROP and journals completed, which is the failure this ticket exists to prevent. This
+arm refuses.
+
+`GuardDir::IfNotExists` unresolved is safe to treat as absent and `RunBare`. If a same-name CHECK
+really is live, MySQL rejects the `ADD CONSTRAINT` on the duplicate name. The engine gets a loud
+server error rather than a silent wrong answer, which is the outcome a refusal would have produced
+anyway. This arm is unchanged.
+
+So the build changes the drop direction on MySQL and nothing else. PostgreSQL and SQLite retain CHECK
+constraint identities in their snapshots (`apply/drift.rs:1380` and `sqlite/drift_sql.rs:502`, `:615`,
+`:967`), so neither has this ambiguity and neither arm moves.
+
+### Why not the third shape
+
+The second opinion recommended keeping the structural snapshot as-is and adding probe-only catalog
+metadata, excluded from `TableSnapshot` equality and from `diff_snapshots`, to carry MySQL UNIQUE
+and CHECK identities. It reaches the right answer for UNIQUE and correctly identifies the CHECK
+hole, and both of those are taken up above.
+
+It is rejected as the vehicle. It adds a third bucket to a type whose two buckets are already the
+thing being confused, and every future reader of `TableSnapshot` then has to learn which of three
+places an object lives in and which of them the differ sees. The fold solves the identical problem
+with a lookup order and no new state. Reusing that costs one dialect arm; the third bucket costs a
+snapshot field, its population on one dialect, its exclusion from two equality paths, and the
+standing risk that some later comparison reads it by accident. For the CHECK half it buys nothing
+that matters: retaining a name only to resolve a probe still leaves the engine unable to compare the
+clause, so the honest answer stays refusal either way.
+
+### Verified versus inferred
+
+VERIFIED by reading: both drift comparison sites and `TableSnapshot`/`ConstraintSnapshot` equality;
+the dialect condition in `fold.rs:3729` and its stated reason; the MySQL fallback order in
+`fold.rs:2275`; both MySQL `constraints.push` sites and the full CHECK loop; the clean-drift test and
+its assertion message; and that the three production `decide` call sites are
+`sqlite/mod.rs:619`, `postgres/session.rs:722` and `:1057` - none MySQL.
+
+INFERRED, not executed: that (a) would make the `:3981` drift assertion fail, and that the CHECK arm
+would resolve `SatisfiedNoop` once a MySQL call site exists. Both are predictions the build must
+turn into failing tests before the fix.
+
+NOT CHECKED: a live MySQL server. The reasoning above is entirely from the catalog-reading code, not
+from a server round trip.
+
+#227 is LATENT, not live: with no MySQL `decide` call site, nothing reaches `decide_constraint` on
+that dialect today. It is a prerequisite to get right before #79 wires the probe, which is why #79
+stays blocked on it rather than the reverse.
+
 ## F405 - F404 was discharged at the wrong granularity, and the probe wiring stopped rather than shipping the defect
 
 CORRECTION to F404, found by the dispatched build refusing to proceed. No code change: the wiring
@@ -9026,10 +9163,16 @@ and an `IfExists` miss returns `SatisfiedNoop` (:811-817). But MySQL's snapshot 
             }
             table.indexes.push(IndexSnapshot { ... });   // <- named UNIQUE lands ONLY here
 
-CHECK constraints also reach `constraints` (:242 gated on server >= 8.0.16, :612). A named UNIQUE
-does not. So wiring the probe would make a guarded `dropConstraint` naming a live UNIQUE read as
-absent, resolve SatisfiedNoop, skip the DROP and journal completed - the views hazard, third
-instance.
+A named UNIQUE does not. So wiring the probe would make a guarded `dropConstraint` naming a live
+UNIQUE read as absent, resolve SatisfiedNoop, skip the DROP and journal completed - the views hazard,
+third instance.
+
+CORRECTED by F406: the sentence that stood here claimed CHECK constraints also reach `constraints`
+at `:242` and `:612`. Both citations were wrong. `:612` is the FOREIGN KEY push, and the CHECK loop
+at `:242-320` pushes no `ConstraintSnapshot` at all - it folds a recognized clause into column
+metadata and discards the constraint name. MySQL retains no CHECK identity, which makes the hole
+wider than this entry stated, not narrower. The correction was found by re-reading the file rather
+than by the code failing, so it was live for one commit.
 
 INERT TODAY, and that distinction matters: `decide_constraint` has no MySQL call site, so nothing
 currently reads this. Drift is unaffected because both sides of a MySQL comparison agree about where
