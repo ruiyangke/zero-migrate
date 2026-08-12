@@ -24,7 +24,7 @@ importers:
   crates/zero-migrate-node:
     devDependencies:
       '@napi-rs/cli':
-        specifier: ^3.7.3
+        specifier: 3.7.3
         version: 3.7.3(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)(@types/node@26.1.1)
 
   packages/zero-migrate:
