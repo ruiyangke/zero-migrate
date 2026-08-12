@@ -8990,6 +8990,38 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F378 - #12 closed: all nine NAMED findings settled, and three that were never written down cannot be
+
+#12 says "Codex reported 12 findings (9 high)" and then names nine. Those nine are now all settled.
+The other three exist only in a report that was never pasted into the ticket, so there is nothing to
+trace. Closing on nine and saying so beats leaving a ticket open forever on a remainder no one can
+read.
+
+    admission witness gaps           F373 measured, F374 FIXED - a live false-accept
+    grant-with-a-hole                F367 REFUTED - Exactness answers Top only from an exact All
+    registry rebinding               F375 measured, filed #220 - public API, breaking change to fix
+    seal not binding the registry    already closed under #147/#148, checked rather than assumed
+    root bound omission              F370 REFUTED - three shapes, and codex agreed independently
+    RootCharter admission bypass     F376 REFUTED - re-admitting launders nothing, transitivity
+    permissive registry defaults     F368 - refuted as filed, but the guard was VACUOUS and is fixed
+    default_scope ordering           F372 - the field has no reader; the claim it had one was false
+    extends flattening grants        F371 FIXED - a tightening rule was inert; now refused by name
+
+WHAT THE TICKET'S OWN PREDICTION GOT RIGHT AND WRONG. It warned that "several appear to target the
+publicly-constructible Rust API rather than the strict TOML loader that is the real trust boundary,
+so severity is likely lower than reported." Right for four of them - F369, F371, F375 and the
+draft-side half of F373 all need a public API the engine never calls. WRONG for the one that
+mattered: the charter-side half of F373 runs on `effective_policy_from_charter_layers` with the
+builtin registry and nothing but Bool knobs, and I repeated the ticket's prediction in my own first
+write-up before a second opinion produced the counterexample. A prior about severity is a reason to
+measure, not a reason to conclude.
+
+THE SCORE, because "verify twelve findings" invites counting fixes. Three refuted outright, four
+fixed, two filed with reproductions for a decision I would not rush, one pre-closed by earlier work,
+and one that was refuted as filed while exposing a different real defect underneath. Two of the four
+fixes came from findings whose stated premise was wrong. The value was in the tracing, not in the
+report's hit rate.
+
 ## F377 - I answered a reachability question by grepping for a spelling, and a consumer corrected me
 
 The mailbox advisory I sent about F374 said I had found no evidence zeroship composes policy
