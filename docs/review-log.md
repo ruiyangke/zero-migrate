@@ -9036,9 +9036,39 @@ is the `not_valid` refusal, not the fixture's missing FK target.
 
 That message is written for a validator bypass, and under this asymmetry it described a shape
 validate deliberately passed. The author sees an engine invariant instead of the actionable
-authoring error the `Some(true)` path gives them, and `false` is reachable from the surface - the
-recorder's `requireOptionalBoolean` passes a literal `false` through unchanged. `validate` now
+authoring error the `Some(true)` path gives them. `validate` now
 matches `Some(_)`, so the two gates refuse the same set and lower's message is true again.
+
+### How much this could have cost, measured after the fix rather than asserted with it
+
+I first wrote that `false` was reachable from the authoring surface, on the strength of the
+recorder's `requireOptionalBoolean` passing a literal `false` through unchanged. Building the
+TypeScript fixture for it refuted that, and the refutation is the useful part.
+
+`requireOptionalBoolean` does forward `false` - on the `.foreignKey(name).add(...)` path. The
+create-time path is a different builder: `create({ foreignKeys })` assembles its constraint by
+enumerating fields explicitly (`packages/zero-migrate/src/ops.ts:3356`) and `notValid` is not among
+them. Driven through the real `buildEnvelope` with the field passed anyway, past the type that does
+not declare it:
+
+```
+CARRIES_notValid: false
+CREATE_CONSTRAINTS: [{"name":"children_parent_fkey","kind":{"kind":"fk","columns":["parent_id"],
+                      "referencesTable":"parents","referencesColumns":["id"]}}]
+```
+
+So no author using this package could reach the asymmetry in either spelling. It was reachable only
+from a hand-crafted IR or a non-TypeScript host calling the addon directly - which is exactly what
+the refusal's own comment says it defends against. The fix stands: two gates that disagree about
+what they refuse are worth making agree regardless of who can currently reach the gap, and the gap
+was one recorder change away from opening. But the severity in the paragraph above is the severity
+of a defense-in-depth boundary, not of a defect an author could hit, and I had the wrong one until
+I tried to write the fixture.
+
+`packages/zero-migrate/tests/create-time-not-valid.test.ts` now pins BOTH halves: that the
+create-time builder drops the field, and - as the control that keeps the first assertion honest -
+that the add path still carries it. Without the control, a recorder that dropped `notValid`
+everywhere would pass the first assertion while silently deleting the facet.
 
 ### The existing test could not have caught it, and nearly told me it did
 
