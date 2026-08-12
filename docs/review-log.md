@@ -8990,6 +8990,119 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F410 - #228 fixed: the ownership gate authorized the partition parent while lowering acted on the child
+
+FOUND by the zero-migrate-ir review (#2, its top finding of nine). REPRODUCED by me. DECIDED with a
+split. SHIPPED as 62f25376.
+
+### The inversion, reproduced by me before anything was built
+
+`enforce_ir_ownership` (crates/zero-migrate-ir/src/load.rs:364) against
+`DropPartition{parent:"parent_tbl", name:"child_tbl"}` with registry
+{parent_tbl: app_a, child_tbl: app_b}:
+
+```
+app_a (owns PARENT only)             -> Ok(())
+app_b (owns the CHILD being dropped) -> Err(NotTableOwner{ table: "parent_tbl", owner: "app_a", ... })
+app_c (owns neither)                 -> Err(NotTableOwner{ table: "parent_tbl", owner: "app_a", ... })
+```
+
+Read the three together. A non-owner MAY destroy app_b's table. The app that OWNS the table being
+destroyed is REFUSED, on a table it never asked to touch. And app_c is the control that makes the
+first line mean something: without it, `Ok(())` could just mean the pass does nothing.
+
+So this was not a missing check. The gate checked the WRONG TABLE, and the consequence is that
+ownership of the destroyed relation was NEITHER NECESSARY NOR SUFFICIENT.
+
+### Why it was an oversight rather than an asymmetry someone chose
+
+Three things in the tree say so:
+
+- `op_target_table` (load.rs:218) returned the PARENT for all four partition ops, while
+  `Op::touched_table` (ir.rs:3800) returns the CHILD for the same four. Two accessors, one subject,
+  opposite answers.
+- `op_target_table`'s OWN `Op::Comment` arm (load.rs:253) delegates to `target.touched_table()`, so
+  the function already mixed both conventions twelve lines apart.
+- Its doc (load.rs:206) asserted "Every op the IR admits operates on exactly one table" - false for
+  exactly these four, each carrying both a parent/`of` and a `name` (ir.rs:2833 documents them as
+  "Parent partitioned table" and "Partition table name"). The doc then reasoned carefully about the
+  `DropIndex` `None` arm as defense-in-depth while never noticing the two-name family above it. That
+  comment is corrected in this commit.
+
+And the design already knew ops can have several ownership targets: `collect_target_tables` pushes a
+view's SOURCE tables, explicitly because "a confined creator could author a view SELECTing ANOTHER
+app's tables ... a read-only cross-tenant disclosure the ownership gate otherwise closes". A read-only
+disclosure was worth closing; a destructive cross-tenant DROP was not checked.
+
+### Severity, corrected downward by asking
+
+I would have overstated this. The second opinion traced the real path: object-scoped
+`safety.require_approval` resolves via `touched_table`, so it scopes to the CHILD, and the resolver
+starts from `ApprovalLevel::Never` (policy_approval.rs:116-132) - an uncovered victim means NO policy
+obligation, so the default posture is unprotected. BUT `lower_drop_partition` renders through
+`destructive_flags()`, setting `destructive` and `requires_approval` structurally, merged with OR so an
+authored `false` cannot clear them; the engine refuses without `Approval::Approved` (engine.rs:3089)
+and the executor rechecks (executor.rs:699).
+
+The sentence that matters: **`Approval::Approved` confirms DESTRUCTION; it does not prove OWNERSHIP.**
+An operator approving "yes, drop something" was unknowingly authorizing the drop of ANOTHER APP's
+table. Attended rather than silent - and still a broken isolation boundary.
+
+### Four ops, not one, and the one that is not a defect
+
+- DropPartition: the child is dropped. Worst, and the case I reproduced.
+- AttachPartition: the child ALREADY EXISTS and is absorbed into the parent's hierarchy. CAPTURE of a
+  live relation, missing from the original finding, and as serious as the drop.
+- DetachPartition: the child is detached to standalone. Contingent on a hierarchy already being
+  mixed-ownership, which Attach is one way to create.
+- CreatePartition: NOT a defect on its own. The child is created by the op, so no existing ownership
+  can be violated.
+
+### The fix, and the two shapes that would have been wrong
+
+`collect_target_tables` now pushes BOTH parent and child for all four ops, parent first.
+`op_target_table` and `Op::touched_table` are UNCHANGED - verified by diff.
+
+Swapping either accessor to the child would have LOST the parent check, because the fallback pushes
+only the single returned table (load.rs:331-333) and both return `Option<&str>`, so neither can carry
+two names. Losing the parent is a real regression: Attach/Detach emit `ALTER TABLE <parent> ...
+<child>`, and Create emits `CREATE TABLE <child> PARTITION OF <parent>`.
+
+Gating the addition on `is_destructive` would also have been wrong: it would omit CreatePartition AND
+AttachPartition, which are classified non-destructive (ir.rs:3941-3945) - and Attach is the capture
+case.
+
+### I was wrong twice, and asking is what caught it
+
+- I predicted checking the child would REFUSE LEGITIMATE `CreatePartition` deploys. It does not.
+  `op_created_table(CreatePartition)` returns the child (load.rs:154-157) and the pre-pass registers
+  every creation via `entry(name).or_insert(deploying_app)` BEFORE any target check (load.rs:369-383),
+  so a fresh child passes and only a name another app already owns is refused. My main objection to
+  the fix did not survive contact, and the shipped tests prove both halves.
+- I said PostgreSQL would refuse a name collision physically, making Create low-risk. Not universally:
+  under `ifNotExists` the partition probe turns an exact existing partition into a `SatisfiedNoop`
+  journaled as success (lower.rs:4829-4843, session.rs:701-731). No database error at all on that path.
+
+### Coverage, which did not exist
+
+There was NO partition-ownership test anywhere in the tree - not in the IR crate, not in the production
+loader block. The only partition lifecycle coverage through the real guarded loader is same-app with an
+EMPTY registry, which structurally cannot see this. Now every op carries the full matrix: parent-owner
+refused on the child, child-owner refused on the parent, a THIRD-PARTY control refused, and
+owner-of-both allowed. The last two are controls, not assertions: without the third party a pass cannot
+distinguish a working gate from an inert one, and without owner-of-both the fix could be "refuse
+everything" and still look green.
+
+### Gate
+
+fmt 0, clippy 0, test 0. 125 targets / 2590 passed / 0 failed / 2 ignored, zero "LIVE-DATABASE COVERAGE
+SKIPPED" banners under `ZERO_MIGRATE_REQUIRE_LIVE_DB=1`. 151 added lines, zero non-ASCII. One file
+changed. `zero-migrate-ir` went 93 -> 98 unit tests.
+
+The agent reported `RC_REST=0` while the live-PG tests SKIPPED, because it ran without
+`ZERO_MIGRATE_TEST_PG_URL`. That is the invisible-skip shape this review has been bitten by before, so
+the numbers above are from my own run with both DSNs exported and the require-live flag set.
+
 ## F409 - #222 measured live: an interrupted rename cannot be retried, and that is the cost of an absence the code already declares
 
 MEASUREMENT plus coverage, shipped as 2f1e5259. No production code changed.
