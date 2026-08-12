@@ -8990,6 +8990,51 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F386 - REFUTED AS CURRENT: the inflight marker's checksum IS compared, upstream of every backend
+
+First of #13's three APPLY-side leads: "PG non-transactional recovery not comparing the inflight
+marker checksum". Compared, and tested against a live PostgreSQL.
+
+I LOOKED IN THE WRONG PLACE FIRST, which is the useful part. Grepping the PG backend for the
+comparison found nothing - `crates/zero-migrate/src/apply/backend/postgres/` has 14 `inflight`
+mentions and none of them checks a checksum. The check is not per-backend. It is in the SHARED
+executor, before `had_inflight` is even computed
+(`crates/zero-migrate/src/apply/executor.rs:1131`):
+
+    let inflight = started.get(version).copied();
+    if let Some(entry) = inflight {
+        if !entry.checksum.is_empty() && entry.checksum != m.checksum.as_str() {
+            return Err(ApplyError::ChecksumDrift { ... });
+        }
+    }
+    let had_inflight = inflight.is_some();
+
+Its comment records the gap the lead names and where it came from: the replay "would otherwise
+replay a DIFFERENT body than the one that ran, and then overwrite the marker, destroying the
+evidence. MySQL already refuses this (`MysqlInflightRecoveryError::MarkerMismatch`); the generic
+path did not." An empty recorded checksum is treated as a marker predating the field rather than a
+mismatch, which is the right call for an upgrade.
+
+TESTED, and I ran it rather than trusting the name.
+`crates/zero-migrate/tests/pg_scenarios.rs:2218`:
+
+    cargo test -p zero-migrate --test pg_scenarios marker
+    test a_mismatched_inflight_marker_aborts_instead_of_replaying ... ok
+    test an_armed_marker_outranks_a_skip_precondition ... ok
+    test a_committed_non_txn_create_table_is_refused_on_replay_with_the_marker_kept ... ok
+    test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out
+
+It arms a real `record_started` marker with the half-run body's checksum, supplies an EDITED
+migration at the same version, and asserts `ChecksumDrift` with all three fields. It also asserts
+the premise first - that the edit actually moved the checksum - so the test cannot pass by comparing
+two identical values.
+
+MY SECOND SPELLING-SEARCH MISS OF THIS SESSION. I grepped the tests for `Phase::Started` and
+concluded the behaviour was unpinned. The test arms the marker through `record_started`, the
+function, not the enum. F377 recorded the same error against a consumer's reachability question;
+this is it again, inside my own repo, and the correction cost one more grep only because the run was
+cheap. The habit that catches it is asking what the CODE would call, not what I would call it.
+
 ## F385 - REFUTED AS CURRENT: `RENAME TO` reads `rename_type`, and both directions of a schema rename are denied
 
 Last of #13's four GUARD-side leads, and the third of them that names a real defect already repaired.
