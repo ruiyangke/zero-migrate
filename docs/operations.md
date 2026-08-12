@@ -133,6 +133,7 @@ The Node API exposes the same choice programmatically:
 
 ```ts
 import { plan } from "zero-migrate-cli";
+import * as migration from "./migrations/20260715090000_create_orders.js";
 
 const report = plan({
   migration,
