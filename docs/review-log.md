@@ -8990,6 +8990,99 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F391 - the fold claims a partition relation that MySQL and SQLite deliberately never create
+
+Found while re-testing #79's stated BLOCKER, which turned out to be half stale. #79 says the MySQL
+snapshot leaves `views` empty and that wiring a probe call would break `dropView`. That half is
+FIXED: `crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:688` now reads
+
+    Ok(SchemaSnapshot {
+        tables,
+        views,
+        ..Default::default()
+    })
+
+so `views` is populated (#207, 6e6333e1). The other half of the blocker - "audit the constraint
+variants" - is what this entry settles.
+
+WHAT THE SNAPSHOT STILL OMITS. `SchemaSnapshot` has eight maps (`model/snapshot.rs:1449-1463`):
+`tables`, `partitions`, `views`, `named_types`, `sequences`, `roles`, `schemas`, `extensions`.
+MySQL and SQLite populate exactly two. VERIFIED BY ME at both sites - `sqlite/drift_sql.rs:336`
+returns the identical `{tables, views, ..Default::default()}`, so the two collapsed dialects agree
+and there is no MySQL/SQLite asymmetry here. PostgreSQL is the control: `apply/drift.rs:1526`, the
+tail of `snapshot_schema` (`drift.rs:623`), populates all eight by name.
+
+Of the six omitted, five are PostgreSQL-only in this engine and so cannot appear in a MySQL history
+at all - `support.rs:344` states it for sequences ("standalone sequence objects are PostgreSQL-only
+in the current engine"), and roles/schemas/extensions/named types have no MySQL lowering. That
+leaves exactly ONE object class that the support matrix permits on MySQL while the snapshot can
+never report it:
+
+    support.rs:516-521   FeatureSupport::new(Feature::PartitionDdl,
+                             DialectSupport::all_supported(RenderMode::Offline))
+
+So partitions is the LAST instance of the pattern #207 fixed for views, and views was the only other
+one. That is a bounded result, not an open-ended audit.
+
+THE DIVERGENCE. The fold records a partition on every dialect, with no gate:
+
+    fold.rs:1182   snap.partition_by = partition_by.clone();
+    fold.rs:1234   partitions.insert(name.clone(), PartitionSnapshot { of, bounds });
+
+The `CreateTable` arm immediately above takes `dialect` and uses it; the partition writes do not.
+But lowering does NOT create a partition relation off PostgreSQL - `lower.rs:4758`:
+
+    if !matches!(self.dialect, SqlDialect::Postgres) {
+        let spec = partition_state.parent(of)
+            .filter(|parent| parent.spec.collapse())
+            ...
+            .ok_or(IrLowerError::UnsupportedOp(
+                "createPartition needs a collapse-affirmed parent on SQLite/MySQL"))?;
+
+the child collapses into the parent behind a mirror guard. And the differ is dialect-blind:
+`diff_snapshots_with_index_aliases` (`drift.rs:1622`) takes `expected`, `actual` and index aliases,
+no dialect, and pushes `format!("partition {name}")` into `missing` whenever expected has one that
+actual lacks. Folded-expected vs live-MySQL therefore reports a permanent phantom `missing`, which
+is the #110 shape.
+
+REACHABILITY - AND THIS IS WHAT KEEPS IT OFF THE LIVE PATH. Every caller of `diff_snapshots` and
+`diff_snapshots_with_index_aliases` outside `apply/drift.rs` itself is a TEST: the callers are
+`tests/collation_introspection.rs`, `tests/fold_rename_column_*`, and a `#[cfg(test)] mod
+render_tests` in `mysql/mod.rs:1094`. The one production-shaped holder,
+`apply/backend/capability.rs:168`
+
+    pub resulting_drift: Option<StructuralDrift>,
+
+is declared and never touched: grepping `resulting_drift` across `crates/` and `packages/` returns
+that declaration and nothing else. The "drifted" status the addon reports (`wire.rs:515,534`) is
+CHECKSUM drift, and `GuardVerdict::FailDrift` (`node/lower.rs:1364`) is the existence-guard lane -
+both different mechanisms from the structural differ.
+
+So NO CLI user can reach this. It lands on the public API an embedder calls (`lib.rs:149-150`
+re-exports `diff_snapshots` and `StructuralDrift`), which is not nothing here, since appbase embeds
+this engine directly - F377 established they call `admit` from `crates/migrated/src/policy.rs:124`.
+I have NOT checked whether they call `diff_snapshots`, and I am not guessing.
+
+THE OBVIOUS FIX IS THE ONE TO AVOID. "Make the fold dialect-conditional so a collapsed dialect never
+records a partition" matches the physical truth and is wrong, because the fold's `partitions` map is
+an INPUT to the collapse, not just a description of it:
+
+    lower.rs:192   for (child, partition) in &live.partitions {
+    lower.rs:194       state.insert_child(&partition.of, child, partition.bounds.clone());
+    lower.rs:3217  /// `live.partitions` carries child bounds for collapse DELETE derivation.
+
+and `LiveSchema` is built from a `SchemaSnapshot` (`lower.rs:362`, `:468` `desired.snapshot.partitions`,
+`:551`). On MySQL those bounds can only have come from the fold, since the live catalog cannot supply
+them. Stripping them would take the bounds away from the very derivation that needs them - the same
+shape as #79's own blocker, where wiring a blanket probe call would have broken the one op MySQL
+handles correctly. Recording this explicitly so the next reader does not reach for it.
+
+DECISION NOT MADE. A codex read-only opinion is running on where the fix belongs - fold, snapshot,
+or differ - and the Opus half could not be dispatched: the session hit its 200-subagent cap, so this
+is a DEGRADED split like F289, codex plus my own reading rather than two independent agents. Filed
+as #223. Nothing is being changed until that reconciles, and given the public-API-only blast radius
+"document the dialect contract on `diff_snapshots` and change no behaviour" is a live candidate.
+
 ## F390 - #13 closed: the deploy outcome carries no pending-rename obligation, filed as #222
 
 Last of #13's eight leads, and the ticket closes with it.
