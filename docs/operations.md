@@ -598,6 +598,41 @@ Prefer this order anyway:
 
 Plan the forward fix and restore path before approving a destructive migration.
 
+### The limit to check FIRST: one journaled step
+
+**A migration is reversible only if it lowers to exactly one journaled step.**
+Anything more is refused, and this rules out most realistic migrations. Measured
+against live PostgreSQL:
+
+| Authored migration | Rollback |
+| --- | --- |
+| one `createTable` | rolls back, table removed |
+| `createTable` + `createIndex` | REFUSED |
+| `createTable` + `insert` | REFUSED |
+| one `createTable` that declares two indexes | REFUSED |
+
+The last row is the one to notice: that is a SINGLE authored operation. Declaring
+indexes inside `create({ indexes: [...] })` lowers to more than one journaled step,
+so the migration is irreversible even though the author wrote one statement. The
+`createTable` plus index shape in the README's own example is not reversible.
+
+The refusal reads:
+
+```
+migration mig_… is applied but absent from the supplied set; cannot roll back
+(its `down` is unavailable). That version is <name> (ddl step), and a plan that
+lowers to more than one journaled step cannot be reversed from its authored
+envelope: its data steps carry no reverse SQL. Roll forward with a compensating
+migration instead
+```
+
+Read past the first clause. "Absent from the supplied set" is misleading when the
+migration IS in the set - the operative half is "a plan that lowers to more than one
+journaled step cannot be reversed".
+
+So treat `rollback` as narrow: it is useful for unwinding a small, single-step
+change, and it is not a general undo. Plan the forward fix first, as above.
+
 ### What `rollback` requires, and why each one is there
 
 Every default is refuse-shaped, because a `down` is destructive by construction:
