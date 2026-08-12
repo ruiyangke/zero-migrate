@@ -8990,6 +8990,50 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F380 - REFUTED: MySQL sharing the SQLite guard is deliberate, and the NAME is what made it look wrong
+
+First of #13's eight leads: "guard_for mapping MySQL to the no-op SQLite guard". The mapping is real
+and the guard is a no-op, both as reported. It is still not a hole.
+
+    // crates/zero-migrate-guard/src/guard/mod.rs
+    SqlDialect::Postgres => Box::new(PgGuard::from_config(cfg.clone())),
+    SqlDialect::Sqlite => Box::new(SqliteDescriptorGuard::new()),
+    SqlDialect::Mysql => Box::new(SqliteDescriptorGuard::new()),
+
+and `SqliteDescriptorGuard::check` returns `Ok(GuardOutcome::default())` for any input.
+
+WHY IT IS NOT A HOLE. A string guard only earns its keep where raw SQL can arrive, and MySQL has no
+raw door. BOTH raw entry points refuse it before parsing:
+
+    // SqlGuard::check, and again in check_raw_island_sql_backstop
+    SqlDialect::Postgres => {}
+    SqlDialect::Sqlite => return Err(GuardError::SqliteRawSqlRejected),
+    SqlDialect::Mysql => return Err(GuardError::MysqlRawSqlRejected),
+
+So MySQL is descriptor-only exactly as SQLite is, and what reaches the descriptor guard has already
+passed the author boundary and the backend authorizer. Handing MySQL the PG guard instead would be
+actively wrong: `libpg_query` parses Postgres, so valid MySQL DDL would be rejected as a syntax
+error.
+
+WHAT IS ACTUALLY DEFECTIVE IS THE NAME AND THE DOCS, and it is not cosmetic - it is why this became
+a reported finding. `guard_for`'s doc comment enumerated the mapping as "Postgres -> PgGuard;
+SQLite -> SqliteDescriptorGuard" and did not mention MySQL at all, while the code has a third arm.
+A second comment said "the engine never selects SqlGuard for SQLite", also silent on MySQL. And the
+type is called `SqliteDescriptorGuard` while serving both. A reviewer meeting
+`SqlDialect::Mysql => Box::new(SqliteDescriptorGuard::new())` sees a type named for one dialect
+constructed for another, in a doc that lists two arms for three dialects, and reasonably calls it a
+copy-paste bug.
+
+FIXED at the three sites: `guard_for` now names all three arms and states why the two descriptor
+engines share a guard, pointing at the raw-rejection arm as the reason; the `SqlGuard::check`
+comment names MySQL alongside SQLite; and the type carries a line saying it serves both.
+
+NOT RENAMED. `SqliteDescriptorGuard` is `pub`, so `DescriptorOnlyGuard` or similar is a public-API
+break, and this repo already has two of those queued behind one versioning call (#60's trusted
+algebra, #220's registry pin). Adding a third silently would be the wrong way to spend that
+decision. The name is now documented as misleading at the point a reader meets it, which is the part
+that can be fixed without a version bump.
+
 ## F379 - a changed ANSWER described as a changed VARIANT, and a consumer built a plan on it
 
 zeroship read my F374 advisory as saying `UncoveredRegionNotRepresentable` is new in 8c254fa8, and
