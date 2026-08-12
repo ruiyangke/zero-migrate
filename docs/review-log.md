@@ -8990,6 +8990,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F417 - status and apply both answer in `mig_…`, and they are not the same ids
+
+FOUND by taking the front door and then checking the journal instead of trusting either reply.
+Measured on live PostgreSQL 18.4. The shipped type declarations are corrected; whether the CODE
+should change instead is a question for Ruiyang, below.
+
+### The measurement
+
+One `createTable`, applied through the host path, then the journal read directly and `status` asked
+about the same migration:
+
+```
+apply().applied                     ["mig_7n42DGM5RSBfCGYlS39M1y"]
+journal <meta>.schema_migrations    ["mig_7n42DGM5RSBfCGYlS39M1y"]   <- agrees with apply
+status().applied                    ["mig_7n42DGM5SrG4j3FrNuIVBe"]   <- in no journal row
+status().currentVersion              "mig_7n42DGM5SrG4j3FrNuIVBe"
+```
+
+`status` is right about the FACT - before the apply the same id sat in `pending`, after it moved to
+`applied` - so its reconciliation works. It is the STRING that belongs to a different namespace: a
+logical plan id, not the journal version.
+
+### Why this is worth an entry rather than a shrug
+
+Both namespaces are spelled `mig_…`. A consumer that logs `apply().applied` at deploy time and later
+greps `status().applied` for it finds nothing, gets no error, and has no way to tell from the values
+that they were never comparable. The failure is silent and looks like a missing migration.
+
+The two doc strings disagreed about which it was, which is how it stayed invisible:
+
+- `crates/zero-migrate-node/src/wire.rs:423` (generated into the shipped `index.d.ts`, so this is what
+  a TypeScript consumer reads on hover): "The highest net-applied version (`mig_…`)", "Net-applied
+  versions, in version order", "Supplied versions that are NOT net-applied".
+- `packages/zero-migrate-cli/src/index.ts:499`: "Top-level `applied`/`pending` values are logical plan
+  ids".
+
+The CLI was right and the shipped types were wrong, and the shipped types are the ones with
+autocomplete behind them.
+
+### What shipped
+
+`wire.rs` now says plan id where it means plan id, on the type and on all three fields, carries the
+measurement above so the next reader does not have to re-derive it, and points at `plans[]` and
+`history` for correlating with the journal. `index.d.ts` regenerates from it.
+
+### Open question for Ruiyang
+
+Documented, not decided: should `status` report the JOURNAL version instead? A caller correlating a
+deploy log with `status` wants the id `apply` returned, and today no field on `StatusReply` carries
+it. The counter-argument is that status reconciles SUPPLIED plans against the journal, so a plan that
+has never been applied has no journal version to report and the field would be empty exactly when
+`pending` is most interesting.
+
+A third option: keep both, and add the journal version to `plans[]` where a plan that IS applied has
+one. That looks right to me, and it is an API addition rather than a rename, so I have not built it
+on my own judgement.
+
 ## F416 - two documents called a shipped gate unbuilt, and the half that really is missing was never written down
 
 FOUND by taking the front door first, which is the correction F414 cost. Measured against live
