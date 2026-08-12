@@ -8990,6 +8990,35 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F383 - the sweep F382 left open: the comment renderer was the only site re-reading a raw qualifier
+
+F382 closed with "whether any other renderer re-reads a raw qualifier past `effective_schema` is a
+sweep I have not run". Run now, because the defect class is a renderer taking the author's casing
+instead of the corrected one, and one instance never proves the class is empty - the same reasoning
+that made F381 worth finishing.
+
+EVERY schema value the render path uses traces to one of three canonicalized sources:
+
+  - `eff_schema`, computed ONCE at `crates/zero-migrate/src/render/lower.rs:4287` as
+    `self.effective_schema(op)` and threaded to every renderer below it - the sequence renderer
+    takes it as a parameter and never consults the op, and the type/domain/enum renderers qualify
+    through it;
+  - `self.effective_schema(site.op)` called directly, at `:3379`, for a typed reference's target;
+  - a named-type definition's own `schema` field, which is SET from `eff_schema` at construction
+    (`:4371`, `:4433`, `:4458`, `:4664`), so the later reads at `:1794`, `:7300`, `:7341` are
+    reading an already-corrected value rather than raw input.
+
+The comment renderer was the one site that re-derived from the target, and it is fixed.
+
+OUT OF THE CLASS, stated so the sweep is not read as broader than it is: `collation.schema` at
+`:1095` is a collation's own qualifier carried from the descriptor. Collations legitimately live
+outside the project schema - `pg_catalog` among them - so it is not a confinement qualifier subject
+to project-schema canonicalization, and I am not claiming it is canonicalized. I am claiming it is a
+different question.
+
+SCOPE, plainly: this swept `render/lower.rs`, which is where `effective_schema` lives and where
+F382 was. Other render modules were not swept.
+
 ## F382 - a COMMENT rendered the author's casing, so the gate blessed `app` and the statement addressed `APP`
 
 Third of #13's leads - "quoted mixed-case schema folding onto a granted schema" - and the first of
