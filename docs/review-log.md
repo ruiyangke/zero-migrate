@@ -8990,6 +8990,47 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F382 - a COMMENT rendered the author's casing, so the gate blessed `app` and the statement addressed `APP`
+
+Third of #13's leads - "quoted mixed-case schema folding onto a granted schema" - and the first of
+the eight that is a live defect rather than a naming or docs problem.
+
+The hazard is documented, at `crates/zero-migrate-ir/src/policy.rs:58`: `SchemaScope::permits`
+matches case-INsensitively while the render seam quotes byte-verbatim, so a case-variant qualifier
+the gate accepts MUST be canonicalized before render "or the op would land in a DIFFERENT
+case-sensitive Postgres schema than the one the gate blessed". The doc even names the
+canonicalization, `IrAuthor::effective_schema`, which does exactly that.
+
+The COMMENT renderer bypassed it. Measured through `IrAuthor::lower` on a Confined project `app`:
+
+    canonical    = COMMENT ON TABLE "app"."accounts" IS 'hello'
+    case_variant = COMMENT ON TABLE "APP"."accounts" IS 'hello'
+    absent       = COMMENT ON TABLE "app"."accounts" IS 'hello'
+
+`"APP"` and `"app"` are different schemas in PostgreSQL. The confinement check at
+`render/lower.rs:4318` runs on the CANONICALIZED value, so it decided about `app` and admitted;
+the statement then addressed `APP`.
+
+WHY THIS ONE SLIPPED WHERE THE REST HOLD. `effective_schema` has five call sites and the other
+schema-bearing paths use it. `render_comment_target` re-read the target's own qualifier -
+`target.schema().unwrap_or(eff_schema)` - which looks like an ordinary fallback and is not: for a
+comment, `Op::schema()` IS `target.schema()` (`ir.rs:4043`), so the `eff_schema` handed in is
+already the canonicalized form of that very qualifier. The fallback re-derived, from the raw input,
+a value the caller had already corrected.
+
+FIXED by deleting the re-read: the renderer uses the `eff_schema` it is given. The comment at the
+site now says why re-reading the target is wrong rather than leaving the next reader to rediscover
+that the parameter is not merely a default.
+
+The RED asserts the case-variant renders IDENTICALLY to the canonical form, and the control pins
+both the canonical and absent forms to the exact statement - because a renderer that ignored the
+target's schema entirely would pass the first assertion while breaking every legitimately foreign
+qualifier.
+
+NOT AUDITED HERE, and worth saying: I checked the comment renderer because the lead pointed at
+schema folding, and found one site. Whether any other renderer re-reads a raw qualifier past
+`effective_schema` is a sweep I have not run.
+
 ## F381 - REFUTED AS CURRENT: `Single("")` permitting everything was real, and the repair is already in
 
 Second of #13's leads. Accurate about a defect that existed; wrong about the tree it exists in. The
