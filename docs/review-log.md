@@ -8990,6 +8990,69 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F374 - the trust boundary stops sampling and starts proving
+
+F373's false-accept, fixed. `check_grant_key`'s two witness-sampling arms are gone; each RAISING
+draft rule is now proved against the charter layer stack symbolically, and no object is ever
+sampled.
+
+WHY ONE RULE AT A TIME IS ENOUGH, which is the whole reason this needs no arrangement of overlapping
+scopes. The draft's value at an object is the JOIN of every draft rule covering it, and a join is a
+least upper bound:
+
+    join(v_i) <= c(o)   iff   every covering v_i <= c(o)
+
+Forward because each `v_i <= join(v_i)`; backward because a `c(o)` above every `v_i` is above their
+least upper bound. So overlapping draft rules need no reconciling at all. Codex supplied this after
+refuting the repair I had in mind - partitioning by charter AND draft scopes - with a three-rule
+counterexample: `D1 meet D2` is not an atom, so it can hold both a point `D3` covers and one it does
+not.
+
+THE SHAPE. Per raising draft rule, walk the layers top-first. A layer must lift the rule's value
+wherever it covers; everything that layer covers is then retired, INCLUDING rules at or below
+default, which grant nothing but still decide, because the query stops at the first covering layer.
+Whatever no layer raises sits at the knob default and escalates.
+
+MY FIRST IMPLEMENTATION WAS A FALSE REJECT, caught by the differential oracle rather than by me. It
+narrowed a residual layer by layer, which forced `All` minus `app_*` - a difference the glob algebra
+cannot express:
+
+    FALSE REJECT over a layered charter (should have composed)!
+     base=[sql.raw@scope = "all"=true]
+     over=[sql.raw@scope = { include = ["app_*"] }=true]
+     draft=[sql.raw@scope = "all"=true]
+     err=UncoveredRegionNotRepresentable { key: KnobKey("sql.raw") }
+
+A base granting everything and a layer re-granting a sub-scope at the same value is as ordinary as a
+charter gets. The fix was to stop folding: carry the already-decided scopes as a LIST and subtract
+only where a rule actually falls below the draft's value. A layer whose every covering rule
+satisfies now costs no subtraction at all, so the unrepresentable case is never reached for it.
+That is the difference between conservative and useless, and the oracle is what told them apart.
+
+MUTATION-PROVEN TWICE, because the fix has two independent halves.
+
+  - Never treat a covering rule as falling short: the entry-point masked-hole test fails AND
+    `later_layer_cannot_re_escalate_past_an_intermediate_narrowing` fails. Two directions on the
+    masking half.
+  - Prove only the first raising draft rule: both permutation tests fail, the control passes, and
+    the 49-test oracle suite does NOT catch it. The new tests are the sole witness of the per-rule
+    proof.
+
+COVERAGE ADDED, matching the regression set #219 recorded: the Bool charter-side mask at the shipped
+entry point (`crates/zero-migrate/tests/charter_root_bound.rs`), and both write orders of the
+draft-side escalation, a two-compliant-rule control, and a three-way overlap
+(`crates/zero-migrate-policy/tests/admit_permutation.rs`).
+
+TWO FUNCTIONS DELETED. `layered_value_at` and `layered_grant_rule_scopes` existed only to serve the
+sampling arms and had zero call sites once those were gone. `EffectivePolicy::grants` implements the
+same fall-through inline, so nothing lost a behaviour. Removed rather than left as the
+no-caller shape this review keeps filing against.
+
+THE COST, stated because codex named it as its own strongest objection and it is real: with an
+overapproximating subtraction this refuses some policies a perfect checker would admit. The full
+gate is green at 120 targets / 2538 passed, so nothing in the suite hits that today, but a future
+false reject is the expected failure mode and should be read as one rather than as a new escalation.
+
 ## F373 - a live false-accept at the trust boundary: an untrusted draft recovers authority the charter removed
 
 #12's "admission witness gaps" finding. Real, and it is an escalation across the trust boundary the
