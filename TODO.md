@@ -87,11 +87,14 @@ Working notes; not staged.
   `backupAcknowledged`, the complete-set requirement), and keeps the roll-forward
   plus backup preference ahead of it. An authored `down()` is still refused at build
   time, because the inverse is synthesised from the recorded ops.
-- [ ] Measure and document what a reconstructed `down` does to DATA. The operations
-  guide deliberately says this is unmeasured rather than guessing. A rollback of a
-  `dropTable` presumably returns an empty table, but nothing has run it end to end,
-  and an operator planning a rollback needs the answer more than they need the
-  schema story.
+- [x] Measure and document what a reconstructed `down` does to DATA. Measured against
+  live PostgreSQL and written into the operations guide: unwinding an additive
+  migration keeps surviving rows; unwinding a destructive one is REFUSED as
+  irreversible with a roll-forward recommendation; and `force` +
+  `backupAcknowledged` skips the irreversible migration and reports it in
+  `skippedIrreversible` rather than fabricating a reverse. The guess this item was
+  filed with - that a rollback would hand back an empty column or table as if it
+  were a restore - was wrong, and the engine is safer than the guess.
 
 ## Ecosystem and maturity (npm track, in progress)
 

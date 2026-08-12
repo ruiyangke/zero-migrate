@@ -615,9 +615,40 @@ Every default is refuse-shaped, because a `down` is destructive by construction:
 The reply names what it unwound (`rolledBack`) and what it declined to
 (`skippedIrreversible`).
 
-What a reconstructed `down` does to DATA is not documented here because it is not
-yet measured end to end. Do not assume an unwind restores rows a forward migration
-removed; treat the backup as the data plan, which is what step 2 above is for.
+### What a rollback does to your data
+
+Measured against live PostgreSQL 18. The short version: a rollback removes what a
+migration added, and refuses to pretend it can bring back what one removed.
+
+**Unwinding an additive migration keeps the surviving rows.** A migration that adds
+a column, rolled back one step: the column goes, and every row is otherwise intact.
+
+```
+after apply     cols=[id, note, extra]  rows=[{id: 1, note: "original"}]
+after rollback  cols=[id, note]         rows=[{id: 1, note: "original"}]
+```
+
+**Unwinding a destructive migration is refused, by default, as irreversible.** A
+migration that drops a column has no reverse that could restore its values, and the
+engine says so rather than re-adding an empty column that looks like a restore:
+
+```
+migration mig_… ('drop_column_acct_secret') is irreversible (down: None);
+rollback refuses by default. Prefer ROLL-FORWARD: author a compensating migration.
+```
+
+**The override skips, it does not fabricate.** `force` together with
+`backupAcknowledged` does not invent a reverse for an irreversible migration: it
+crosses it, reports it in `skippedIrreversible`, and leaves that migration's effect
+in place.
+
+```
+{ "rolledBack": [], "skippedIrreversible": ["mig_…"] }
+after rollback  cols=[id]   -- unchanged; the dropped column did NOT come back
+```
+
+So a rollback is a schema instrument, not a data one. Dropped values come back from
+a backup or not at all, which is what step 2 above is for.
 
 ## Failure playbook
 
