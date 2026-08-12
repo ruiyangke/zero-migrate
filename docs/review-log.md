@@ -8990,6 +8990,73 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F393 - #79 half (A) shipped: an existence-guard probe is authorized before it reads a catalog
+
+SHIPPED 987eff4b. `Migration::existence_guard` carries the schema the probe snapshots, and the
+executor read whatever it named. That field is publicly constructible AND excluded from the
+per-migration checksum, so the schema is forgeable by a direct embedder call, and the catalog read
+happens before the guard verdict decides anything.
+
+WHY AN AUTHORIZATION AND NOT AN EQUALITY TEST, which is the part worth keeping: comparing the probe
+against `cfg.project_schema` would have been the obvious repair and is wrong. `render/renderer.rs`
+marks `Capability::CrossSchemaDdl` supported on MySQL, so a guard naming another schema is
+deliberate. The check is `schema_scope().permits(probe_schema)` and the snapshot then reads exactly
+`probe.schema()`; the trait wrappers still pass `cfg.project_schema`, so ordinary drift and status
+are untouched.
+
+THE AGENT'S WORK CONTAINED A REGRESSION THAT ONLY THE GATE FOUND. The codex job was killed before it
+ran its own verification and its report was lost entirely (piped through `tail`, never flushed), so
+there was no evidence to inspect. Running the gate myself produced:
+
+    thread 'a_guarded_drop_keeps_no_inverse' panicked at
+    crates/zero-migrate/tests/drop_view_rollback_sqlite.rs:188:10:
+    apply the authored plan on SQLite: Plain(Apply(Backend("sqlite existence-guard snapshot failed:
+    drift backend error: sqlite migration statement failed:
+    no such table: drop_view_rollback.sqlite_master")))
+
+The refactor fed SQLite's snapshot a LOGICAL PROJECT SCHEMA where that parameter names an ATTACHED
+DATABASE - it reaches the catalog as `PRAGMA <db>.table_info(...)` and `<db>.sqlite_master`, and the
+only attached database is `main`, which is why the other two SQLite call sites pass exactly that.
+Two namespaces sharing the word "schema". SQLite keeps snapshotting `main` and the authorization
+still runs on the probe's value; the distinction is now recorded at the site so it does not get
+"corrected" back.
+
+RED PROVEN, NOT ASSERTED, since nothing about the killed job's own testing could be trusted. With
+the authorization stubbed behind a temporary env-gated early return that left every export intact:
+
+    test ...existence_guard_probe_outside_effective_scope_is_refused_before_snapshot ... FAILED
+    panicked at crates/zero-migrate/src/apply/backend/postgres/mod.rs:1131:22:
+    expected ExistenceGuardSchemaOutOfScope for the forged probe, got: Ok(false)
+    test ...existence_guard_probe_in_allowlist_snapshots_its_non_project_schema ... ok
+
+`Ok(false)` is the forged probe ACCEPTED AND APPLIED - the defect itself. The control passing in the
+same run is what rules out a fix that is green because it refuses everything; that control asserts
+the snapshot binds `reporting` and NOT `proj_x`, so it also catches a fix that silently reads the
+project schema instead.
+
+ONE OF MY OWN OBJECTIONS WAS WRONG. I flagged `is_some_and` as a bug because it refuses when
+`schema_scope()` is `None`. `zero-migrate-ir/src/policy.rs:46-49` documents `Unconfined` as
+"deliberately distinct from `None` at public load / validate APIs so an omitted capability defaults
+to least privilege". Refusing on `None` is the stated design. Read the field's own doc before calling
+an exclusion a defect - the same lesson as F338.
+
+A REAL BEHAVIOUR CHANGE FOR ONE CONFIG CLASS, WHICH IS WHY A CONSUMER WAS TOLD. `schema_scope()`
+(`zero-migrate-guard/src/guard/mod.rs:250`) derives the permitted set from
+`grant_literal_schema_includes(schema.cross_schema)`, and with no such grant the owned list is empty
+and it returns `Single(String::new())` - "the degenerate default". `SchemaScope::permits`
+(`policy.rs:67`) matches `Single(s)` by equality, so `Single("")` permits NOTHING, including a probe
+naming the project's own schema. A charter that omits a `schema.cross_schema` grant therefore moves
+from "every guarded migration runs" to "every guarded migration is refused".
+
+The test fixtures all declare that grant - `no_inject` emits `key = "schema.cross_schema"` with
+`scope = { include = [<schema>] }` - which is why the suite is green and why this class is NOT
+covered. VERIFIED by reading the three functions; NOT verified by composing a charter that omits the
+grant and running it. Sent as ZERO-MIGRATE-2026-08-12-007 rather than left for a consumer to
+discover, since appbase embeds the engine crate directly.
+
+fmt 0, clippy 0; 121 targets / 2542 passed / 0 failed / 1 ignored, +2 over the 2540 baseline for the
+two new tests, 0 live-database skip banners.
+
 ## F392 - CORRECTION to F391, and the comment that would have hidden it
 
 The codex half of F391's split returned and agreed on the load-bearing point, with better evidence
