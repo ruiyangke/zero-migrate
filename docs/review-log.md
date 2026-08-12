@@ -8990,6 +8990,46 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F390 - #13 closed: the deploy outcome carries no pending-rename obligation, filed as #222
+
+Last of #13's eight leads, and the ticket closes with it.
+
+VERIFIED: `AggregateOutcome` (`crates/zero-migrate/src/engine.rs:266`) carries `applied`, `skipped`,
+`recovered` and nothing else; `ApplyOutcome` (`crates/zero-migrate/src/apply/executor.rs:95`) carries
+the same three. So a deploy that performed a PostgreSQL online rename returns green with no signal
+that a `pendingVersion` contract is outstanding, though `docs/policy.md` states a later apply or
+abort resolution is owed and carries its OWN approval decision.
+
+THE OBLIGATION IS NOT LOST, which is what makes this a judgement call rather than a defect.
+`RollbackError::PendingContractOutstanding` (`executor.rs:1995`) already refuses to roll back any
+version inside an outstanding rename, naming the version, table and contract - proof the state is
+durable and derivable whenever it matters. #222 carries both readings: a summary type is not a
+to-do list, versus the F332 seam shape where the state is knowable and nothing says so where the
+human is standing. Adding a field breaks two public structs, so it joins #60, #220 and #221.
+
+I ALSO DID NOT SETTLE THE OTHER HALF of the lead as filed - whether an online rename interrupted
+WITHIN the same deploy recovers - and said so in the ticket. It needs a live-PG reproduction, not a
+read, and claiming the whole lead closed on the half I checked would be the error this log keeps
+recording.
+
+#13's TALLY, eight leads:
+
+    guard_for maps MySQL to the no-op guard      F380  naming and docs; the code is right
+    SchemaScope::Single("") permits everything   F381  real, already repaired, dedup verified complete
+    quoted mixed-case schema folding             F382  LIVE - fixed adc604f5, plus the F383 sweep
+    DO LANGUAGE skips the language check         F384  real, already repaired, evasion pinned
+    RENAME TO ignores rename_type                F385  real, already repaired, both directions pinned
+    PG recovery ignores the marker checksum      F386  compared upstream of every backend, tested
+    MySQL repeatables pass had_inflight=false    F387  real, already repaired; coverage limited by
+                                                       the missing MySQL harness
+    same-deploy rename recovery / obligation     F390  outcome-type fact verified, filed as #222;
+                                                       the recovery half untraced
+
+ONE live defect in eight, and it came from the RENDER layer rather than the guard or apply layers
+the ticket named. Five leads described real escalations that had already been fixed - each closed
+in minutes BECAUSE the repair had left an account of the bug attached to it. That is the single most
+useful thing this log does, observed from the receiving end five times in one ticket.
+
 ## F389 - CORRECTION to F388: the op lane does build a FieldDescriptor, and hardcodes the keyId
 
 zeroship checked my four cited sites against their own copy before believing them, found three
