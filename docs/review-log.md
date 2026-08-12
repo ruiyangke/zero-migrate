@@ -8990,6 +8990,41 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F384 - REFUTED AS CURRENT: `DO LANGUAGE` is checked, on two independent layers, with the evasion pinned
+
+Fourth of #13's leads. Real once, repaired, and this time the repair left both an account AND a
+test - including the variant an attacker would reach for next.
+
+TWO LAYERS, and they answer different questions:
+
+  - Under a SCOPED (non-⊤) `sql.raw` grant, `DO` never gets as far as its language.
+    `check_scoped_raw_sql` (`crates/zero-migrate-guard/src/guard/mod.rs:1810`) denies
+    `CreateFunctionStmt`, `CreateTrigStmt`, `DoStmt` and `AlterFunctionStmt` outright as opaque
+    bodies: the outer parse cannot see what the body touches, so it is unattributable to the scope.
+  - Under a ⊤-scoped grant `DO` is reachable, and the `DoStmt` arm at `:2282` reads the language and
+    refuses an untrusted one. Its comment records what it fixed: "Without it,
+    `DO LANGUAGE plpythonu $$ import os $$` was admitted while the function spelling of the same
+    body was denied as RCE."
+
+VERIFIED BY RUNNING, not by reading the comment - which is the distinction this session has paid for
+repeatedly. `crates/zero-migrate-guard/tests/guard_smoke.rs:218`,
+`an_anonymous_block_in_an_untrusted_language_is_denied`:
+
+    cargo test -p zero-migrate-guard --test guard_smoke an_anonymous_block
+    test an_anonymous_block_in_an_untrusted_language_is_denied ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out
+
+It asserts three inputs - `plpythonu`, `plperlu`, and `"plpythonu"` QUOTED - plus the control that an
+absent `LANGUAGE` is plpgsql and stays allowed. The quoted case is the one worth noticing: a
+language check that folded only bare identifiers would pass the first two and admit the third, and
+someone thought to pin it.
+
+THE PATTERN ACROSS #13 SO FAR, worth naming at the halfway mark. Four leads settled: one was a
+naming and docs defect that made correct code look broken (F380), two were real defects already
+repaired with the account attached (F381, F384), and one was live (F382). The two already-repaired
+ones each took minutes precisely BECAUSE the repair recorded what it fixed. That is the same
+practice this log exists for, observed working from the other side.
+
 ## F383 - the sweep F382 left open: the comment renderer was the only site re-reading a raw qualifier
 
 F382 closed with "whether any other renderer re-reads a raw qualifier past `effective_schema` is a
