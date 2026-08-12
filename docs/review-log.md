@@ -8990,6 +8990,107 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F409 - #222 measured live: an interrupted rename cannot be retried, and that is the cost of an absence the code already declares
+
+MEASUREMENT plus coverage, shipped as 2f1e5259. No production code changed.
+
+### Correcting my own framing before it hardened
+
+I first wrote this up as "a real defect". That was wrong, and the correction matters more than the
+finding. `crates/zero-migrate/src/apply/journal.rs:612-622` already says, in shipped source:
+
+> THIS CRATE SHIPS THE DURABLE PRIMITIVES AND NO DRIVER. The table, the scoped write, the promotion,
+> the reconcile append and the resume query all exist below and on the backend trait, but nothing in
+> this workspace calls them: `DeployRecoveryScope` is never constructed, no `deploy_id` is ever
+> generated, and the only entry point that could pass a scope hardcodes `None`. So no marker is
+> written today and none can be promoted or recovered.
+
+The empty `schema_deploy_recovery` I observed is exactly what that comment predicts. So nothing was
+discovered about the ENGINE. What was genuinely unmeasured - and is the contribution - is the
+operator-visible COST of that declared absence.
+
+### What an operator actually gets, live on PostgreSQL 18.4
+
+Interrupt a deploy after a rename's expand half and, verified by running rather than reading:
+
+- every expand migration journals `Completed`;
+- `schema_pending_contracts` holds one `pending` row carrying pending_version and plan_version;
+- `schema_deploy_recovery` is EMPTY;
+- both source and destination columns are alive, with one managed trigger;
+- RETRYING THE SAME DEPLOY CANNOT PROGRESS. It fails during guarded lowering with
+  `renameColumn "same_deploy_users"."email" -> "email_address": the target column "email_address"
+  already exists on the live table`;
+- the obligation is still derivable from the journal;
+- a same-table DDL is refused with `EngineError::PendingContract` BEFORE any mutation;
+- rollback is refused with `RollbackError::PendingContractOutstanding` naming version, table and
+  plan version;
+- an operator CAN reach a resolved state through explicit `Resolution::Applied`, which drops the
+  source and retains the destination.
+
+So the table is fail-closed and repairable, NOT corrupt. A human with the runbook gets out. A retry
+alone does not.
+
+### The commit shape was a decision, and it had precedent
+
+The reproduction failed only with `ZERO_MIGRATE_TEST_PG_URL` set, and CI exports it, so committing
+it as written would have turned CI red. Four shapes were on the table; the tree settled it.
+
+`crates/zero-migrate/tests/replace_view_rollback_sqlite.rs:15-23` already states the convention:
+
+> TWO ARMS, and the pair is the point: what SHIPS: a replace carries no `down`, so a rollback is
+> REFUSED. Safety, not capability [...] what is AIMED AT: a replace restores the previous body.
+> Ignored [...] Keeping both means the shipped behaviour is pinned AND the gap it leaves is legible,
+> rather than the refusal reading as the finished answer.
+
+That file's `:211` holds the tree's ONLY `#[ignore]`, formatted
+`#[ignore = "aspirational: ... today the replace is refused (#209)"]`, and `sqlite_goodies.rs:327`
+records the lifecycle working - "pre-fix this was `#[ignore]`d" - so an ignored arm here is a
+tracked obligation rather than a grave.
+
+Shipped as that pair: `interrupted_online_rename_is_guarded_until_explicitly_resolved` passes,
+`interrupted_online_rename_is_automatically_recovered_on_same_deploy_retry` carries
+`#[ignore = "aspirational: a deploy-recovery driver would make this pass; today no driver exists so
+a retry cannot progress (#222)"]`.
+
+REJECTED, with reasons rather than taste. Log-only loses executable coverage of the safety
+properties, which are the whole reason this is survivable. Pinning current behaviour green has NO
+precedent anywhere in the tree, and the endorsement risk is real: a future maintainer meeting a green
+assertion that `schema_deploy_recovery` is empty could reasonably read a missing capability as
+contractual.
+
+The second opinion contributed the sharpest constraint, which I had not drawn: the refusal
+precedents this repo ships - an irreversible dropped sequence, a refused view replace, a refused
+function replace - are all INTENTIONALLY SELECTED typed refusals raised before an unsafe mutation.
+The retry's guarded-lowering collision is incidental fallout, not a designed refusal. So the safety
+arm may assert `PendingContract` and `PendingContractOutstanding`, and must NOT assert the collision
+message as an expected outcome. It does not.
+
+### Verified by me rather than accepted
+
+- Reproduced the failure myself before any restructuring: PID 3358225 against the agent's 3293108,
+  same panic, `RC=101`. With the DSN unset it prints the skip banner and reports `1 passed`.
+- Checked the passing arm still has teeth, because "make it green" is the failure mode here: both
+  refusal matches end in `other => panic!("expected the typed pending-contract refusal, got
+  {other:?}")` and both call sites use `expect_err`, so neither an `Ok` nor a different variant
+  passes.
+- Confirmed only the test file changed - no production code, no public type.
+- Gate: fmt 0, clippy 0, test 0. 125 targets / 2585 passed / 0 failed / 2 ignored, zero
+  "LIVE-DATABASE COVERAGE SKIPPED" banners under `ZERO_MIGRATE_REQUIRE_LIVE_DB=1`. 370 added lines,
+  zero non-ASCII. The 2 ignored are the pre-existing view-replace arm and the new one. This gate
+  omitted `zero-migrate-node`, which is why the target count is 125 rather than the 133 of the last
+  full run; no addon code changed.
+
+### Still open, and better informed than when filed
+
+The original #222 question - whether `AggregateOutcome` (engine.rs:266) and `ApplyOutcome`
+(apply/executor.rs:95) should surface an outstanding contract, by doc or by field - is untouched.
+Adding a field breaks two public structs and belongs with #60, #220(d) and #221 in the versioning
+conversation. The measurement strengthens the caller-signal argument: since a retry cannot self-heal,
+a deploy returning green while owing a contract is the moment the operator most needs to be told.
+
+NOT CHECKED: a literal process kill or host restart (the injected-apply seam was used); live Node or
+CLI retry behaviour; `Resolution::Aborted`; PostgreSQL versions other than 18.4.
+
 ## F408 - #79 built: the MySQL guard is reachable, and the decision it cannot make is refused rather than guessed
 
 BUILD for #79, shipped as 2e4c21ee (wiring) and 6386a570 (the truth surfaces that said this could
