@@ -594,6 +594,23 @@ after resolution. Do not use this workflow to rename the `id` primary key.
 Dependencies on the source can block resolution, so audit them before starting
 the rollout.
 
+That describes the destination **column**, not the **writes**. Until the rename
+resolves, the dual-write trigger copies every write to the source, so the
+source's constraints still reject writes made through the destination name. A
+destination column that reads as nullable will still refuse a `NULL` if the
+source is `NOT NULL`, and a destination with no unique index will still refuse a
+duplicate if the source has one — and PostgreSQL names the **source** column in
+the error, which the application has usually stopped referencing by then:
+
+```text
+null value in column "display_name" of relation "users" violates not-null constraint
+duplicate key value violates unique constraint "users_display_name_key"
+```
+
+Plan the cutover accordingly: an application may read and write the new name
+during coexistence, but it cannot write values the old column would have
+rejected until the rename is resolved and the source is gone.
+
 Complete the rename with `resolvePending()`:
 
 ```ts
