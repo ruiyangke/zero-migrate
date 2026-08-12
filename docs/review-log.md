@@ -8990,6 +8990,68 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F399 - a dropped trigger rolls back, keyed by table so two tables can share a trigger name
+
+SHIPPED 3d69039e, #23 item (c) for triggers. `dropTrigger` had no inverse, so a rollback refused
+with `is irreversible (down: None); rollback refuses by default` and the trigger stayed dropped.
+`fold_ops_onto` now retains each authored `CreateTrigger` as a `TriggerSnapshot`, and lowering
+synthesises the restoring `CREATE TRIGGER` from that record. The live catalog is not consulted,
+because lowering runs on the preview path with no database.
+
+### The key is (schema, table, name), and the dialects disagree about why
+
+A PostgreSQL trigger name is unique within its TABLE, not its schema, so `orders` and `invoices` can
+each carry an `audit` trigger. Keying by `(schema, name)` would let one displace the other in the
+fold and hand the rollback the wrong trigger on the wrong table - a wrong answer that reports
+success. `positive_same_named_triggers_on_two_tables_restore_only_the_dropped_one` pins it.
+
+`ir.rs:3721-3722` documents the asymmetry on the type itself: `DROP TRIGGER [IF EXISTS] <name> ON
+<table>` on Postgres against `DROP TRIGGER [IF EXISTS] <name>` on SQLite. One key shape serves both,
+and the reason is written at `TriggerKey`: SQLite requires trigger names unique across the schema,
+which is STRICTER, so a valid SQLite history can never hold two keys differing only by table. The
+table is redundant there and load-bearing on PostgreSQL. Retaining it loses nothing either way.
+
+### Eligibility reads the op's own field, not the guard accessor
+
+`Op::existence_guard()` returns `None` here because a trigger's guard is a native `IF EXISTS`
+clause rather than a catalog probe. Gating on `existence_guard().is_some()` - the sibling ops'
+pattern - would treat every drop as guarded and synthesise nothing. The arm reads
+`DropTrigger::if_exists` directly, and `Some(false)` is an explicitly UNGUARDED drop that IS
+eligible. `native_trigger_drop_guard_is_not_execution_evidence` in the addon pins all three of
+`Some(true)`, `Some(false)` and `None`.
+
+### Corrected, not left standing
+
+`op_may_have_been_skipped` carried "it returns `None` for every vendor op". Triggers are
+CROSS-DIALECT CORE, not vendor, so this change made that sentence false; it now says "ops whose
+guard is a native `IF [NOT] EXISTS` clause", which is the property that actually matters. The
+fold's module header claimed function definitions were the only history-only rollback metadata;
+it now names triggers alongside them.
+
+### Verification
+
+Mutation-proven with both databases exported. With the new lowering arm returning `None` behind a
+temporary env gate - which keeps every export intact, so the test file still compiles - all four
+positive tests fail and both negative controls keep passing, 2 passed / 4 failed. The live case
+fails through the real engine refusal, not an assertion shortcut:
+
+    thread 'positive_rolling_back_a_dropped_trigger_restores_its_definition' panicked at
+    crates/zero-migrate/tests/drop_trigger_rollback_pg.rs:461:32:
+    rolling back the trigger drop must succeed: migration mig_7n42DGM5ObjO6zAoOn4B0S
+    ('drop_trigger_audit_payload_events') is irreversible (down: None); rollback refuses by default.
+
+The live test RAN rather than skipping, proven by differential rather than assumed: without
+`ZERO_MIGRATE_TEST_PG_URL` the binary prints the `LIVE-DATABASE COVERAGE SKIPPED` banner and
+finishes in 0.02s; with it exported there is no banner and it takes 0.30s.
+
+fmt 0, clippy 0, doc 0; 123 targets / 2561 passed / 0 failed / 1 ignored, zero skip banners, up from
+122 / 2555 by exactly the new file and its six tests. The addon crate is green at 51 lib tests via
+`cargo test -p zero-migrate-node --no-default-features`, which is what CI runs (ci.yml:79).
+`--features napi` cannot link its test binaries - `undefined symbol: napi_create_function` and
+peers - because those symbols exist only inside Node. That is pre-existing and unrelated, already
+recorded under F355, and my first gate run reported it as a failure only because I used the wrong
+command.
+
 ## F398 - a dropped function rolls back, keyed so an overload cannot restore the wrong body
 
 SHIPPED 65265926, #23 item (c) for functions. Triggers and policies still have no snapshot type;
