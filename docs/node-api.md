@@ -834,6 +834,18 @@ An aborted plan does not satisfy `dependsOn`. A supplied dependent plan remains
 `blocked`, and apply refuses to run it. To continue after an abort, author a new
 replacement migration and update the dependency to that new migration identity.
 
+`dependsOn` is an IR-level field, and **a JavaScript migration module cannot set
+it**. A module exports `up`, `down`, and `name` only; a `dependsOn` property on
+the module, on its `default` export, or spelled `depends_on` is ignored, and the
+envelope the host builds carries no dependency list. The field is reachable from
+Rust embedders through `IrAuthor` and from hand-authored IR envelopes.
+
+For JavaScript-authored migrations this means the paragraph above describes a
+state you cannot reach: with no dependency to declare, no plan is ever `blocked`
+on an aborted one. After an abort, author a new replacement migration — there is
+no dependency to repoint. The `blocked` and `unknownDependency` plan states, and
+the ordering guarantees `dependsOn` provides, apply to IR-level authoring.
+
 When a backfill has saved at least one progress checkpoint but has no final
 journal completion event, its step state is `inflight` and the containing plan
 is `partial`. A progress checksum that no longer matches the supplied migration
