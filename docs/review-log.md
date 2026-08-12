@@ -8990,6 +8990,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F405 - F404 was discharged at the wrong granularity, and the probe wiring stopped rather than shipping the defect
+
+CORRECTION to F404, found by the dispatched build refusing to proceed. No code change: the wiring
+was NOT shipped, deliberately.
+
+### What happened
+
+I dispatched the MySQL existence-probe wiring in a slice that fails closed on anything needing
+column-type equality, with an instruction to stop and report rather than restructure if the slice
+did not hold. It stopped, and it was right to.
+
+### The defect it found, verified here rather than taken from the report
+
+A guarded `dropConstraint` is authorable on MySQL - `dialect_table.rs:123` marks `dropConstraint`
+base Portable for all three dialects - and lowering emits a `GuardProbe::Constraint` for it. The
+decision function searches ONE field:
+
+    crates/zero-migrate/src/render/existence_probe.rs:797-800
+        let find = |candidate: &str| {
+            live.tables
+                .get(table)
+                .and_then(|t| t.constraints.iter().find(|c| c.name == candidate))
+        };
+
+and an `IfExists` miss returns `SatisfiedNoop` (:811-817). But MySQL's snapshot only pushes into
+`table.constraints` from the PRIMARY KEY branch:
+
+    crates/zero-migrate/src/apply/backend/mysql/drift_sql.rs:401-433
+        for ((table_name, catalog_name), parts) in indexes {
+            ...
+            if is_primary {
+                ...
+                table.constraints.push(ConstraintSnapshot { kind: "PRIMARY KEY", ... });
+            }
+            table.indexes.push(IndexSnapshot { ... });   // <- named UNIQUE lands ONLY here
+
+CHECK constraints also reach `constraints` (:242 gated on server >= 8.0.16, :612). A named UNIQUE
+does not. So wiring the probe would make a guarded `dropConstraint` naming a live UNIQUE read as
+absent, resolve SatisfiedNoop, skip the DROP and journal completed - the views hazard, third
+instance.
+
+INERT TODAY, and that distinction matters: `decide_constraint` has no MySQL call site, so nothing
+currently reads this. Drift is unaffected because both sides of a MySQL comparison agree about where
+a UNIQUE lives. It is a defect-in-waiting that the wiring would activate, which is exactly why it had
+to be found before the wiring and not after.
+
+### Why F404 missed it, and the rule that would have caught it
+
+F404 asked which of the five maps `existence_probe.rs` reads are populated by the MySQL snapshot,
+found `tables` and `views` populated and the other three legitimately empty, and called the
+prerequisite discharged. That audit was at the wrong granularity. `decide_constraint` does not index
+`live.tables` - it indexes `live.tables[table].constraints`, a NESTED field inside a map I counted as
+populated. A populated map is not a populated field.
+
+The rule, stated so the next audit is done at the right level: check the granularity the READER
+indexes at, not the granularity the snapshot type is declared at. F404's own method note - read what
+the op emits, not what the disposition table calls it - was necessary and insufficient; this is its
+companion.
+
+### Status
+
+F404's three conclusions stand on their own terms: `sequences`, `named_types` and `partitions` are
+correctly empty on MySQL for the three reasons given. What does not stand is the headline that the
+prerequisite is therefore DISCHARGED. It is not. Filed as #227, and #79 is blocked on it exactly as
+it was previously blocked on views.
+
 ## F404 - #79's snapshot prerequisite is discharged, and two of the three gaps I named were my own error
 
 MEASUREMENT, no code change. #79 could not proceed until the MySQL snapshot was known to answer the
