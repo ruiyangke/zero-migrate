@@ -8990,6 +8990,89 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F369 - `extends` let two consistent documents assemble a contradiction neither one holds
+
+The loader refuses a document that injects a column an overlapping `[[validate]]` forbids
+(`SelfContradictoryInjectValidate`). `extends` merges a trusted base's rules into the extending
+document, and the check ran BEFORE that merge, so the pair could arrive split across two files.
+
+RED, on `crates/zero-migrate-policy/tests/loader.rs`. Base forbids, child injects, neither file
+carries both rules:
+
+    base:   [[validate]] scope = { include = ["app_*"] }
+            predicate = { kind = "forbidden_columns", names = ["tenant_id"] }
+
+    child:  extends = "base"
+            [[inject]] scope = { include = ["app_*"] }
+            columns = [ { name = "tenant_id", type = "text", nullable = false } ]
+
+`parse_toml_with_catalog` returned `Ok`, and the returned document is the whole finding:
+
+    called `Result::unwrap_err()` on an `Ok` value: PolicyDoc { policy_version: 1, rules: [
+      Rule { scope: Of { include: [app_*.*] }, kind: Validate { pred: ForbiddenColumns
+             { names: ["tenant_id"] } } },
+      Rule { scope: Of { include: [app_*.*] }, kind: Inject { spec: InjectSpec { columns:
+             [InjectColumn { name: "tenant_id", ty: "text", nullable: false, ... }] ... } } } ] }
+
+One document, both rules, identical scope, accepted.
+
+NOTHING DOWNSTREAM CATCHES IT, and that is why the check has to move rather than be duplicated. The
+merge produces ONE document, so it is one layer. Both composition gates that read
+`forbidden_columns` - `CharterInjectValidateContradiction` and
+`DraftValidateContradictsCharterInject` - compare a charter against a SEPARATE draft layer, so a
+collision inside a single layer is invisible to them.
+
+FIX: `check_self_contradiction` moved from before the `extends` merge to after it, in
+`crates/zero-migrate-policy/src/document.rs`. It now reads `this.rules`, the merged set. A base is
+itself resolved through the same function, so its own rules were already checked; a document with no
+`extends` is unaffected, since `this.rules` is then exactly the set that used to be passed.
+
+MUTATION-PROVEN, and the result is the reason this is worth a commit. With the check put back
+before the merge, `cargo test -p zero-migrate-policy --test loader` reports:
+
+    test result: FAILED. 51 passed; 1 failed
+
+One failure, and it is the new test. Fifty-one existing loader tests do not witness the gap.
+
+REACHABILITY, stated plainly. `extends` needs a `ProfileCatalog`, and the engine never supplies
+one: `table_shape.rs:738` loads the root through `RootCharter::parse_toml` and `:773` loads later
+layers through `PolicyDoc::parse_toml`, neither of which takes a catalog. A trusted `extends` with
+no catalog is `ExtendsUnknownBase`, and an untrusted one is `ExtendsForbiddenInDraft`. So this is a
+defect on `RootCharter::parse_toml_with_catalog` and `TrustedDoc::register_catalog_entry`, both
+public and neither called by shipped code - the same family as the trusted algebra #60 is deciding
+about. #12 predicted exactly this shape when it warned that several findings aim at the
+publicly-constructible API rather than the loader. It is still worth fixing: the gate is cheap, the
+API is exported, and a host that assembles a catalog gets the refusal the single-file author
+already gets.
+
+## F368 - a deny-by-default test that asserted only that the default parses
+
+`crates/zero-migrate-ir/src/policy_registry.rs`. Three tests appeared to guard the registry's
+defaults. Reading them rather than counting them:
+
+  - `every_grant_default_is_valid_and_denies` walks the WHOLE registry, and asserted only
+    `def.default.validate_for(&def.kind).is_ok()`. The `and_denies` half lived in the name and the
+    comment. `Bool(true)` validates perfectly well for `Bool`.
+  - `namespace_authority_grants_default_deny` - real deny assertions, 3 hardcoded keys.
+  - `posture_and_obligation_defaults_are_the_tightest_value` - real, 5 hardcoded keys.
+
+A newly registered knob with a permissive default was covered by neither the completeness test nor
+the property tests. The F134 shape: a test named for a safety property that passes with the
+property absent.
+
+The test now derives the bottom of each kind's lattice and asserts the default equals it. Every
+current default already does, so this pins today's registry rather than changing it - which also
+REFUTES #12's "permissive registry defaults" finding as filed, while leaving the vacuous guard as
+the real defect. Mutation-proven by flipping one Grant default:
+
+    assertion `left == right` failed: access.grant defaults to Bool(true), which is not the
+    tightest value of its kind...
+
+Two things the change surfaced. The compiler named a fifth `KnobKind` I had not accounted for,
+`Digest` - the pressure a closed model gives, and the reason F361 chose typed variants over
+strings. And a digest is an identity, with no tightest value, so rather than a silently skipped arm
+the test PANICS until a human decides what an unstated digest means. That is the #201 pattern.
+
 ## F367 - REFUTED by measurement: a grant with a hole is not reported globally granted
 
 One of the twelve findings #12 collects against zero-migrate-policy. #12 warns that several of them
