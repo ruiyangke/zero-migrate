@@ -8990,83 +8990,132 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
-## F414 - MEASUREMENT, not a fix: one authored column, two dialects, two different halves silently dropped
+## F415 - the portable case-insensitive column the docs recommend does not apply on a stock PostgreSQL
 
-FOUND while widening the fold oracle, by reading `mysql_base_column_type` rather than by a failing
-test - no oracle case can catch this, because both dialects fold exactly what they render. REPRODUCED
-against live PostgreSQL 18.4 and MySQL 8.4.11. NOT FIXED: the repair is an API decision and a second
-opinion is in flight.
+FOUND by writing an honest CONTROL for the F414 correction, not by looking for it. Reproduced
+against live PostgreSQL 18.4. Documented and diagnosed here; the fail-closed refusal is left open
+deliberately, and the reason is below.
 
 ### The shape
 
-`t.string({ length: 32, caseSensitive: false })`. Both facets are documented surface -
-`packages/zero-migrate/src/types.ts:155` calls it "a bounded `VARCHAR(N)`" and takes `caseSensitive`
-in the same options bag.
+`t.text({ caseSensitive: false })` is the spelling BOTH the documentation and the engine's own
+refusal message hand an author.
 
-Rendered:
+- `docs/dialects.md:241` - "For a case-insensitive column, author `t.text({ caseSensitive: false })`,
+  which renders `citext`/`COLLATE NOCASE`/`utf8mb4_0900_ai_ci` respectively."
+- `validate.rs:6632` - the suggested fix for a bounded case-insensitive string is "declare the column
+  as `t.text({ caseSensitive: false })`".
 
-```
-PostgreSQL   "email" character varying(32)
-MySQL        `email` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci
-```
-
-PostgreSQL keeps the length and drops the case-insensitivity. MySQL keeps the case-insensitivity and
-drops the length. Each target silently discards a DIFFERENT half of what the author asked for.
-
-### Measured on the servers, not inferred from the DDL
-
-The DDL text alone would let someone argue the difference is cosmetic. It is not:
+Neither said that `citext` is a contrib extension. A stock PostgreSQL does not have it. Measured on
+the compose database, whose extension list is exactly `plpgsql`:
 
 ```
-PG 18.4     CREATE TABLE contacts (email character varying(32) UNIQUE);
-            INSERT 'Alice@Example.com'; INSERT 'alice@example.com';
-            -> 2 rows.  Uniqueness is case-SENSITIVE.
-
-MySQL 8.4   CREATE TABLE ci_contacts (email text ... utf8mb4_0900_ai_ci);
-            INSERT REPEAT('x', 40);
-            -> CHAR_LENGTH 40 stored in a column authored length 32.
+apply -> migration mig_7n42DGM5PdV6Z5RxTzIXue failed to apply:
+         type "public.citext" does not exist
 ```
 
-So the same migration gives opposite uniqueness semantics AND opposite length enforcement on the two
-targets. A user who tests on one and deploys to the other gets a data-integrity difference no error
-ever mentioned.
+It fails at APPLY, mid-deploy, with the server's own message - not at validate, where every other
+authoring mistake in this engine is caught, and not with any hint about the prerequisite. SQLite and
+MySQL need nothing: `COLLATE NOCASE` and `utf8mb4_0900_ai_ci` are both built in. So the one target
+that needs a setup step is the one whose failure says least.
 
-### Where it comes from
+### Why nothing caught it
 
-- `render/declarative.rs`, `mysql_base_column_type`: returns `"text"` whenever
-  `case_sensitive == Some(false)`, regardless of a declared length. The collapse looks deliberate -
-  the MySQL text-in-key rule keys on the storage this function reports - which is why the fix has to
-  check what else depends on it rather than just widening the arm.
-- `render/declarative.rs`, `column_type_for_render`: the `citext` branch fires only when
-  `case_sensitive == Some(false)` AND `data_type` is `"text"`. A bounded string never reaches it, so
-  the facet is dropped with no diagnostic.
+Every existing suite that authors a case-insensitive column runs under a charter that creates the
+extension first - `support::no_inject_with_extensions(schema, &["citext"])`. The prerequisite is real
+in all of them and always already satisfied, so the suite proves the feature works and says nothing
+about the setup it silently depends on. A test fixture that provisions a dependency is not wrong, but
+it does mean the dependency needs its own arm, and there was none.
 
-Nothing refuses the combination. `validate.rs` carries `case_sensitive` through
-`LogicalColumnContract` and has no rule about it; the recorder passes both facets through; no
-fixture in the corpus authors the pair, which is why nothing has tripped over it.
+The new arm skips itself when the extension IS installed, and says so, rather than passing by
+applying cleanly. A green run on a provisioned database would otherwise read as evidence about a
+stock one.
 
-### Why no oracle case would have caught it
+### What shipped
 
-Worth stating, because this log keeps concluding that the fold oracle is the instrument that finds
-these. It is not the instrument for this one. The fold records what the renderer emits, so the folded
-snapshot and the live catalog AGREE on both dialects - `varchar(32)` on one, `text ... ai_ci` on the
-other. Drift is clean. The defect is that the two agreements are with two different columns, and a
-per-dialect round trip cannot see across dialects.
+The prerequisite is now named in both places that recommend the spelling: a note in
+`docs/dialects.md` giving the two ways to satisfy it, and the `suggested_fix` string, which is what an
+author actually reads when the engine sends them here from the bounded-string refusal.
 
-### The decision this needs
+### What did NOT ship, and why it is a decision rather than an omission
 
-Not taken here.
+The fail-closed version - refuse a `citext` column at validate unless the extension is present - is
+not built. Validate has no live catalog: `preview` and `lint` run with `LiveSchema::default()`, so a
+rule there would either refuse every case-insensitive column offline or skip exactly when it cannot
+see, which is the shape this log has criticised elsewhere. Lower does have a live snapshot on the
+apply path, so a refusal could live there, but that is a real gate with a real failure mode (an
+extension created in the same plan, or by a DBA outside the migration set) and it wants its own
+decision rather than being smuggled in beside a docs fix.
 
-- REFUSE the combination fail-closed on every dialect, naming the two supported spellings. Matches
-  "vendor-only behavior is clearly marked and rejected on unsupported targets", and turns two silent
-  losses into one authoring error. Breaking, though the package is unpublished.
-- HONOR BOTH where the dialect can. MySQL does `VARCHAR(32) ... utf8mb4_0900_ai_ci` natively with no
-  tradeoff. PostgreSQL cannot: `citext` is its own unbounded type, so it needs `citext` plus a
-  `CHECK (length(col) <= 32)`, or a nondeterministic ICU collation that is not available by default
-  and breaks pattern-op indexes.
+Emitting `CREATE EXTENSION IF NOT EXISTS citext` automatically is a third option and the least
+attractive: extension creation is policy-gated behind `code.extension`, so the engine would be either
+issuing DDL the charter denies or silently widening it.
 
-The half that is not in question either way: MySQL's collapse to `text` for a BOUNDED string is
-wrong under both options, because MySQL can spell the honest thing natively.
+## F414 - REJECTED as filed: the divergence I measured is beneath a gate that refuses the shape
+
+Filed as a portability defect, and the headline claim was wrong. Corrected here rather than edited
+away, because the way it was wrong is the point.
+
+### What I claimed
+
+That `t.string({ length: 32, caseSensitive: false })` renders `varchar(32)` on PostgreSQL and
+`text ... ai_ci` on MySQL, so the same authored column silently gets opposite uniqueness semantics
+and opposite length enforcement on the two targets. I measured both renders, and then measured the
+consequences on live servers - PG accepted a case-variant pair into a UNIQUE column, MySQL stored 40
+characters in a column authored 32 - and concluded the promise "write once, migrate everywhere" was
+being broken silently.
+
+### What is actually true, measured through the front door instead of the renderer
+
+The combination never reaches a database. `validate.rs:6622` refuses `caseSensitive: false` on any
+non-`Text` column, on every dialect, and the load path runs validation before lowering. Driven
+through the shipped host `apply` against live PostgreSQL:
+
+```
+APPLY_RESULT: REFUSED -> drop the caseSensitive facet, or declare the column as
+t.text({ caseSensitive: false }) [UNSUPPORTED op_index=0 dialect=postgres]:
+column "email" declares caseSensitive:false but is not a text column;
+caseSensitive:false is only valid on a text column
+```
+
+That is a good error. It names the facet, the rule, and the supported spelling.
+
+### The instrument that lied, and why
+
+I rendered through `build_resolved_table_snapshot` + `render_create_table` directly. Those sit
+BENEATH the validation gate, so they will happily render anything the type system can express. Every
+number I reported was real - the DDL, the two rows in PostgreSQL, the 40 characters in MySQL - and
+none of it was evidence about authored migrations, because no authored migration gets there.
+
+This is the same failure mode this log recorded three entries ago in F413, where a fixture refused
+all three spellings of a matrix and only one refusal was the rule under test. There I caught it by
+measuring the REASON. Here I measured a render and never asked whether the render was reachable. A
+value read from a real server is not automatically evidence about the path a user takes; the reading
+has to come from that path.
+
+### What survives, and it is much smaller
+
+`genArtifacts` does not run the validator, so the two artifact front doors disagree with `apply` and
+with each other. Measured through the addon:
+
+```
+envelope path    ok=true   emits  email: t.string({ length: 32, caseSensitive: false })
+descriptor path  ok=true   emits  email: t.text({ caseSensitive: false }).notNull()
+apply            REFUSED
+```
+
+So the envelope path generates a typed surface for a column that can never be deployed, and the
+descriptor path silently rewrites the shape - dropping the length - rather than refusing it. Neither
+produces DDL; `genArtifacts` emits generated types and runtime JSON. The cost is a consumer being
+handed types that either do not deploy or do not describe what they asked for, which is worth closing
+and is not a data-integrity defect.
+
+Filed as its own item rather than fixed inside this correction, because it is a different defect from
+the one this entry was opened for.
+
+### What I should have run first
+
+`apply`. One call, thirty seconds, and the whole entry would have been the paragraph above.
 
 ## F413 - the second opinion caught a regression I shipped in F411, and the asymmetry beside it
 

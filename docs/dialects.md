@@ -241,6 +241,14 @@ case-insensitive). For a case-insensitive column, author `t.text({ caseSensitive
 false })`, which renders `citext`/`COLLATE NOCASE`/`utf8mb4_0900_ai_ci`
 respectively.
 
+> **PostgreSQL prerequisite:** `citext` is a contrib extension, and a stock
+> PostgreSQL does not install it. Create it before the first migration that
+> authors a case-insensitive column — `CREATE EXTENSION IF NOT EXISTS citext`,
+> or an earlier migration's `createExtension` under a `code.extension` grant.
+> Without it the deploy fails at apply, not at validate, with the server's own
+> `type "public.citext" does not exist`. Only PostgreSQL needs this: SQLite's
+> `COLLATE NOCASE` and MySQL's `utf8mb4_0900_ai_ci` are both built in.
+
 > **MySQL note:** because `t.text()` is an unbounded `TEXT` on MySQL 8, it cannot
 > be a primary key, unique, or index member there (MySQL rejects a `TEXT` key
 > without a prefix length). Use `t.string({ length })` for any column you key or
