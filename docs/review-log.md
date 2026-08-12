@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F398 - a dropped function rolls back, keyed so an overload cannot restore the wrong body
+
+SHIPPED 65265926, #23 item (c) for functions. Triggers and policies still have no snapshot type;
+(d) alterSequence is still a separate decision.
+
+THE PART THAT MATTERED WAS NOT IN THE TICKET. #23 describes (c) as "each needs a new snapshot type
+AND fold arms first", which is true and is the easy half. The hard half is that PostgreSQL functions
+are OVERLOADABLE - `f(int)` and `f(text)` are different functions sharing a name, which is exactly
+why `Op::DropFunction` carries `arg_types` (`crates/zero-migrate-ir/src/ir.rs:3770`) to disambiguate.
+A snapshot map keyed by NAME would let one overload displace the other in the fold, and the inverse
+would then re-create the wrong body under the right name. That is a wrong ANSWER, not a failure: the
+rollback reports success and the function it restores is not the one that was dropped. I put that in
+the dispatch brief rather than discovering it afterwards, with an instruction to stop and report
+rather than ship a colliding map.
+
+The key is `(resolved schema, name, ordered input arg types)`, excluding OUT and retaining INOUT.
+Where a PostgreSQL alias or typmod cannot be resolved offline the candidate is INVALIDATED rather
+than guessed, so an ambiguous spelling loses its inverse instead of restoring something else - two
+`alias_spelled_*_never_leaves_a_stale_inverse` tests hold that line.
+
+VERIFIED BY ME, NOT ACCEPTED FROM THE REPORT:
+  - Neither pre-existing test was weakened. `ir_rename_sqlite_basic.rs` is a struct-literal update
+    for the new `LiveSchema.functions` field. `replace_function_rollback_pg.rs` is a COMMENT
+    correction: its text asserted "the fold does not model them at all ... `SchemaSnapshot` carries
+    no functions map", which this change makes false. Fixing it was required, not optional - that is
+    the F332 shape caught before it landed rather than after.
+  - The mutation proof, re-run by me WITH `ZERO_MIGRATE_TEST_PG_URL` exported. With the lowering arm
+    stubbed to `None`:
+        FAILED 6: unguarded, explicit-Some(false), both alias cases, the overload case, and
+                  rolling_back_a_dropped_function_restores_its_body
+        PASSED 2: guarded Some(true), absent-from-history
+    The two negative controls holding is what shows they are not inheriting a blanket None.
+
+MY RUN WAS STRICTER THAN THE AGENT'S, AND IT DISCLOSED WHY. Its report ended: "The live PostgreSQL
+case could not actually connect because ZERO_MIGRATE_TEST_PG_URL is unset; it was skipped by the
+existing gated harness." So its own `RC_TEST=0` and its own mutation split both excluded the live
+path. Exporting the URL moved `rolling_back_a_dropped_function_restores_its_body` from skipped to
+actually-failing-under-mutation. An agent that says which of its evidence is missing is worth more
+than one that reports a clean green; this is the second time this session that a disclosed skip was
+the most useful line in a report.
+
+fmt 0, clippy 0, doc 0; 122 targets / 2555 passed / 0 failed / 1 ignored, +1 target and +8 tests over
+the 121/2547 baseline, 0 live-database skip banners.
+
+PUSH BLOCKED: `git push` fails with "Please make sure you have the correct access rights and the
+repository exists" - the ssh-agent refusal from earlier in the session has returned. Credentials
+untouched per standing instruction. The commit is local at 65265926.
+
 ## F397 - a green where I predicted red: #23's remaining list had been done two days earlier
 
 I dispatched a build for #23 item (a), "give an unguarded dropExtension a synthesised inverse". The
