@@ -8990,6 +8990,84 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F412 - the false red a comment predicted, measured five days later and removed
+
+FOUND by authoring the shape a comment said would fail. The comment was written 2026-08-07 in
+9d0b0115 and was right. Being right in a comment is not the same as being pinned.
+
+### The claim nobody had run
+
+`fold_roundtrip_pg.rs`'s module doc said:
+
+> `IndexSnapshot` equality excludes `opclass` and `nulls_not_distinct`. It does compare `only`, while
+> PostgreSQL introspection hardcodes `only: false`, so a case that authors `only: true` would be a
+> guaranteed false red.
+
+Nothing authored `only: true` anywhere in the suite, so the claim was a prediction. Predictions in
+comments decay in both directions: it could equally have become false. Authoring it says which:
+
+```
+create index on only the parent: folded and live PostgreSQL schemas must have clean drift
+  table:    only_parent
+  object:   index only_parent_payload_idx
+  field:    only
+  expected: true
+  actual:   false
+```
+
+Confirmed. A `createIndex { only: true }` on a partitioned parent reports drift from the moment it
+is applied, forever, on an index the server built exactly as asked.
+
+### Which side was wrong, decided by measurement rather than by preference
+
+The obvious repair - teach introspection to recover `only` - does not survive contact with the
+catalog. Measured on PostgreSQL 18.4, three partitioned parents:
+
+```
+CREATE INDEX ON ONLY p (payload)   p has a partition     -> indisvalid f, def: ... ON ONLY p ...
+CREATE INDEX      ON q (payload)   q has a partition     -> indisvalid t, def: ... ON ONLY q ...
+CREATE INDEX ON ONLY r (payload)   r has NO partition    -> indisvalid t, def: ... ON ONLY r ...
+```
+
+`pg_get_indexdef` renders `ON ONLY` for EVERY index on a partitioned parent, including `q`, which
+never asked for it. The parent index is a template either way. The only thing `ONLY` changes is
+whether PostgreSQL also builds the partitions' indexes; once those are attached `indisvalid` flips
+to true and nothing distinguishes the two. And with no partitions yet, `ON ONLY` is valid
+immediately.
+
+So the authored flag is not in the catalog to be read. Teaching introspection to answer `true` for a
+partitioned parent would have moved the false report onto the far more common index that did NOT
+write `ONLY` - trading one phantom diff for its mirror image, which is the same trade F411 refused on
+the `createTable` NOT VALID arm.
+
+`only` is emission-only. It now sits with `opclass` and `nulls_not_distinct`, which are excluded for
+exactly this reason and say so in their own docs.
+
+### Three sites, not one, and the one that actually produced the report
+
+- `IndexSnapshot::definition_differences_except_name` stopped comparing it. This is what
+  `PartialEq` is defined in terms of, so it also governs index PAIRING and the declarative planner's
+  in-place-redefinition refusal.
+- `IndexSnapshot::hash` stopped hashing it, because dropping a field from equality while leaving it
+  in the hash breaks the `Eq`/`Hash` contract.
+- `apply::drift`'s index attribute pass stopped pushing an `only` altered-object entry. This is the
+  site that produced the report above; it runs independently of `PartialEq`, so fixing only the
+  equality would have left the drift line exactly as it was.
+
+Finding the third site needed the failing message rather than the type: the field name in the report
+came from a `push` call, not from the comparison the module doc named.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. 126 targets / 2598 passed / 2 failed / 0 ignored / 0 live-database skip
+banners against PostgreSQL 18 and MySQL 8. The two failures are the same untracked
+`apply_dml_validation_pg` measurement a concurrent investigation left in the tree, unrelated to this
+change and not committed with it.
+
+Two cases were added and found nothing, which is worth recording so the next reader does not repeat
+them: an IDENTITY column through a primary-key replacement that retires it round-trips clean, and so
+does the SQLite `COLLATE NOCASE` column with UNIQUE / partial / expression / DESC indexes.
+
 ## F411 - a NOT VALID foreign key reported drift for exactly as long as it stayed unvalidated
 
 FOUND by widening the live PostgreSQL fold oracle rather than by reading. REPRODUCED, fixed, and
