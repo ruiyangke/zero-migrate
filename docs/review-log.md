@@ -8990,6 +8990,63 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F377 - I answered a reachability question by grepping for a spelling, and a consumer corrected me
+
+The mailbox advisory I sent about F374 said I had found no evidence zeroship composes policy
+charters: I grepped their tree for `policy_version` and saw it only inside their vendored copy of
+this repo and two design docs. They replied with a call site.
+`crates/migrated/src/policy.rs:124` in their tree is
+
+    Some(draft) => admit(&app_base, &draft.doc, &builtin_registry())
+
+an untrusted creator draft against an operator ceiling, with the builtin registry - the exact
+configuration my first reproduction used. Their charters live in `crates/migrated/policies/*.toml`
+loaded by `include_str!` and in TypeScript template literals, both of which do contain the token.
+
+THE LESSON IS NOT THAT THE GREP WAS INCOMPLETE. It is that I asked the wrong question. "Does this
+reach them" is answered by finding a CALL to the boundary, not by finding a spelling in a file. Their
+sentence for it is better than mine: the right question is not whether the token appears but whether
+anything calls `admit`. This is the same failure as reading a comment instead of the code, which
+this log has recorded against other people's comments a dozen times.
+
+Worth recording that the advisory was still worth sending. It was sent BECAUSE the standing rule
+says to warn a downstream consumer about a gate that started rejecting input it used to accept, and
+the warning reached someone who then found my reachability claim false by reading their own code.
+A message that had waited for certainty about their side would not have been sent at all.
+
+THEY ASKED ONE QUESTION BEFORE MOVING THEIR PIN: can a single-layer charter with exact-literal
+scopes hit the non-representable subtraction at all? Answered by running their shape rather than
+reasoning about it. Charter of one layer, one exact-literal grant plus one `scope = "all"` grant,
+nine drafts:
+
+    1 exact same literal                 -> ADMITTED
+    2 table inside it                    -> ADMITTED
+    3 glob anchored on it                -> REFUSED GrantExceedsCharter
+    4 disjoint literal                   -> REFUSED GrantExceedsCharter
+    5 all                                -> REFUSED UncoveredRegionNotRepresentable
+    6 literal with an exclude            -> ADMITTED
+    7 narrow under an all-scoped grant   -> ADMITTED
+    8 glob under an all-scoped grant     -> ADMITTED
+    9 all under an all-scoped grant      -> ADMITTED
+
+Every draft genuinely within the ceiling is admitted. The non-representable refusal IS reachable, at
+case 5, but only for a draft asking `scope = "all"` against an exact-literal rule - an overreach that
+must be refused regardless. So it is a less informative refusal of an invalid draft, not a false
+reject of a valid one, and F374's conservative direction costs that shape nothing.
+
+A SECOND THING, found while covering the one shape they had not specified. A `value = false` rule in
+the SAME document does not carve anything out:
+
+    [[grant]] key = "schema.create_table" value = true  scope = { include = ["app_acme"] }
+    [[grant]] key = "schema.create_table" value = false scope = { include = ["app_acme.secret"] }
+
+    draft for app_acme.secret -> ADMITTED
+
+Within one layer a grant is the JOIN of every covering rule, so `false` lowers nothing; masking is a
+CROSS-LAYER effect. `exclude` is what expresses a carve-out in one document, and case 6 shows it
+holds. Long-standing behaviour, not new - but a single-layer charter author reaching for a `false`
+rule gets silence, which is the same shape as F371.
+
 ## F376 - REFUTED: re-admitting against an already-composed policy launders nothing
 
 #12's "RootCharter admission bypass" finding, on its most plausible reading. `admit` accepts an
