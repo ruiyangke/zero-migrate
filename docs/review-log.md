@@ -8990,6 +8990,110 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F407 - #227 built: the guard resolves what MySQL files, refuses what it cannot see, and cost one shipped pin
+
+BUILD for F406, shipped as e5dfd3d5. Both halves mutation-proven separately, by me, against the
+whole module rather than one test each.
+
+### The reproduction
+
+`RC_PRE_FIX=101`, and the two failures are the two behaviours F406 decided:
+
+```
+thread '...constraint_mysql_ifexists_unique_index_runs_bare' panicked at
+crates/zero-migrate/src/render/existence_probe.rs:1498:9:
+assertion `left == right` failed
+  left: SatisfiedNoop
+ right: RunBare
+
+thread '...constraint_mysql_ifexists_unresolved_refuses' panicked at
+crates/zero-migrate/src/render/existence_probe.rs:1517:24:
+expected FailDrift(presence), got SatisfiedNoop
+
+test result: FAILED. 12 passed; 2 failed; 0 ignored; 0 measured; 1140 filtered out
+```
+
+`left: SatisfiedNoop` against a live named UNIQUE is #227 itself. What makes the RED worth
+anything is the five cases that PASSED before the fix: `constraint_postgres_ifexists_unresolved_noops`,
+`constraint_sqlite_ifexists_unresolved_noops`, `constraint_mysql_ifnotexists_unresolved_runs_bare`,
+`constraint_mysql_ifexists_primary_constraint_runs_bare`, and
+`constraint_mysql_ifnotexists_primary_constraint_beats_unique_index_fallback` - the last being the
+test that fails under an index-first lookup.
+
+### The shape
+
+`find` in `decide_constraint` resolves `tables[].constraints` first and only then, on MySQL only,
+accepts a same-name unique index as a UNIQUE identity. Constraint-first is why PRIMARY KEY still
+works: MySQL files it in BOTH buckets, so it resolves through its `ConstraintSnapshot` and never
+reaches the fallback. The `IfExists` arm gained a MySQL refusal for an unresolved name; the
+`IfNotExists` arm is untouched.
+
+### The mutation split
+
+Each half was disabled behind a temporary env gate that kept every export intact, and the WHOLE
+`render::existence_probe` module plus the `authored_identifier_lengths` target were run - not the
+one test under study. That distinction is the point: a run filtered to a single test reports
+`0 passed; 1 failed` whether the mutation broke that test or broke everything.
+
+| run | probe module | identifier target |
+| --- | --- | --- |
+| baseline | 39 passed, 0 failed | 18 passed, 0 failed |
+| unique-index fallback disabled | 1 failed, 38 passed | 18 passed, 0 failed |
+| drop-direction refusal disabled | 1 failed, 38 passed | 2 failed, 16 passed |
+
+The fallback mutation fails only `constraint_mysql_ifexists_unique_index_runs_bare`. The refusal
+mutation fails only `constraint_mysql_ifexists_unresolved_refuses`, plus exactly the two identifier
+tests that now pin the refusal. Different mutations, different failures, neighbours untouched in
+both - including the PRIMARY KEY, FOREIGN KEY, PostgreSQL and SQLite controls.
+
+The fallback mutation's failure text also shows the arms are ordered as decided:
+
+```
+left: FailDrift(Divergence { object: "constraint users_email_key", field: "presence",
+  expected: "<absent>",
+  actual: "<unknown: MySQL's snapshot retains no CHECK constraint identity at all,
+            so not found does not prove absent>" })
+right: RunBare
+```
+
+With the fallback off, a live named UNIQUE falls through to the refusal rather than to a no-op.
+
+### What this cost, and why it was paid
+
+The refusal broke two SHIPPED tests in `crates/zero-migrate/tests/authored_identifier_lengths.rs`,
+which pinned `SatisfiedNoop` for a MySQL `constraint ifExists` on an absent object under the
+assertion message "an absent object still no-ops". That is a real contract change, not an
+incidental break, and F406 predicted it: a miss on MySQL can no longer be read as absence.
+
+It is acceptable because nothing reaches it. The three production `decide` call sites are
+`sqlite/mod.rs:619`, `postgres/session.rs:722` and `postgres/session.rs:1057`; MySQL has none. The
+new refusal cannot fire for any user today, and getting it right BEFORE #79 wires the MySQL probe
+is the whole reason #227 blocked #79 rather than the reverse.
+
+Those two tests pin that identifier LENGTH does not change a verdict, and that invariant survives
+untouched - both the within-bound and over-long MySQL constraint cells still return the same
+verdict, so only the expected constant moved. The repair routes the miss case through
+`assert_ifexists_miss` (`:609`), which is STRICTLY STRONGER than the line it replaced: the
+exemption is keyed to exactly `Mysql` AND `GuardProbe::Constraint`, and that cell now demands
+`FailDrift` with `field == "presence"` AND an `actual` naming the snapshot ambiguity. `RunBare`
+panics, `SatisfiedNoop` panics, and every other dialect and probe kind keeps its
+`assert_eq!(SatisfiedNoop)`. A test rewritten to stop failing is worse than the failure; this one
+can fail in more ways than before.
+
+### Gate
+
+fmt 0, clippy 0, test 0, addon 0. 133 targets / 2650 passed / 0 failed / 1 ignored, zero
+"LIVE-DATABASE COVERAGE SKIPPED" banners. 214 added lines, zero non-ASCII. Both temporary mutation
+gates removed and confirmed absent.
+
+Two instruments of my own misread along the way, both worth naming because both fail toward false
+confidence. A `... | grep | head` pipeline reports the RC of `head`, so an ASCII check that "passed"
+was measuring the pager; re-run properly it was 0 non-ASCII across 214 lines. And a
+harness-backgrounded job does not outlive the turn - two gate runs were killed mid-compile and
+their truncated logs looked like failures rather than interruptions. The gate that produced the
+numbers above ran fully detached under `nohup setsid` with a `GATE_DONE` sentinel, so "finished"
+is distinguishable from "stopped".
+
 ## F406 - #227 decided: resolve a MySQL constraint the way the fold already resolves one, and fail closed where it cannot
 
 DECISION for #227, which blocks #79. The ticket named two candidate shapes and said explicitly "do
