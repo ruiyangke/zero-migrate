@@ -8990,6 +8990,54 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F392 - CORRECTION to F391, and the comment that would have hidden it
+
+The codex half of F391's split returned and agreed on the load-bearing point, with better evidence
+than I had: `crates/zero-migrate/tests/partition_render.rs:168` feeds a folded history back into
+lowering, so option (a) would break a live test rather than merely contradicting a doc comment. It
+also confirmed the reachability finding and the SQLite/MySQL symmetry independently. Two things it
+surfaced that I had missed, both of which I then verified myself.
+
+FIRST, F391 NAMED THE WRONG LINE. `diff_attrs` never compares `TableSnapshot.partition_by` - the
+only three occurrences of `partition_by` in `apply/drift.rs` are two constructions (`:685`, `:2976`)
+and the PostgreSQL introspector's assignment (`:719`). So `fold.rs:1182` produces no drift report on
+its own; only the child insert at `fold.rs:1234` does. F391 treated the two as one mechanism. The
+conclusion is unchanged, the attribution was sloppy.
+
+SECOND, AND THIS IS THE PART WORTH THE COMMIT. My reason for calling partitions "the last instance"
+was WRONG, even though the claim itself survives. I argued the other classes are PostgreSQL-only. Two
+are not: `dialect_table.rs:84,86` record `createDomain` and `createEnum` as `Portable` on MySQL, so
+the engine authors them there. What actually keeps named types honest is that the FOLD GATES THEM:
+
+    fold.rs:1057   if dialect.supports(Capability::MaterializedEnumType) {
+    fold.rs:1058       named_type_snapshots.insert(
+
+and `renderer.rs:98,125` make that capability false on MySQL and SQLite (true only at `:71`). So a
+folded MySQL snapshot carries no named type, the live one carries none, and they agree - the #206
+pattern exactly. The fold ALREADY KNOWS how to be dialect-conditional about an object that exists
+logically but not physically. It does that for named types and not for partitions, in the same
+function. That makes the partition arm look like an oversight rather than a design choice, which is
+a stronger argument for #223 than anything in F391.
+
+THE COMMENT THAT HID IT. `mysql/drift_sql.rs:633` grouped four maps under "NOT APPLICABLE -
+`model::op_support` refuses the authoring ops outright", listing `sequences`, `schemas`,
+`extensions` and `partitions`, and quoting for the last one the refusal string "partition lifecycle
+operations are PostgreSQL-only" from `op_support.rs:173`. Three of those four are true. The fourth is
+false, and provably so from the function's own contract: `unsupported_reason` is documented at
+`op_support.rs:147` as "Only consulted by `support_cell` where the generated table records an
+`Unsupported` disposition", and `dialect_table.rs:93` records `createPartition` on MySQL as
+`TransparentDegradable`. The refusal arm is therefore never consulted for it and that string is dead
+for MySQL. The engine does author `createPartition` on MySQL - it collapses it.
+
+So the comment told a reader checking exactly this question that there was nothing to check. It is
+the F332 shape: correct behaviour defended by a false fact, where the false fact is what stops the
+next person finding the real gap. Rewritten to give each map its actual reason, including naming the
+fold disagreement at the site.
+
+The empty map itself is NOT the defect and the rewrite says so - collapse means there is no partition
+relation to report, so MySQL and SQLite are both answering correctly. #223 stays open on the fold and
+differ, unchanged.
+
 ## F391 - the fold claims a partition relation that MySQL and SQLite deliberately never create
 
 Found while re-testing #79's stated BLOCKER, which turned out to be half stale. #79 says the MySQL
