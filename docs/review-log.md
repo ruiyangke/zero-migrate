@@ -8990,6 +8990,72 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F401 - #23 closed: alterSequence needs no work, and the question found a live defect next door
+
+DECIDED and CLOSED with no code change for the op I asked about. #23 item (d) proposed giving
+`alterSequence` a synthesised inverse the way the three drops got one. It should not get one, and it
+already does not have one.
+
+### Already fail-closed, verified rather than assumed
+
+`Op::AlterSequence` renders its forward SQL and sets `down: None` unconditionally
+(`crates/zero-migrate/src/render/lower.rs:8295-8336`, the arm's `down: None` at the
+`lower_vendor_statement` call). `plan_rollback` meets that and returns `RollbackError::Irreversible`
+before the execution loop, so no down SQL runs and no `rolled_back` event is appended. Under force
+plus backup acknowledgement it lands in `skipped_irreversible` and still gets no journal event. So
+there was never a silent-success hazard here; the capability is simply absent, deliberately.
+
+### My framing of WHY was wrong in two ways
+
+I put the objection in the question so it could be attacked, and it was, correctly:
+
+- I said `restart` moves the current value as a function of ROWS INSERTED. It is a function of
+  `nextval` CONSUMPTION, which includes direct calls and calls from aborted or failed inserts -
+  allocated values are never reclaimed. With caching, the catalog can also be ahead of the last
+  value actually handed out.
+- I said the non-`restart` fields would be safe to invert. Too broad. Changing an increment from
+  positive to negative, consuming values, then restoring the positive increment re-traverses
+  already-issued values. Bounds and `CYCLE` interact with live position the same way. So option (b),
+  "partial inverse for the safe fields, refuse when restart is present", does not hold together -
+  the unsafe set is larger than the one field I named.
+
+Option (c), refuse entirely, is what the code already does, and now the reason is written down.
+
+### The defect the question actually found
+
+`dropSequence` DOES synthesise an inverse, and it recreates the sequence at its DECLARED start:
+
+    crates/zero-migrate/src/render/lower.rs:8030-8031
+        sql.push_str(" START WITH ");
+        sql.push_str(&snapshot.start.to_string());
+
+`SequenceSnapshot.start` comes from `s.seqstart` in `pg_sequence` (`apply/drift.rs:1398`). That is
+the declared START, not the position. The snapshot reads no `last_value` and no `is_called`.
+
+So dropping a sequence that has issued 1..N and rolling that back returns a sequence positioned to
+hand out 1 again, and the rollback journals success. Filed as #226.
+
+The live test cannot see it: `crates/zero-migrate/tests/drop_sequence_rollback_pg.rs` never calls
+`nextval` - `grep -c nextval` over it returns 0 - and compares `SequenceSnapshot` values, which by
+construction exclude runtime position. The test and the bug share one blind spot, so the test passes
+for precisely the reason the code is wrong.
+
+### The asymmetry worth carrying forward
+
+For functions, triggers and policies the recorded definition IS the whole object, which is why
+history-derived inverses work for all three. A sequence's definition is half the object; the position
+is the other half, and no IR history knows it. That is the line between an op that can be inverted
+from the fold and one that cannot, and it is a better rule than "drops are reversible".
+
+### Method note
+
+The Opus half of the required two-opinion split could not run - the session hit its subagent cap at
+200 of 200 - so the second reading is mine, done against the code rather than by another agent. Every
+load-bearing claim in the codex report was re-checked here before being accepted: the `down: None`
+arm, the `START WITH snapshot.start` lines, the `seqstart` column, and the zero `nextval` count. What
+I did NOT do is reproduce the duplicate-key scenario against a live PostgreSQL; that reproduction is
+the RED #226 needs and it does not exist yet.
+
 ## F400 - a dropped policy rolls back, and the fields that look cosmetic are the security-carrying ones
 
 SHIPPED 3ca8fb0e, #23 item (c) for policies. Same shape as the function and trigger inverses before
