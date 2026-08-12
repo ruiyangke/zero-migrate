@@ -8990,6 +8990,71 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F396 - #220 decided: the split found a better option than my three, and my headline was too broad
+
+SHIPPED c765bf16, the documentation half. No behaviour change. The enforcement half is queued.
+
+DEGRADED SPLIT again - the session is at its 200-agent cap, so the Opus half could not be
+dispatched and this is the codex read-only opinion plus my own reading. Every claim I leaned on I
+opened and read; the two that carry the decision are quoted below.
+
+MY OWN HEADLINE WAS WRONG IN SCOPE. The ticket said "admit re-reads a trusted charter under whatever
+registry its caller supplies". That is true of `RootCharter` ONLY (`compose.rs`):
+
+    impl AdmitCharter for RootCharter {
+        fn charter_layers(&self, registry: &PolicyRegistry) -> ... {
+            Ok(vec![Layer::from_doc(LayerTag::Base, self.doc(), registry)?])   // re-reads
+    impl AdmitCharter for Charter {
+        fn charter_layers(&self, _registry: &PolicyRegistry) -> ... {
+            Ok(self.layers.clone())                                            // ignores it
+    impl AdmitCharter for EffectivePolicy {  ...  Ok(self.layers.clone())      // ignores it
+
+I had assumed "re-reads" was the whole hazard, which would have made two of the three implementations
+look safe. They are not, and the reason is one line at `boundary.rs:115`:
+
+    Ok(EffectivePolicy::from_layers(registry.clone(), layers))
+
+admit stores the CALLER's registry on the policy it returns, whoever built the layers. So a correct
+layer stack still yields a policy whose every later read - defaults included - resolves under the
+caller's vocabulary. Safe-by-omission was the wrong reading and the doc now says so.
+
+THAT ALSO KILLS AN OPTION I WOULD HAVE REACHED FOR. Reusing the seal does not help: `seal` digests an
+already-composed policy, which by the line above already embeds the caller's registry, so it would
+faithfully seal the wrong interpretation. Reuse the digest CONCEPT and the
+`PolicyComposedUnderOtherRegistry` semantics, not the HMAC machinery.
+
+THE OPTIONS, resolved:
+  (c) TYPE-LEVEL - ruled out on a COUNT, not a feeling. 7 public structs plus the trait acquire the
+      parameter and 41 public signatures change, 21 needing `R` in an argument, return or bound and
+      20 because they sit on an `impl<R>` owner. Disproportionate for a rule the shipped path
+      already satisfies.
+  (b) AS I FRAMED IT - superseded, and by an objection to my own proposal. I wanted a digest field on
+      `PolicyDoc`. Its fields are PUBLIC, so a caller hand-constructs one with a forged or absent
+      digest and the check is theatre.
+  (d) NEW, and the one to build - bind the registry PRIVATELY into `TrustedDoc` at parse, extend the
+      sealed `AdmitCharter` with a hidden accessor, and have admit compare digests or simply use the
+      charter-owned registry. Private, therefore unforgeable, which is exactly where (b) failed. It
+      must also check both operands in `overlay` and `restrict`, because `as_trusted()` can be
+      rebound before admission and `restrict` builds grant models without going through
+      `Layer::from_doc`. It additionally catches `EffectivePolicy::deny_all(strict)` admitted under a
+      loose registry, whose empty layers permit the same default flip - a path my filing missed.
+  (a) DOCUMENT - shipped now, independent of the rest.
+
+ONE CORRECTION TO MY OWN INVARIANT: it is DIGEST equality, not one object. `table_shape.rs:737` and
+`:770` each call `builtin_registry()` and get different instances; they are deterministic and
+digest-equal, which is what the rule actually requires. "One registry throughout" invites a reader to
+think pointer identity matters.
+
+WHEN (a) STOPS BEING SUFFICIENT, kept because "sufficient today" is a moving target: shipped code
+accepting independently supplied or hot-reloaded registries; loaded charters or drafts surviving
+across registry generations; components or plugin versions composing under different definitions;
+the registry choice becoming influenced by untrusted input; or safe `admit` being promised to fail
+closed against host mistakes rather than treating registry consistency as a caller precondition.
+
+NOT ESTABLISHED: nobody has counted external users constructing or mutating `PolicyDoc` directly, the
+private-brand implementation was not prototyped, and the transitive cost outside `zero-migrate-policy`
+is uncounted. I have not re-run the original reproduction since filing.
+
 ## F395 - the doc gate CI runs was red at HEAD, so it had stopped gating
 
 SHIPPED 4c0609f9. Found only because I could not get a green run while verifying F394, and the
