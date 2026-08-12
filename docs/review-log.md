@@ -8990,6 +8990,37 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F387 - REFUTED AS CURRENT: repeatables read a real marker, and the coverage limit is a dependency fact
+
+Second of #13's apply-side leads: "MySQL repeatables passing `had_inflight=false`". They did. The
+repeatable path now passes a journal lookup, and the comment above it states the consequence the
+hardcoded value had (`crates/zero-migrate/src/apply/executor.rs`, `apply_repeatables`):
+
+    // Inflight markers left by an interrupted apply. A repeatable rides the same
+    // two-phase path as a versioned migration on MySQL, where DDL auto-commits, and
+    // the refusal that keeps the engine from replaying possibly-applied CREATE/ALTER
+    // statements is driven entirely by this flag. Passing a hardcoded `false` here
+    // meant a repeatable interrupted mid-DDL silently replayed its `up` on the next
+    // deploy instead of reaching the marker-identity recovery flow.
+
+and the call is now `.apply_one(..., started.contains(version), ...)` against a `started` set built
+from the journal entries in the same function.
+
+THE COVERAGE IS STRUCTURAL, NOT EXECUTED, and that is worth stating rather than letting the
+refutation imply more. No Rust test exercises this: `grep -rln ZERO_MIGRATE_MYSQL_URL crates/`
+returns exactly one file, `crates/zero-migrate/src/apply/backend/mysql/mod.rs` - the backend source
+itself. No test file references it, so there is no Rust MySQL harness to crash a repeatable mid-DDL
+against. That is F256's dependency fact (#176), already recorded where a reader meets it, not a new
+gap I am discovering. What IS verified here is that the flag is computed from journal state rather
+than hardcoded, which is precisely the defect the lead named.
+
+SEVEN OF #13's EIGHT ARE NOW SETTLED, and the shape has held all the way through: six were real
+defects already repaired or a naming problem, ONE was live (F382, the COMMENT case-fold, from the
+render side rather than the guard or apply sides the ticket framed). The leads were accurate about
+what had once been wrong and stale about the tree - which is the expected profile for a report
+written against an older revision, and an argument for dating a findings list rather than only
+numbering it.
+
 ## F386 - REFUTED AS CURRENT: the inflight marker's checksum IS compared, upstream of every backend
 
 First of #13's three APPLY-side leads: "PG non-transactional recovery not comparing the inflight
