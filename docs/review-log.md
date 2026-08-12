@@ -8990,6 +8990,52 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F403 - #226 built: the refusal ships, and every converted test was proven to detect it
+
+SHIPPED 919ff243, implementing the F402 decision. `render_sequence_op` yields `down: None` for
+`DropSequence` and `render_sequence_create_from_snapshot` is deleted, so no code path can rebuild a
+sequence from a snapshot that never knew its position.
+
+### Four call sites, not the two I named
+
+The brief asked for a whole-tree sweep rather than the two Rust tests I had found, and it turned up a
+third and fourth. `packages/zero-migrate-cli/tests/host/rollback-live.test.ts` asserted the old
+behaviour end-to-end through the CLI - "rolling back a dropSequence rebuilds it from the migration
+that created it" - and now asserts the refusal, checking both the exit status and that the sequence
+stays absent. The addon's `merge_recovered_definitions` copies `recovered.sequences` into
+`live.sequences`, but has no sequence-specific rollback execution, so it needed no change: the
+generic path sees `down: None` and surfaces `RollbackError::Irreversible`.
+
+### One thing I changed on top of the delivered work
+
+`render_sequence_op` came back with `_live_schema: &LiveSchema` - a parameter no arm reads any more,
+underscored to silence the lint. A parameter that exists only to be ignored reads as an oversight to
+the next person, so the parameter is gone and both call sites updated. `render_view_op` keeps its
+`live_schema` because view inverses genuinely need the recorded body; sequences have simply left
+that family.
+
+### Verification
+
+Mutation-proven by me, not taken from the report. Restoring an inverse behind a temporary env gate
+fails ALL THREE converted tests:
+
+    rolling_back_a_consumed_dropped_sequence_is_refused            FAILED
+    rolling_back_an_unconsumed_dropped_sequence_is_deliberately_refused  FAILED
+    a_guarded_sequence_drop_keeps_no_inverse                       FAILED
+
+The first run of that mutation only reported ONE failing target, because cargo is fail-fast and
+stopped before building the second test binary. That is not two passing tests and one failing one;
+it is one measured result and one unmeasured. `--no-fail-fast` produced the three above. The guarded
+control fails as well because my gate ignores the existence guard, so the mutation is broader than
+the code it replaces - which does not weaken the result, but is worth stating rather than implying
+three independent detections of a narrow change.
+
+fmt 0, clippy 0, doc 0, tests 0, addon 0. Core crates 125 targets / 2568 passed / 0 failed /
+1 ignored, zero skip banners. That is +1 passed and -1 ignored against the previous 2567 / 2: the
+reproduction committed ignored at a3a61efa is now un-ignored and passing. The one remaining ignored
+test is the pre-existing one, not mine - the fix is not finished while a test has to be skipped to
+keep the suite green, and none is.
+
 ## F402 - #226 decided: refuse the dropSequence inverse, because the position has nowhere durable to live
 
 DECIDED, not yet built. The reproduction is committed ignored at a3a61efa: issue 1..5, drop, roll
