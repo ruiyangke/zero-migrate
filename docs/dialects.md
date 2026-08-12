@@ -252,8 +252,18 @@ respectively.
 > **MySQL note:** because `t.text()` is an unbounded `TEXT` on MySQL 8, it cannot
 > be a primary key, unique, or index member there (MySQL rejects a `TEXT` key
 > without a prefix length). Use `t.string({ length })` for any column you key or
-> index. A `t.text()` column placed in a key currently surfaces this as MySQL's
-> apply-time error rather than an earlier validation error.
+> index.
+>
+> Validation refuses this before the deploy starts **when the column is declared
+> in the same migration as the key** — a `createTable` that indexes its own
+> `t.text()` column, or an `addIndex` alongside the `addColumn` that created it.
+> The error names the column and suggests `t.string({ length })`.
+>
+> It does **not** yet refuse a key over a `t.text()` column that an **earlier**
+> migration created. Validation is offline and reads only the migration in front
+> of it, so a column it never saw declared carries no type to judge. That case
+> still surfaces as MySQL's own apply-time `ERROR 1170: BLOB/TEXT column used in
+> key specification without a key length`, mid-deploy.
 
 ## Indexes
 

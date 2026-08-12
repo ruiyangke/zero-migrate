@@ -16,10 +16,21 @@ Working notes; not staged.
   Drift-safe via a MySQL-only `ddl_type_override` (base data_type stays `text`).
   Policy-injected system columns (`id`, `created_by`, `updated_by`) are now
   bounded `VARCHAR(255)` so they stay index-able MySQL keys.
-- [ ] Fail-closed validate rule: reject a `t.text()` column used in a MySQL
-  primary key / unique / index (today it renders `TEXT` and fails at apply with
-  MySQL `ERROR 1170`). Deferred only because many existing test fixtures use
-  text-in-key as scenarios for other checks and need updating alongside the rule.
+- [x] Fail-closed validate rule: reject a `t.text()` column used in a MySQL
+  primary key / unique / index. Shipped for the case validation can see - the
+  column declared in the SAME migration as the key - and verified against live
+  MySQL 8.4 through the host `apply` path: `createIndex`, a table-level `unique`,
+  and a `createTable` inline index are all refused with "MySQL refuses a key over
+  a TEXT or BLOB column with no prefix length" plus the `t.string({ length })`
+  suggestion.
+- [ ] Close the residual half: a key over a `t.text()` column an EARLIER migration
+  created is still not refused, because validation is offline and reads only the
+  migration in front of it. Measured live: it reaches the server and fails
+  mid-deploy with MySQL `ERROR 1170`. The information needed to close it exists at
+  lower time, where the apply path already carries a live catalog snapshot, so the
+  gate belongs there rather than in `validate`. That is a new gate with its own
+  failure modes (preview lowers with an empty snapshot and must not refuse what it
+  cannot see) and wants its own decision.
 - [ ] Case-collation parity: `caseSensitive` should pin an explicit collation on
   MySQL (default is case-insensitive there; `caseSensitive: true` is currently
   ignored), so string equality/uniqueness matches Postgres/SQLite.

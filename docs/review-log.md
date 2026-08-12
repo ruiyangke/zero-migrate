@@ -8990,6 +8990,78 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F416 - two documents called a shipped gate unbuilt, and the half that really is missing was never written down
+
+FOUND by taking the front door first, which is the correction F414 cost. Measured against live
+MySQL 8.4.11 through the host `apply` path. Docs fixed; the residual gap is filed rather than closed,
+and the reason is at the end.
+
+### The disagreement
+
+`TODO.md` carried an unchecked box: "Fail-closed validate rule: reject a `t.text()` column used in a
+MySQL primary key / unique / index (today it renders `TEXT` and fails at apply with MySQL
+`ERROR 1170`). Deferred only because many existing test fixtures use text-in-key ...". `docs/
+dialects.md` agreed: "A `t.text()` column placed in a key currently surfaces this as MySQL's
+apply-time error rather than an earlier validation error."
+
+`validate.rs:2309` is that rule, built. Two documents describing a shipped gate as absent is how a
+gate gets rebuilt by someone who believes them, or deleted as dead code by someone who greps for
+callers and trusts the prose.
+
+### What the front door actually does
+
+Three spellings, driven through the shipped host `apply` against live MySQL:
+
+```
+createIndex on a t.text() column        -> REFUSED at validate
+table-level unique on a t.text() column -> REFUSED at validate
+createTable inline index on one         -> REFUSED at validate
+   "... MySQL refuses a key over a TEXT or BLOB column with no prefix length"
+   "bound the column with t.string({ length }) so it renders VARCHAR, or use a
+    dialectal PostgreSQL/SQLite leg"
+```
+
+So the rule works, and its message is good. The docs were describing a version of the engine that
+has not existed for some time.
+
+### The half that IS missing, which neither document mentioned
+
+`validate_mysql_key_storage`'s own SCOPE comment says it: the column must be declared in the SAME
+envelope. Measured, two deploys:
+
+```
+migration 1: createTable docs (id int, body text)      -> applied
+migration 2: createIndex docs_body_idx on (body)       -> NOT refused
+   server: BLOB/TEXT column 'body' used in key specification without a key length
+```
+
+A key over a column an EARLIER migration created reaches MySQL and fails mid-deploy. That is the
+exact behaviour `docs/dialects.md` described - it just described it as the general case rather than
+as the residue, so the sentence was simultaneously the only true statement about the gap and the
+reason nobody could tell there was one.
+
+### Fixed, and not fixed
+
+Both documents now state the boundary in both directions, and a host arm pins each half so neither
+can drift again: the refusal by its message, the residue by MySQL's own `ERROR 1170` text. The
+second arm asserts current behaviour and is written to fail when that improves, so whoever closes
+the gap is told where to record it.
+
+The gap itself is NOT closed here. Validation is offline by construction -
+`validate_ir_scoped` takes no live schema and threading one through would change what validation IS,
+not just what it checks. The information exists at lower time: the apply path already seeds its fold
+from a live catalog snapshot (`crates/zero-migrate-node/src/lower.rs:588`, the same seam that made
+F413's fatal lookup unreachable there). So the gate belongs in lower - and lower also runs under
+`preview` with an EMPTY snapshot, so a rule there must refuse only what it can see and skip what it
+cannot, which is the shape this log has criticised twice for being weakest exactly where the input is
+most suspicious. That is a real decision with a real failure mode and it wants its own slice.
+
+### The method note
+
+F414 was filed because I measured a renderer instead of the path a user takes. This entry started
+from `apply` and found both a stale claim and a real gap in one run. Same instrument, opposite
+outcome, and the only difference is which door I knocked on first.
+
 ## F415 - the portable case-insensitive column the docs recommend does not apply on a stock PostgreSQL
 
 FOUND by writing an honest CONTROL for the F414 correction, not by looking for it. Reproduced
