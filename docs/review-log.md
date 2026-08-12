@@ -8990,6 +8990,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F400 - a dropped policy rolls back, and the fields that look cosmetic are the security-carrying ones
+
+SHIPPED 3ca8fb0e, #23 item (c) for policies. Same shape as the function and trigger inverses before
+it: `fold_ops_onto` retains each authored `CreatePolicy` as a `PolicySnapshot`, and the restoring
+statement is synthesised from that record at the lowering seam. `DropPolicy` IS a vendor op, unlike
+the trigger, so the arm went into the existing `vendor_inverse_from_history` beside `DropExtension`
+and `DropFunction` rather than into a new helper.
+
+### Three fields where a reasonable normalisation would be a security change
+
+`Op::CreatePolicy` (ir.rs:3666-3684) carries `for_cmd`, `to: Option<Vec<String>>`, `using: Expr`
+which is REQUIRED, and `with_check: Option<Expr>`. The snapshot stores each as-is:
+
+- `to` absent means PUBLIC (ir.rs:3676). Folding `None` into `Some(vec!["public"])` on the way in,
+  or the reverse on the way out, changes which roles the restored policy covers.
+- `using` is the row filter. A policy restored without it is present in `pg_policy` and filters
+  nothing, which reads as success at every layer that only asks whether the object exists.
+- `with_check` distinguishes a policy that constrains writes from one that does not, and `None` is
+  not the same as an empty predicate.
+
+None of these would fail a test that only asserts a policy came back.
+
+### The key, again, is (schema, table, name)
+
+`pg_policy` is keyed by `polrelid` plus `polname`, so a policy name is unique within its table and
+`orders` and `invoices` can each carry `tenant_isolation`. This is the third op in a row where the
+name-only key would have restored the wrong object onto the wrong table and journalled a success.
+`positive_same_named_policies_on_two_tables_restore_only_the_dropped_one` pins it.
+
+### RLS had to be in the live fixture, and the reason is not obvious
+
+PostgreSQL will catalog a policy on a table with row-level security DISABLED. The policy exists and
+does nothing. A live test that created the policy without `SetRls` would therefore pass while
+proving less than it appears to - the restored policy would be present and still inert. The fixture
+enables RLS, asserts `relrowsecurity`, and compares command, roles, `USING` and `WITH CHECK` across
+the drop and the rollback.
+
+### Verification
+
+Mutation-proven with both databases exported. The gate went on the DropPolicy match arm alone rather
+than at the top of `vendor_inverse_from_history`, because that function also serves extensions and
+functions and a blanket gate would have failed their tests too and proved nothing about this one.
+Four positives fail, both negative controls pass, and the live case fails through the real refusal:
+
+    thread 'positive_rolling_back_a_dropped_policy_restores_its_definition' panicked at
+    crates/zero-migrate/tests/drop_policy_rollback_pg.rs:488:32:
+    rolling back the policy drop must succeed: migration mig_7n42DGM5Q5GhSL6QPFnsHe
+    ('drop_policy_visible_events_events') is irreversible (down: None); rollback refuses by default.
+
+fmt 0, clippy 0, doc 0, and both test stages 0. Core crates 124 targets / 2567 passed / 0 failed /
+1 ignored, up from 123 / 2561 by exactly the new file and its six tests. The addon crate adds
+8 targets / 74 passed via `cargo test -p zero-migrate-node --no-default-features`, up 2 by its new
+tests. Zero skip banners.
+
+The combined figure is 132 / 2641, and it is NOT comparable to F399's 123 / 2561: that run excluded
+the addon crate entirely because I invoked it with `--features napi`, which cannot link outside
+Node, so it contributed no test results at all. Splitting the two before quoting a delta is what
+kept this from reading as +80 tests from one change.
+
 ## F399 - a dropped trigger rolls back, keyed by table so two tables can share a trigger name
 
 SHIPPED 3d69039e, #23 item (c) for triggers. `dropTrigger` had no inverse, so a rollback refused
