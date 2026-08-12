@@ -8990,6 +8990,37 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F372 - the third copy of F371's false claim, on the function that actually does the flattening
+
+F371 corrected two comments that said an `extends` document overrides its base. There was a THIRD,
+and it sat on `overlay_docs` itself - the function performing the merge, so the most load-bearing of
+the three and the one a reader reaches first:
+
+    /// Doc-level overlay for `extends` (II.7): the `base` is the OUTER layer, `over` the
+    /// INNER (override) layer. Rule lists ACCUMULATE (base first, then `over`) so a
+    /// query's loosest-covering/fall-through sees `over` first; ... (the composer's
+    /// scalar last-wins is realized at query time by rule order).
+
+Three claims, all false at this site, by the measurement in F371: there are no two layers to be
+outer and inner of, there is no fall-through within a layer, and rule ORDER decides nothing because
+`GrantKeyMap::value_at` joins. I missed it when I fixed the other two, which is worth recording
+because the miss has a shape: I searched for the sentence I had already read rather than for the
+function the sentence described.
+
+Corrected to state accumulation, to name the join as the reason order cannot override, and to
+separate this function from `compose::overlay`, whose semantics it had borrowed.
+
+ALSO CORRECTED, found while checking who consumes what: `PolicyDoc::default_scope` is a PUBLIC field
+documented "Kept for the composer". Measured - `grep -rn '\.default_scope' crates/ packages/` returns
+NOTHING outside `document.rs`, and inside it the only uses are writing the field and inheriting it in
+`overlay_docs`. No composer reads it, and none needs to: every non-Global rule already carries its
+effective scope with the default met in.
+
+Kept rather than removed, with the reason written down. A host inspecting a loaded document cannot
+otherwise recover what the author wrote - `app_*` met into every rule does not look different from
+`app_*` repeated on every rule. So it is reporting-only, and the doc now says deriving authority
+from it would double-apply a meet the loader already performed.
+
 ## F371 - `extends` accumulates, so a document could not tighten its base and never said so
 
 #12's "extends flattening grants" finding. Real, and the comment defending the behaviour named a
