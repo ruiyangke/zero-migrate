@@ -8990,6 +8990,78 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F395 - the doc gate CI runs was red at HEAD, so it had stopped gating
+
+SHIPPED 4c0609f9. Found only because I could not get a green run while verifying F394, and the
+failures named files I had not touched. Reproduced on a CLEAN HEAD (ef1abece, my work stashed) with
+the exact command from `.github/workflows/ci.yml:101-104`:
+
+    RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
+
+    error: public documentation for `ir_created_tables` links to private item `collect_created_tables`
+    error: public documentation for `history_carries_dialectal_ops` links to private item `push_fold_op`
+    error: unresolved link to `flatten_dialectal_ops`
+    error: redundant explicit link target
+      --> crates/zero-migrate/src/apply/precondition.rs:55:37
+    RC_DOC_HEAD=101
+
+THE DEFECT IS NOT THE FIVE LINKS. #14 built this gate and #190 repaired it once already. It went red
+again, and nothing surfaced that: a red gate and a gate that passes are indistinguishable from
+inside the repo, so every doc link merged since the last repair was unchecked. That is the finding;
+the links are the symptom.
+
+The three private-item links became plain code spans rather than being re-pointed. Those items ARE
+private, and a link retargeted at whatever resolves nearby would satisfy the gate while telling the
+reader something false - which would leave the gate green and the docs wrong, the exact state this
+entry is about. The two redundant targets dropped their explicit path; the sibling link one line
+below keeps its target because its label and path differ.
+
+I REACHED THIS AFTER TWO CONFIDENT WRONG DIAGNOSES, both worth recording because each looked
+sufficient at the time:
+  1. I blamed my own new intra-doc links from F394. The failing files were `load.rs` and
+     `precondition.rs`, neither of which I had edited. Checking WHICH file failed would have killed
+     this in one step.
+  2. I blamed my instrument: I had omitted `--document-private-items`, and reasoned that a link to a
+     private item resolves once private items are documented. That reasoning is plausible and
+     wrong - adding the flag did not clear the errors. I stated it as settled before testing it.
+The check that actually settled it was stashing my work and running the gate on a clean tree, which
+was available from the first minute and costs one command. When the question is "did I break this or
+was it already broken", the answer is a clean-tree run, not an argument about flags.
+
+NOT ESTABLISHED: when it regressed, and whether CI on origin/main is red right now. `git log -S` on
+the offending doc lines would date it. I did not look, and #224 carries that.
+
+Same command now exits 0. fmt 0, clippy 0, doc 0; 121 targets / 2542 passed / 0 failed / 1 ignored.
+
+## F394 - #223 resolved: the exception is named where the invariant is claimed, not only at the differ
+
+SHIPPED 35741de0, closing what F391 opened and F392 corrected. No behaviour change.
+
+The decision was between a dialect-aware differ and a documented contract. zeroship answered the
+reachability question in ZEROSHIP-2026-08-12-254 with measurements in their own tree - the differ
+entry points return 0 hits across six roots, with a POSITIVE CONTROL on the same instrument
+(applyIrSqlite 10, genArtifacts 37, irVersion 22) so the zeros mean something, and their seven
+`createPartition` children are Postgres-only. No known consumer is harmed, so no dialect-aware
+comparison was built, and they explicitly asked for it not to be built on their account.
+
+BUT THE DOC-ONLY ANSWER IS NOT THE TRIVIAL ONE, which is the part worth keeping. The codex half of
+the split argued this violates a documented invariant, and that argument SURVIVES "nobody calls it".
+`render/fold.rs:11` heads a section "Why it agrees with introspection (the load-bearing invariant)"
+and asserts it unqualified, and `model/snapshot.rs` called `PartitionSnapshot` a child partition
+RELATION with no qualification. Documenting only `diff_snapshots` would have left both standing.
+That is the F332 shape - correct behaviour defended by a claim that is not true - and a reader
+checking whether the invariant holds reads the invariant section, not the differ.
+
+So the exception is now stated in three places: at the invariant, on the type, and on the public
+comparison. The invariant section also records WHY the round-trip oracle never caught it - it runs
+against PostgreSQL only - and that the recorded child cannot simply be dropped, because the lower
+reads those bounds back for the collapsed deletes and `tests/partition_render.rs` feeds a folded
+history straight back into lowering.
+
+MY OWN ASCII RULE CAUGHT ME ONCE HERE: the first commit carried two em dashes on an added line. The
+added-lines check reported `non_ascii=1` in the same command that made the commit, so it landed and
+was amended rather than prevented. The check belongs BEFORE `git add`, not beside it.
+
 ## F393 - #79 half (A) shipped: an existence-guard probe is authorized before it reads a catalog
 
 SHIPPED 987eff4b. `Migration::existence_guard` carries the schema the probe snapshots, and the
