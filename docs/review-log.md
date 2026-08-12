@@ -8990,6 +8990,81 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F408 - #79 built: the MySQL guard is reachable, and the decision it cannot make is refused rather than guessed
+
+BUILD for #79, shipped as 2e4c21ee (wiring) and 6386a570 (the truth surfaces that said this could
+not happen). #227/F407 was its blocking prerequisite and is now in.
+
+### What was broken
+
+MySQL had no `existence_probe::decide` call site at all. The three production sites were
+`sqlite/mod.rs:619`, `postgres/session.rs:722` and `postgres/session.rs:1057`. So a guarded op on
+MySQL could not adopt an existing object: the DDL reached the server and failed. Measured against a
+live server earlier in this review: `ER_1050` on a `createTable` against an identical table,
+`ER_1060` on a duplicate `addColumn`.
+
+### The shape
+
+`mysql/session.rs:870-949`. In order:
+
+1. `authorize_existence_guard_schema` BEFORE the snapshot, reusing the shipped design rather than
+   re-deriving it. It is not compared against `cfg.project_schema` - MySQL sets
+   `Capability::CrossSchemaDdl` at `renderer.rs:107` and cross-database DDL is deliberate.
+2. The live snapshot.
+3. A typed refusal for a PRESENT table or column under `IfNotExists`, before `decide` is consulted.
+4. `decide(probe, &live, SqlDialect::Mysql)`, handling all three verdicts: `RunBare` falls through,
+   `SatisfiedNoop` calls `finalize_two_phase` and returns without executing DDL or arming an
+   inflight marker, and `FailDrift` becomes `ApplyError::ExistenceGuardDrift`.
+
+That last arm is the one I checked hardest. F407 made `decide_constraint` refuse an unresolved MySQL
+constraint, and a call site that caught that refusal and continued would have quietly re-created the
+defect #227 existed to fix. It does not: the refusal is converted to an error and returned.
+
+### Ordering, and why it is not cosmetic
+
+`has_rollback_inflight` refusal (~:820) -> `had_inflight` refusal (~:832) -> probe (~:870) ->
+`record_started`. Reversing the first and third would let a matching partial schema resolve
+`SatisfiedNoop` and auto-recover a half-applied, auto-committed MySQL DDL attempt that the backend
+refuses on purpose. The probe must not be able to launder an interrupted migration into a clean one.
+
+### The refusal is the point, not a gap
+
+A present `createTable` or `addColumn` is refused with `field: "data_type"` and
+`actual: "<unknown: MySQL column-type equality is not implemented yet>"`. Adopting it would require
+proving the live column type equals the declared one, and the MySQL snapshot does not carry the
+modifier-bearing contract that would need. The alternative to refusing is guessing, and a wrong
+`SatisfiedNoop` skips real DDL and journals the migration completed. This is a capability boundary
+stated out loud, not an oversight.
+
+### Verified by me rather than accepted
+
+The dispatched agent reported a green gate and a mutation table. Four things I checked myself
+because a report is not evidence:
+
+- SCOPE. The change touched 13 files against a brief that scoped two, which is the shape that hides
+  an unrequested redesign. Filtering each out-of-scope diff to non-comment, non-blank changed lines
+  returned NOTHING for `render/declarative.rs`, `render/lower.rs`, `tests/existence_guard_sqlite.rs`
+  and `tests/pg_scenarios.rs`. They are comment-only, and they had to move because they asserted
+  MySQL evaluates no probe - a claim this commit falsifies. Scope creep resolved by measurement,
+  not by taking the agent's word.
+- THE CALL SITE ACTUALLY RUNS. Read end to end from `apply_two_phase`, not inferred from the report.
+- MY OWN GATE: fmt 0, clippy 0, test 0, addon 0. 133 targets / 2658 passed / 0 failed / 1 ignored,
+  zero "LIVE-DATABASE COVERAGE SKIPPED" banners.
+- MY OWN MUTATION of the type-equality refusal, which the agent never isolated - it mutated only the
+  shared `decide` call. Disabled behind a temporary env gate keeping every export intact, run against
+  the WHOLE MySQL module: baseline 112 passed / 0 failed; with the arm disabled, exactly ONE failure,
+  `mysql_guard_refuses_a_decision_that_needs_column_type_equality`, 111 passed. The arm is
+  load-bearing and targeted. Gate removed, `rg` confirms zero occurrences remain.
+
+### What this coverage is NOT
+
+It is not a live MySQL run, and the report says so plainly rather than implying otherwise. No Rust
+code in this repo reads `ZERO_MIGRATE_MYSQL_URL` - the only occurrence is an explanatory comment.
+The tests drive the real `MysqlBackend` through `RecordingSession`. Setting the variable changes
+nothing: 69 passed either way, identical test-name sets, no banner. So the wiring is proven against
+the recording seam and against the shipped snapshot reader, and NOT against a server. A live-MySQL
+harness remains absent, which is a dependency fact recorded under #176, not a gap this build opened.
+
 ## F407 - #227 built: the guard resolves what MySQL files, refuses what it cannot see, and cost one shipped pin
 
 BUILD for F406, shipped as e5dfd3d5. Both halves mutation-proven separately, by me, against the
