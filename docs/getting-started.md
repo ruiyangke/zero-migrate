@@ -445,7 +445,10 @@ export default {
   up() {
     table("users").column("display_name").rename({
       to: "full_name",
-      type: t.text(),
+      // Must equal the live type of `display_name`, which step 2 declared as
+      // t.string({ length: 255 }). A rename requires type identity; declaring
+      // t.text() here is refused at lower as a cross-type rename.
+      type: t.string({ length: 255 }),
     });
   },
 };
@@ -481,17 +484,44 @@ Create the trusted ownership registry:
 ```
 
 Save that map as `table-owners.json`. Preview and validate the directory with
-the same owner, schema, and registry you will use for apply:
+the same owner, schema, and registry you will use for apply - all four flags
+matter now, unlike the bare `lint` in step 3:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js lint --dir ./migrations --explain
-
-pnpm exec tsx dist/cli-bin.js plan \
+pnpm exec tsx dist/cli-bin.js lint \
   --dir ./migrations \
+  --explain \
   --dialect postgres \
   --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
+```
+
+Dropping any of them fails, for two separate reasons:
+
+- without `--registry` (and the matching `--owner-app`), the rename targets a table
+  lint cannot attribute, and it refuses with `ownership violation: op 0 targets
+  table "users" owned by <unregistered> (deploying app is "app_cli")` - `app_cli`
+  being the default owner when none is passed;
+- without `--dialect postgres`, lint checks all three dialects and the MySQL leg
+  refuses: `renameColumn is render-only for MySQL, not live-rendered`. The online
+  rename is PostgreSQL-only.
+
+The PostgreSQL leg reports the rename as `[runtime-resolved]` rather than printing
+SQL. That is expected and is not a failure: an online rename lowers against the live
+column structure, so the exact statement stream is not knowable offline.
+
+The rename's backfill issues an `UPDATE`, and `safety.destructive_ops` is
+default-deny like every other knob, so add it to `policy.toml` before applying.
+`--approve` below is the operator approval gate; it is not the policy grant, and
+without the grant apply stops with `DATA_SECURITY_DESTRUCTIVE_OPS_FORBID denied:
+UPDATE`.
+
+```toml
+[[grant]]
+key = "safety.destructive_ops"
+value = "allow"
+scope = "all"
 ```
 
 Then start the rename with approval because it includes a bounded backfill:
@@ -530,16 +560,24 @@ other database consumers to stop using `display_name`, and verify the
 application cutover. Other migration changes to `users` are blocked until you
 resolve the rename.
 
-Complete the rename with the returned `pendingVersion`:
+Complete the rename by naming the MIGRATION, not the version. `resolve` takes the
+exported migration name and looks it up in `--dir`; passing the `pendingVersion`
+from the apply reply fails with `unknown migration "mig_..." in ./migrations`. The
+`pendingVersion` is for correlating the obligation in `status --json`, not for this
+command.
 
 ```bash
-pnpm exec tsx dist/cli-bin.js resolve "mig_..." \
+pnpm exec tsx dist/cli-bin.js resolve rename_user_display_name \
   --commit \
   --approve \
   --database-url "$DATABASE_URL" \
+  --policy ./policy.toml \
+  --registry ./table-owners.json \
   --schema app_demo \
   --owner-app app_demo
 ```
+
+`--policy` is required here exactly as it is for apply and status.
 
 `--commit` keeps `full_name` and drops `display_name`. To abandon the rename,
 move the application back to `display_name` first and run the same command with
