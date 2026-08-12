@@ -67,43 +67,49 @@ host approval decisions. Applying an arbitrary custom policy requires a host
 integration beyond the current public executor configuration; do not advertise a
 custom plan as an end-to-end apply guarantee.
 
-The convenience helper admits the root directly. Use the full
-`finalize_charter` flow below whenever trusted layers are composed or mandatory
-injection must be checked against the complete create-table scope.
+The convenience helper admits a single root. Use the layered flow below when a
+root is combined with environment or project layers.
 
-## Full admission flow
+## Layering more than one document
 
-For trusted layering plus an untrusted project draft:
+Pass the layers ROOT FIRST. Each later layer is loaded as
+`LoadContext::NonRootLayer` and admitted as an untrusted narrowing draft, so a
+later layer may only tighten what an earlier one granted:
 
 ```rust
-use zero_migrate_ir::policy_registry::builtin_registry;
-use zero_migrate_policy::{
-    LoadContext, PolicyDoc, RootCharter, TrustedDoc,
-    admit, finalize_charter, overlay,
-};
+use zero_migrate::effective_policy_from_charter_layers;
 
-let registry = builtin_registry();
-let root = RootCharter::parse_toml(root_toml, &registry)?;
-let environment =
-    TrustedDoc::register_catalog_entry(environment_toml, &registry)?;
-
-let assembled = overlay(root.as_trusted(), &environment, &registry)?;
-let charter = finalize_charter(assembled)?;
-
-let draft = PolicyDoc::parse_toml(
+let effective = effective_policy_from_charter_layers(&[
+    root_toml,
+    environment_toml,
     project_toml,
-    &registry,
-    LoadContext::NonRootLayer,
-)?;
-
-let effective = admit(&charter, &draft, &registry)?;
+])?;
 ```
 
-Only register operator-controlled bytes as `TrustedDoc`. Creator-controlled
-documents must use `LoadContext::NonRootLayer`.
+This is the composition the engine itself runs, and it is the one to build on.
+Creator-controlled documents are non-root layers by construction here; there is
+no way to pass one as trusted.
 
-Use `restrict` instead of `overlay` when one trusted layer must only tighten
-another. Always finalize an assembled charter before admitting a draft.
+The composed policy is refused if it can create tables outside a mandatory
+inject's scope, or if one layer carries two injects that conflict on overlapping
+scope. Both refusals name what collided.
+
+## The trusted charter algebra
+
+`zero_migrate_policy` also exposes `TrustedDoc`, `overlay`, `restrict` and
+`finalize_charter`, which assemble a charter from trusted layers before admitting
+a draft.
+
+NOTHING IN THIS ENGINE CALLS THEM. `effective_policy_from_charter_layers` above
+is the only composition any shipped code path performs, and the two checks that
+once justified reaching for `finalize_charter` - the creatable-escape bound and
+the inject/inject conflict scan - now run on that path too. A third,
+inject-versus-validate contradiction, is caught by the document loader before
+composition begins.
+
+They remain exported for a host that wants to assemble a charter itself, and are
+documented here so nobody builds on them believing the engine does. Prefer the
+layered flow.
 
 ## Policy document
 
