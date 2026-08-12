@@ -8990,6 +8990,42 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F379 - a changed ANSWER described as a changed VARIANT, and a consumer built a plan on it
+
+zeroship read my F374 advisory as saying `UncoveredRegionNotRepresentable` is new in 8c254fa8, and
+deferred a test on it until after they move their vendored pin, on the grounds that it is
+"unreachable at our pin". They flagged that specific claim as not independently checked and said it
+came from me. It is false.
+
+VERIFIED against the pre-fix source. `git show 8c254fa8^:crates/zero-migrate-policy/src/boundary.rs`
+constructs the variant at two sites, and the uncovered-region arm computes the same subtraction the
+new code does:
+
+    if !deferred.is_empty() && !matches!(r, Scope::Nothing) {
+        return Err(ComposeError::UncoveredRegionNotRepresentable { key: key.clone() });
+    }
+
+A draft at `scope = "all"` against a charter rule scoped to one exact literal makes `draft_granted`
+= `All`, the subtrahend that literal, and `All` minus a literal has no representation - so the
+deferred list never empties and the arm fires. That is the F377 case 5, on the OLD code.
+
+WHAT I ACTUALLY CHANGED was not reachability but the number of causes: the new proof also returns
+the variant when the charter DOES cover and the discharging subtraction is unrepresentable, which is
+a false reject. The original cause - reaching outside unnameably - predates the fix, which F376
+already recorded. What I wrote to them was that their attack "now reports GrantExceedsCharter rather
+than the vaguer variant". True of that one input, and it reads as the variant being new.
+
+THE SHAPE, since it is the second time in one thread. F377 was concluding reachability from a grep.
+This is describing a changed ANSWER in words that name a changed VARIANT. Both are the same
+carelessness about what a sentence will be used for: a downstream reader turns a description into a
+plan, and mine gated a test they could have written today.
+
+Also recorded from their reply, because it narrows my own claim: their confined ceiling grants three
+keys - `schema.create_table`, `schema.rename`, and `safety.destructive_ops` at `scope = "all"` - and
+does NOT grant `sql.raw`, which lives only in an operator-internal ceiling that takes no creator
+draft. The shape I proved safe in F377 is therefore strictly WIDER than the one they compose. The
+conclusion stands; the reasoning behind it was broader than the case required.
+
 ## F378 - #12 closed: all nine NAMED findings settled, and three that were never written down cannot be
 
 #12 says "Codex reported 12 findings (9 high)" and then names nine. Those nine are now all settled.
