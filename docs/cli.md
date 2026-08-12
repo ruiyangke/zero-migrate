@@ -293,6 +293,16 @@ execute the rendered migration SQL.
 Live planning is available for PostgreSQL, MySQL, and SQLite. Planning uses a
 read-only status path and does not create SQLite journal files on fresh targets.
 
+Planning against SQLite is not free of side effects, despite reading only. It
+opens the application database with the same hardened connection profile apply
+uses, and that profile pins `journal_mode = DELETE`. A SQLite application
+database in WAL mode is therefore converted to DELETE journal mode by `plan`,
+persistently and without a message, exactly as it would be by `apply` — see
+[Security model](security-model.md). The conversion outlives the command and
+removes the `-wal` sidecar, so an application relying on WAL's concurrent
+readers loses that concurrency until something sets the mode back. Do not run
+`plan` against a live WAL database you are not also prepared to apply to.
+
 ## `apply`
 
 ```bash
