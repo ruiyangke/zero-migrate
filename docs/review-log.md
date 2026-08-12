@@ -8990,6 +8990,47 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F373 - MEASURED, filed as #219, NOT fixed here: admission depends on the order the draft's rules are written
+
+#12's "admission witness gaps" finding. Real, and it is an escalation across the trust boundary the
+crate's own module header calls "the SOLE untrusted crossing".
+
+`check_grant_key`'s COVERED-region arm (`crates/zero-migrate-policy/src/boundary.rs:185-214`)
+partitions the draft's granted scope by each CHARTER grant rule scope, samples ONE witness per
+region, and compares values there. It draws NO boundary at the DRAFT's own rule scopes, so when a
+draft carries two different values inside one charter region only one of them is ever sampled.
+
+The two runs differ only in which of the two draft rules is written first:
+
+    PROBE A_compliant_first  = ADMITTED app_one=Some(Str("warn")) app_two=Some(Str("allow"))
+    PROBE B_escalating_first = REFUSED GrantExceedsCharter { key: KnobKey("safety.posture"),
+                                        offending_pattern: "app_one.*,app_two.*" }
+
+In A the draft holds `allow` at `app_two`, where the charter granted only `warn`. Same two rules,
+opposite outcomes. The full reproduction - registry knob, charter TOML, draft TOML - is in #219 so
+it can be rebuilt verbatim without this repo.
+
+NOT REACHABLE WITH THE BUILTIN REGISTRY, and this is the part I checked hardest, because it decides
+whether this is an incident or a latent hole. Every object-scoped Grant knob there is
+`KnobKind::Bool`: `bool_grant` (`crates/zero-migrate-ir/src/policy_registry.rs:248`) hard-codes the
+kind, and the one object-scoped Grant written as an explicit `KnobDef`, `schema.alter_injected` at
+`:394`, is `KnobKind::Bool` too. Bool has exactly ONE value above default, so a draft's value is
+constant across its granted scope and one witness is representative. The `PerTable` entry at `:363`
+is `require_approval_knob` - `Require` polarity, which unions up and never reaches this check.
+
+So the shipped engine is not escalating today. What is missing is any reason it stays that way:
+`PolicyRegistry::empty().with(...)` is public and the crate documents the known set as
+runtime-extensible, so a host can register an object-scoped ordered grant right now, and the engine
+adding one would open the hole with no test failing.
+
+DELIBERATELY NOT FIXED IN THIS ITERATION. The obvious repair - partition by the union of charter and
+draft rule scopes - may not be sound: `value_at` JOINS every covering rule, so three overlapping
+draft rules can still produce a region where the covering SET varies and a single witness is
+unrepresentative. Guessing at a trust-boundary fix late in a session is how #15's C-1 defect got
+there in the first place. The question is with codex read-only, the reproduction is recorded, and
+#219 carries the three open questions including whether the builtin registry should gate
+object-scoped non-Bool grants until the check is sound.
+
 ## F372 - the third copy of F371's false claim, on the function that actually does the flattening
 
 F371 corrected two comments that said an `extends` document overrides its base. There was a THIRD,
