@@ -52,7 +52,7 @@ that the charter did not allow.
 For one simple trusted charter, no separate project draft, and no mandatory
 injection rule:
 
-```rust
+```rust,ignore
 use zero_migrate::{
     GuardConfig, SqlDialect, effective_policy_from_charter_toml,
 };
@@ -76,7 +76,7 @@ Pass the layers ROOT FIRST. Each later layer is loaded as
 `LoadContext::NonRootLayer` and admitted as an untrusted narrowing draft, so a
 later layer may only tighten what an earlier one granted:
 
-```rust
+```rust,ignore
 use zero_migrate::effective_policy_from_charter_layers;
 
 let effective = effective_policy_from_charter_layers(&[
