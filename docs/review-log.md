@@ -8990,6 +8990,111 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F411 - a NOT VALID foreign key reported drift for exactly as long as it stayed unvalidated
+
+FOUND by widening the live PostgreSQL fold oracle rather than by reading. REPRODUCED, fixed, and
+verified against PostgreSQL 18.
+
+### The measurement
+
+`fold_roundtrip_pg.rs` had a harness that applies an IR envelope op by op and, at each named
+checkpoint, folds the ops applied so far and diffs the result against `snapshot_schema` of the live
+schema. Its own module doc said it did not cover index facets, and it covered no constraint facet
+beyond plain UNIQUE / CHECK / FK. Five new lifecycle cases were added to it - index facets, catalog
+comments, a table rename, a structured view, and constraint facets. Four passed on the first run.
+The fifth did not:
+
+```
+add NOT VALID foreign key: folded and live PostgreSQL schemas must have clean drift
+  field:    definition
+  expected: FOREIGN KEY (adopted_id) REFERENCES <schema>.facet_parent(id)
+  actual:   FOREIGN KEY (adopted_id) REFERENCES <schema>.facet_parent(id) NOT VALID
+```
+
+`pg_get_constraintdef` renders that tail for as long as `convalidated` is false. The fold never
+rendered it, so a constraint added `NOT VALID` reported structural drift from the moment it was
+added until a `VALIDATE CONSTRAINT` cleared it - which is the whole window the facet exists to open,
+and normally spans two deploys, because adding under a weak lock and validating later is the entire
+point of authoring it.
+
+### It was deliberate, and the reason it gave was the defect
+
+Two comments said so:
+
+```
+fold.rs:3775  "NOT VALID is fold-invisible: the folded DESIRED schema is the eventual-validated
+               constraint (a later VALIDATE CONSTRAINT is a fold no-op), matching the live catalog
+               after validation."
+fold.rs:2308  Op::ValidateConstraint => { }   // explicit no-op
+```
+
+Read as a statement about the end state it is true. Read as a statement about the fold it is the
+bug: the fold is not a prediction of where the schema ends up, it is a replay of where the schema is
+after the ops replayed so far. Every other op in that match arm folds the state it creates, not the
+state a later op will turn it into.
+
+### The second consequence, which is worse than the drift report
+
+`diff_with_known_fk_targets` (declarative.rs:5918) compares a live FK body against the desired one
+and, on any difference, returns `DeclarativeError::UnsupportedInV1` - a hard refusal, not a report.
+The desired body is built by the same renderer that omitted the tail. So an unvalidated foreign key
+in the live catalog did not merely produce a noisy drift line: it refused the next declarative
+deploy of that table, with a message about a "definition change" between two bodies that differ only
+in a validity state nobody changed. A foreign key added `NOT VALID` out of band - which is the
+standard way to add one to a large table - is enough to reach that.
+
+That path is unchanged by this commit and stays unchanged deliberately: under a declarative model the
+desired state IS the validated constraint, so a live unvalidated one is a real difference. What it
+should do about it - validate rather than refuse - is a separate decision and a bigger one.
+
+### The `createTable` arm ignores the flag, and that is correct
+
+Measured on PostgreSQL 18 rather than reasoned about, because the two arms had to be decided
+separately:
+
+```
+CREATE TABLE nv_probe.c (id int, pid int,
+  CONSTRAINT c_pid_fkey FOREIGN KEY (pid) REFERENCES nv_probe.p(id) NOT VALID);
+SELECT conname, convalidated, pg_get_constraintdef(oid) FROM pg_constraint ...;
+  ->  c_pid_fkey | t | FOREIGN KEY (pid) REFERENCES nv_probe.p(id)
+```
+
+The server takes the token and stores the constraint VALIDATED, reporting a plain body. So recording
+the tail on the `createTable` path would have traded one phantom diff for another. Only the
+stand-alone `addConstraint` records it.
+
+### What shipped
+
+`fk_definition_for_dialect` takes a `not_valid` flag and spells the tail on PostgreSQL only, and
+`ir_fk_constraint_snapshot_for_columns` passes it through. `Op::ValidateConstraint` stops being a
+no-op and strips the same suffix from the named constraint.
+
+The renderer already had this spelling. `lower.rs:7868` built the snapshot through the shared
+builder and then did `fk.definition.push_str(" NOT VALID")` itself, under a comment that says
+"(PG only)" without gating on the dialect. That second copy is why the fold could omit it: the
+spelling was not in one place, so only one of the two places had it. That site now passes the flag
+to the builder, so the body the renderer emits and the body the fold records are one string.
+
+The strip is deliberately tolerant where the drop is not. `DropConstraint` errors with
+`MissingConstraint` when nothing was removed; `ValidateConstraint` stays a no-op on an absent
+constraint, because validating one an earlier artifact added is ordinary and a fold over a partial
+op list would otherwise fail on a history the server accepted. Nothing to strip is equally the case
+for a CHECK, whose fold never carries the tail (the differ exempts CHECK bodies from comparison
+entirely, so the gap only ever surfaced on a foreign key).
+
+### Gates
+
+fmt 0, clippy 0, doc 0. 126 targets / 2596 passed / 2 failed / 0 ignored / 0 live-database skip
+banners, against PostgreSQL 18 and MySQL 8. Baseline before the change was 125 / 2590; the six new
+passes are the five lifecycle cases plus a live-server control. The two failures are
+`apply_dml_validation_pg`, an untracked measurement left in the tree by a concurrent investigation
+into DML qualified-reference validation; they are not this change and are not committed with it.
+
+The SQLite oracle was widened in the same commit - a case-insensitive text column and the UNIQUE /
+partial / expression / DESC index facets - and found nothing. That is worth recording as a negative
+result: the facet that looked most likely to break there, `COLLATE NOCASE`, round-trips through the
+stored `CREATE TABLE` text and back into `case_sensitive` correctly.
+
 ## F410 - #228 fixed: the ownership gate authorized the partition parent while lowering acted on the child
 
 FOUND by the zero-migrate-ir review (#2, its top finding of nine). REPRODUCED by me. DECIDED with a
