@@ -180,10 +180,10 @@ branches.
 
 ## 4. Validate before connecting
 
-Run the offline plan check:
+Validate against one target dialect, still without a database:
 
 ```bash
-pnpm exec tsx dist/cli-bin.js plan \
+pnpm exec tsx dist/cli-bin.js lint \
   --dir ./migrations \
   --dialect postgres \
   --owner-app app_demo \
@@ -195,8 +195,14 @@ to modify an object owned by another application. It is a useful CI check, but
 it does not inspect your live schema, test database permissions, or guarantee
 that apply will succeed.
 
-Repeat the command with `--dialect mysql` or `--dialect sqlite` when you deploy
-to those targets. Plan remains offline and does not connect to that database.
+Repeat it with `--dialect mysql` or `--dialect sqlite` when you deploy to those
+targets. With no `--dialect`, `lint` checks all three. `lint` is the offline
+command and never connects.
+
+`--dialect` belongs to `lint` alone; the CLI refuses it elsewhere. The separate
+`plan` command is NOT offline - it connects to PostgreSQL or MySQL to report what
+is pending against the live journal, so it needs `--database-url` and is covered
+after apply, in [Inspect status](#7-inspect-status).
 
 ## 5. Prepare PostgreSQL
 
@@ -218,18 +224,34 @@ export DATABASE_URL="postgres://user:password@127.0.0.1:5432/example"
 
 In a real deployment, inject this value from your secret manager.
 
-Create the operator-controlled table-shape policy used by both apply and
-plan-aware status. This walkthrough keeps every column author-owned, so its
-explicit no-inject charter is:
+Create the operator-controlled policy used by both apply and plan-aware status.
+This walkthrough keeps every column author-owned, so it injects nothing - but it
+still has to GRANT the schema it deploys into:
 
 ```toml
 # policy.toml
 policy_version = 1
+
+[[grant]]
+key = "schema.cross_schema"
+value = true
+scope = { include = ["app_demo"] }
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app_demo"] }
 ```
 
-There is no CLI or Node default for this input. Platforms that inject columns,
-indexes, or a primary key should put those rules in this file instead; see
-[Policy model](policy.md).
+Every knob is default-deny, so the grants are not boilerplate. A charter of only
+`policy_version = 1` owns NO schema at all - `schema.cross_schema` is what defines
+the confinement set, and without it apply refuses its own first statement with
+`cross-schema access to 'app_demo' denied`. The scope must name the schema
+literally; a glob contributes no owned schema.
+
+Match the `include` list to whatever you pass as `--schema`. There is no CLI or
+Node default for this input. Platforms that inject columns, indexes, or a primary
+key should put those rules in this file instead; see [Policy model](policy.md).
 
 ## 6. Apply the migration
 
