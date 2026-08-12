@@ -8990,6 +8990,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F397 - a green where I predicted red: #23's remaining list had been done two days earlier
+
+I dispatched a build for #23 item (a), "give an unguarded dropExtension a synthesised inverse". The
+agent wrote the test file, died when the disk filled, and wrote no `src/` change at all. Running its
+tests as the RED check produced:
+
+    test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+    RC_RED=0
+
+Seven green with no implementation in the tree. That is either a feature that already exists or a
+vacuous test, and either way it is the interesting result of the iteration.
+
+IT ALREADY EXISTED. `git log -S` on the guard expression:
+
+    f3884a7a  2026-08-10 11:11  feat(render): roll back a dropped extension by re-creating it where it lived
+    817b6933  2026-08-10        the Op::DropSchema arm
+
+Both of #23's next two items, shipped two days before I read the ticket that listed them as
+remaining. The live arm is `lower.rs:8027`, matching on the op's own `if_exists` and taking the
+placement from the recorded `ExtensionSnapshot.schema` - exactly the design the ticket specified as
+the plan.
+
+THREE CHECKABLE CLAIMS, ALL FALSE, in one ticket:
+  1. "LiveSchema needs an `extensions` field" - it has one, `lower.rs` struct line 64.
+  2. "(a) DropExtension ... Lowering site vendor.rs:302 (down: None today)" - `vendor.rs` does still
+     say `down: None`, and that is CORRECT under the ticket's own option (B), which keeps the
+     renderer pure and attaches the down at the lower call site. The citation was true and the
+     conclusion drawn from it was false, which is the worst kind of stale note: it reads as evidence.
+  3. "(b) DropSchema - needs the third (cascade) refusal" - implemented, cascade refusal included.
+
+I caught 1 before dispatching because I checked it. I did not check 2 or 3, and 2 cost a build job.
+
+WHAT SURVIVED, AND IT IS WORTH KEEPING: five tests pinning the eligibility matrix that the
+implementation had shipped without. MUTATION-PROVEN rather than assumed - with a temporary env-gated
+`return None` in the `lower.rs:8027` arm:
+
+    FAILED: unguarded_drop_extension_from_folded_history_has_create_inverse
+            explicit_false_drop_extension_is_eligible_for_an_inverse
+            drop_extension_inverse_uses_only_the_recorded_schema
+    PASSED: guarded_drop_extension_from_folded_history_has_no_inverse
+            unguarded_drop_extension_absent_from_history_has_no_inverse
+
+Exactly the predicted split: the three positive assertions detect the branch, and the two negative
+ones are not merely inheriting a blanket `None`. `explicit_false_..._is_eligible` is the one that
+matters most, because `Some(false)` must count as UNGUARDED and eligible, and getting that backwards
+is silent.
+
+NOT EVIDENCE, and I nearly reported it as such: `rolling_back_a_dropped_extension_restores_it` also
+passed under the mutation. That run did not export `ZERO_MIGRATE_TEST_PG_URL`, so the live test
+SKIPPED rather than ran. A skip that reports as a pass is the #41 trap in miniature, inside my own
+mutation check.
+
+THE LESSON IS ABOUT TICKETS, NOT ABOUT EXTENSIONS. A ticket that cites file:line is checkable in
+seconds, and this one carried three such claims that had all decayed within two days of being
+written - in a tree where I am the only author. The cost was one wasted dispatch and it would have
+been zero if I had run the same `grep` on item (a) that I ran on the `LiveSchema` claim immediately
+above it. Stale scope notes are not a documentation problem; they are a work-scheduling problem, and
+they fail toward doing work that is already done.
+
 ## F396 - #220 decided: the split found a better option than my three, and my headline was too broad
 
 SHIPPED c765bf16, the documentation half. No behaviour change. The enforcement half is queued.
