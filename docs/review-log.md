@@ -8990,6 +8990,84 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F414 - MEASUREMENT, not a fix: one authored column, two dialects, two different halves silently dropped
+
+FOUND while widening the fold oracle, by reading `mysql_base_column_type` rather than by a failing
+test - no oracle case can catch this, because both dialects fold exactly what they render. REPRODUCED
+against live PostgreSQL 18.4 and MySQL 8.4.11. NOT FIXED: the repair is an API decision and a second
+opinion is in flight.
+
+### The shape
+
+`t.string({ length: 32, caseSensitive: false })`. Both facets are documented surface -
+`packages/zero-migrate/src/types.ts:155` calls it "a bounded `VARCHAR(N)`" and takes `caseSensitive`
+in the same options bag.
+
+Rendered:
+
+```
+PostgreSQL   "email" character varying(32)
+MySQL        `email` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci
+```
+
+PostgreSQL keeps the length and drops the case-insensitivity. MySQL keeps the case-insensitivity and
+drops the length. Each target silently discards a DIFFERENT half of what the author asked for.
+
+### Measured on the servers, not inferred from the DDL
+
+The DDL text alone would let someone argue the difference is cosmetic. It is not:
+
+```
+PG 18.4     CREATE TABLE contacts (email character varying(32) UNIQUE);
+            INSERT 'Alice@Example.com'; INSERT 'alice@example.com';
+            -> 2 rows.  Uniqueness is case-SENSITIVE.
+
+MySQL 8.4   CREATE TABLE ci_contacts (email text ... utf8mb4_0900_ai_ci);
+            INSERT REPEAT('x', 40);
+            -> CHAR_LENGTH 40 stored in a column authored length 32.
+```
+
+So the same migration gives opposite uniqueness semantics AND opposite length enforcement on the two
+targets. A user who tests on one and deploys to the other gets a data-integrity difference no error
+ever mentioned.
+
+### Where it comes from
+
+- `render/declarative.rs`, `mysql_base_column_type`: returns `"text"` whenever
+  `case_sensitive == Some(false)`, regardless of a declared length. The collapse looks deliberate -
+  the MySQL text-in-key rule keys on the storage this function reports - which is why the fix has to
+  check what else depends on it rather than just widening the arm.
+- `render/declarative.rs`, `column_type_for_render`: the `citext` branch fires only when
+  `case_sensitive == Some(false)` AND `data_type` is `"text"`. A bounded string never reaches it, so
+  the facet is dropped with no diagnostic.
+
+Nothing refuses the combination. `validate.rs` carries `case_sensitive` through
+`LogicalColumnContract` and has no rule about it; the recorder passes both facets through; no
+fixture in the corpus authors the pair, which is why nothing has tripped over it.
+
+### Why no oracle case would have caught it
+
+Worth stating, because this log keeps concluding that the fold oracle is the instrument that finds
+these. It is not the instrument for this one. The fold records what the renderer emits, so the folded
+snapshot and the live catalog AGREE on both dialects - `varchar(32)` on one, `text ... ai_ci` on the
+other. Drift is clean. The defect is that the two agreements are with two different columns, and a
+per-dialect round trip cannot see across dialects.
+
+### The decision this needs
+
+Not taken here.
+
+- REFUSE the combination fail-closed on every dialect, naming the two supported spellings. Matches
+  "vendor-only behavior is clearly marked and rejected on unsupported targets", and turns two silent
+  losses into one authoring error. Breaking, though the package is unpublished.
+- HONOR BOTH where the dialect can. MySQL does `VARCHAR(32) ... utf8mb4_0900_ai_ci` natively with no
+  tradeoff. PostgreSQL cannot: `citext` is its own unbounded type, so it needs `citext` plus a
+  `CHECK (length(col) <= 32)`, or a nondeterministic ICU collation that is not available by default
+  and breaks pattern-op indexes.
+
+The half that is not in question either way: MySQL's collapse to `text` for a BOUNDED string is
+wrong under both options, because MySQL can spell the honest thing natively.
+
 ## F413 - the second opinion caught a regression I shipped in F411, and the asymmetry beside it
 
 CORRECTION to F411 plus a defect found next to it. Both fixed here.
