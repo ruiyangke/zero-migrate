@@ -51,10 +51,12 @@ catalog snapshot of tables, columns, and ordered indexes for preparing
 live-dependent work, but a complete MySQL structural-drift comparison is not
 available today.
 
-There is no high-level rollback workflow on any public path. PostgreSQL online
-column rename is the supported staged schema-change workflow; do not treat
-lower-level Rust reversal types as a general JavaScript rollback feature. See
-[Rust API](embedding.md) for the public Rust surface.
+A `rollback` verb ships on the public JavaScript path (`zero-migrate-cli`), and it
+unwinds real schema: it reconstructs each `down` from the authored envelope rather
+than from an authored `down()` body. It is not a substitute for a forward fix - see
+[Rollback strategy](#rollback-strategy) for when to reach for it and the rails it
+requires. PostgreSQL online column rename remains the supported staged
+schema-change workflow. See [Rust API](embedding.md) for the public Rust surface.
 
 ## Know the deployment identities
 
@@ -581,19 +583,41 @@ apply and status work, but that view is not a complete structural-drift check.
 
 ## Rollback strategy
 
-zero-migrate does not provide a public high-level rollback command. Authoring a
-TypeScript `down()` is refused at build time rather than accepted and ignored,
-because rollback runs an inverse synthesised from the recorded ops and would not
-execute the authored body.
+`zero-migrate-cli` exports a `rollback` verb. It unwinds applied migrations by
+reconstructing each `down` from its authored envelope; authoring a TypeScript
+`down()` is refused at build time rather than accepted and ignored, because the
+inverse is synthesised from the recorded ops and an authored body would never
+execute.
 
-Prefer this order:
+Prefer this order anyway:
 
 1. deploy a reviewed forward-fix migration;
 2. restore from a tested backup when data loss is irreversible;
-3. use low-level Rust reversal capabilities only inside a trusted host that adds
-   selection, state validation, safety checks, approval, and auditing.
+3. roll back only with the rails below, and only when you can state what the
+   unwind will remove.
 
 Plan the forward fix and restore path before approving a destructive migration.
+
+### What `rollback` requires, and why each one is there
+
+Every default is refuse-shaped, because a `down` is destructive by construction:
+
+- `target` has **no default**. There is no "roll back the last one" convenience,
+  because every default is a guess about how much of a schema to remove.
+- `approved` defaults to `false` and the engine refuses without it.
+- `migrations` is the **complete ordered authored set**, not one migration and its
+  priors. A version missing from the set has no reverse SQL, and the unwind refuses
+  rather than skipping it.
+- `force` skips a migration that declares no `down` - honored only together with
+  `backupAcknowledged`.
+- `backupAcknowledged` defaults to `false`.
+
+The reply names what it unwound (`rolledBack`) and what it declined to
+(`skippedIrreversible`).
+
+What a reconstructed `down` does to DATA is not documented here because it is not
+yet measured end to end. Do not assume an unwind restores rows a forward migration
+removed; treat the backup as the data plan, which is what step 2 above is for.
 
 ## Failure playbook
 

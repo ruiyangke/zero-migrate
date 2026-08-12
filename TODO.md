@@ -79,10 +79,19 @@ Working notes; not staged.
   inserted after capture (correct but surprising). Add loud docs and a
   post-backfill check that reports/counts rows beyond the captured boundary.
 
-- [ ] Rollback posture, documented explicitly. No public rollback; an authored
-  `down()` is now refused at build time rather than parsed and dropped. State the
-  roll-forward plus backup stance plainly in the operations docs, and consider a
-  reviewed reversal helper for the abort path.
+- [x] Rollback posture, documented explicitly. The "no public rollback" half of this
+  item was stale: `zero-migrate-cli` exports a `rollback` verb, and it unwinds real
+  schema - verified against live PostgreSQL, a created table went from present to
+  absent. `docs/operations.md` said the opposite in two places and now describes the
+  verb, its refuse-shaped defaults (`target` with no default, `approved`,
+  `backupAcknowledged`, the complete-set requirement), and keeps the roll-forward
+  plus backup preference ahead of it. An authored `down()` is still refused at build
+  time, because the inverse is synthesised from the recorded ops.
+- [ ] Measure and document what a reconstructed `down` does to DATA. The operations
+  guide deliberately says this is unmeasured rather than guessing. A rollback of a
+  `dropTable` presumably returns an empty table, but nothing has run it end to end,
+  and an operator planning a rollback needs the answer more than they need the
+  schema story.
 
 ## Ecosystem and maturity (npm track, in progress)
 
