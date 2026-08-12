@@ -50,10 +50,15 @@ Working notes; not staged.
 
 - [ ] Close the Node/Rust capability asymmetry. Users repeatedly hit "supported,
   but not from your host":
-  - [ ] SQLite apply from Node/CLI (currently Rust-only).
-  - [ ] History for MySQL and SQLite (currently PostgreSQL-only).
-  - [ ] Full custom policy from Node (currently table-shape ceiling only).
-  - [ ] Migrator-role config from the CLI (currently Node/Rust only).
+  - [x] SQLite apply from Node/CLI. Shipped: `apply --database-url sqlite:<path>`
+    creates the table and lands the seeded row, verified by reading the resulting
+    file back. `docs/getting-started.md` and `docs/cli.md` both already said so.
+  - [ ] History for MySQL and SQLite (currently PostgreSQL-only). Re-checked, still
+    true: both refuse with "history supports only PostgreSQL".
+  - [ ] Full custom policy from Node (currently table-shape ceiling only). NOT
+    re-checked.
+  - [ ] Migrator-role config from the CLI (currently Node/Rust only). Re-checked,
+    still true: no `--migrator-role` flag on any CLI command.
 
 ## Strategic direction
 
