@@ -8990,6 +8990,41 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F381 - REFUTED AS CURRENT: `Single("")` permitting everything was real, and the repair is already in
+
+Second of #13's leads. Accurate about a defect that existed; wrong about the tree it exists in. The
+code says so itself, at `crates/zero-migrate-guard/src/guard/mod.rs:1059`:
+
+    /// This used to be a second copy of that match, and the copy had drifted: it
+    /// carried an extra arm making `Single("")` permit every schema. `Single("")` is
+    /// what `GuardConfig::schema_scope` produces for a policy that owns NO schema,
+    /// i.e. the tightest posture there is, so the body scanner admitted every
+    /// cross-tenant reference for exactly the policy that should admit none.
+
+The current decision is one line deferring to the one implementation:
+
+    fn permits(&self, schema: &str) -> bool {
+        self.scope.is_none_or(|scope| scope.permits(schema))
+    }
+
+and `SchemaScope::permits` (`crates/zero-migrate-ir/src/policy.rs:67`) answers
+`schema.eq_ignore_ascii_case(s)` for `Single(s)`, so `Single("")` matches the empty name and
+nothing else. No real schema is named the empty string, which is the point: `schema_scope`
+constructs `Single(String::new())` for a policy owning no schema (`guard/mod.rs:262`), and the
+posture that means permit-everything is `Unconfined`, which has to be chosen deliberately.
+
+I CHECKED THE GENERALIZABLE HALF rather than stopping at "already fixed", because the defect was a
+DUPLICATED decision drifting from its original, and one repair does not prove there is no third
+copy. Every schema-admission site now defers to `SchemaScope::permits`: `guard/mod.rs:1071`, `:1097`,
+`:1125`, `validate.rs:5538`, `:5663`, `:5990`, and `render/lower.rs:4299`. The remaining
+`eq_ignore_ascii_case` calls in the guard are unrelated - `search_path`, `superuser` and `security`
+defnames, `regnamespace`. So the property that made the bug possible is gone, not just the instance.
+
+Worth noting what kind of lead this was. It named a real escalation in precise terms, and the reason
+it is closed is that someone already found and fixed it - leaving the account of the bug attached to
+the repair, which is why fifteen minutes settled it. A comment that had merely said "defer to
+permits" would have cost far more to verify.
+
 ## F380 - REFUTED: MySQL sharing the SQLite guard is deliberate, and the NAME is what made it look wrong
 
 First of #13's eight leads: "guard_for mapping MySQL to the no-op SQLite guard". The mapping is real
