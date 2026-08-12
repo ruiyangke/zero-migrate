@@ -8990,6 +8990,42 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F376 - REFUTED: re-admitting against an already-composed policy launders nothing
+
+#12's "RootCharter admission bypass" finding, on its most plausible reading. `admit` accepts an
+already-composed `EffectivePolicy` as the charter, and
+`effective_policy_from_charter_layers` uses exactly that - each layer is admitted against the
+ACCUMULATED result, so an earlier draft's grants become charter authority for the next one. If that
+laundered, a longer stack would reach further than a short one against the same root.
+
+Root confines raw SQL to `app_*`. Three probes through the shipped entry point:
+
+    PROBE A_one_step_beyond_root   = REFUSED policy layer 2 rejected:
+                                     UncoveredRegionNotRepresentable { key: KnobKey("sql.raw") }
+    PROBE B_two_step_same_overreach = REFUSED policy layer 3 rejected:
+                                     UncoveredRegionNotRepresentable { key: KnobKey("sql.raw") }
+    PROBE C_two_step_within_root   = ADMITTED app_one=Some(Bool(true)) other=Some(Bool(false))
+
+B interposes a compliant narrowing (`app_one`) and then asks for the same `scope = "all"` A was
+refused. Same refusal. C is the control: two steps that stay inside the root compose, and the grant
+stops at the root's boundary, so B's refusal is a bound rather than a blanket rejection of long
+stacks. Transitivity is why: a layer is admitted only when it is within the accumulated charter,
+which was itself within the root.
+
+A CORRECTION TO MY OWN WORK, one commit old. Both refusals report
+`UncoveredRegionNotRepresentable`, not `GrantExceedsCharter`, because `All ∖ app_*` has no glob
+form. That is pre-existing - the arm F374 replaced computed the same difference the same way - but
+F374 gave the variant a SECOND cause: `prove_rule_within_charter` also returns it when the charter
+DOES cover and the subtraction that would discharge the obligation is unrepresentable. The variant's
+doc still said only "the draft's granted scope reaches OUTSIDE the charter's granted scope", which
+after F374 is narrower than what the variant means.
+
+Corrected at the variant. It now names both causes and says plainly that the second is a FALSE
+REJECT of a policy a perfect checker would admit - the accepted price of never sampling a witness -
+and that a charter which trips it and looks legitimate is worth reporting rather than a reason to
+loosen the check. This is the same class this review keeps filing, and I introduced it, so it is
+worth saying that the fix and the flaw were one commit apart.
+
 ## F375 - MEASURED, filed as #220: a trusted charter means whatever registry the admit caller passes
 
 #12's "registry rebinding" finding. Real as a hazard, not reachable on the shipped path, and it
