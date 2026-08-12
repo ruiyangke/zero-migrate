@@ -116,10 +116,12 @@ Preview does not show final SQL and is not a database dry run.
 
 ### 3. Validate every intended target
 
-The CLI can validate an explicit target directly:
+The CLI can validate an explicit target directly. `--dialect` belongs to `lint`,
+which is the offline validator; `plan` connects to a database and does not accept
+it:
 
 ```bash
-zero-migrate plan \
+zero-migrate lint \
   --dir ./migrations \
   --dialect mysql \
   --owner-app app_orders \
@@ -396,11 +398,16 @@ await resolvePending({
 
 The equivalent CLI command is:
 
+`resolve` names the MIGRATION, not the version. It looks the name up in `--dir`, so
+passing `$PENDING_VERSION` fails with `unknown migration "mig_…" in ./migrations`.
+The pending version is for correlating the obligation in `status --json`.
+
 ```bash
-zero-migrate resolve "$PENDING_VERSION" \
+zero-migrate resolve rename_users_display_name \
   --commit \
   --approve \
   --database-url "$DATABASE_URL" \
+  --policy ./policy.toml \
   --schema app_demo \
   --owner-app app_demo
 ```

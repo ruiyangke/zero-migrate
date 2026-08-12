@@ -324,10 +324,15 @@ You may author the later same-table migration, but do not apply it while this
 obligation is pending. If the application cutover to the destination is
 complete, keep the destination and drop the source:
 
+`resolve` takes the exported MIGRATION NAME and looks it up in `--dir`. Passing the
+pending version fails with `unknown migration "mig_…" in ./migrations`; the version
+identifies the obligation in `status --json`, not the command's argument.
+
 ```bash
-zero-migrate resolve "$PENDING_VERSION" \
+zero-migrate resolve rename_users_display_name \
   --commit --approve \
   --database-url "$DATABASE_URL" \
+  --policy ./policy.toml \
   --schema app_demo \
   --owner-app app_demo
 ```
@@ -336,8 +341,9 @@ If the rollout is being abandoned, first move all applications and consumers
 back to the source, then use `--rollback --approve`; rollback keeps the source and
 drops the destination. Use the same owner and project schema that opened the
 obligation. If status reports `orphaned: true`, restore the immutable migration
-source to the supplied set for diagnosis, but resolve the returned
-`pendingVersion` explicitly rather than relying on repeat apply.
+source to the supplied set for diagnosis, and resolve that migration explicitly by
+name rather than relying on repeat apply. Use `pendingVersion` to identify WHICH
+obligation you are clearing, then pass the migration it belongs to.
 
 An interrupted initial apply is safe to retry unchanged with approval:
 completed work skips and the backfill resumes. An open obligation is returned
