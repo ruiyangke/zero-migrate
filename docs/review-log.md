@@ -8990,6 +8990,91 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F413 - the second opinion caught a regression I shipped in F411, and the asymmetry beside it
+
+CORRECTION to F411 plus a defect found next to it. Both fixed here.
+
+### What F411 got wrong
+
+F411's `Op::ValidateConstraint` arm reached its table with `table_mut(&mut tables, table)?`, which
+errors `MissingTable`. The arm it replaced did nothing at all, so a fold over an op list whose
+VALIDATE names a table an EARLIER artifact created stopped folding and started failing.
+
+The reasoning that should have prevented it was already written in that same commit, one clause
+away. Its comment argued that an absent CONSTRAINT must stay a no-op because `fold_ops` is routinely
+handed one artifact's ops rather than the whole history. Every word of that applies to the absent
+TABLE, and I applied it to one lookup and not the other.
+
+Reproduced as a unit test before the fix:
+
+```
+a VALIDATE on an unseen table must fold clean, got Err(MissingTable("children"))
+```
+
+Both lookups now miss quietly. `DropConstraint` stays stricter on purpose, and the comment now says
+why the two differ: it has a delta to apply and cannot apply it, while this one's delta is already
+absent.
+
+This was found by a read-only second opinion on the committed diff, not by the suite. Nothing in
+2596 tests exercised a VALIDATE against a table outside the folded set. There are now two unit tests
+that do, plus the tail/strip/idempotence matrix that F411 shipped without.
+
+### The asymmetry next door
+
+`validate` refused a create-time `not_valid` only in the `Some(true)` spelling. `lower` refuses
+`not_valid.is_some()`. So an authored `{ notValid: false }` cleared validate and died at lower:
+
+```
+notValid=Some(true)   validate=REFUSED "notValid is only valid on addForeignKey/addCheck ..."
+notValid=Some(false)  validate=OK        lower=ERR "validated createTable NOT VALID FOREIGN KEY
+                                                    reached lower"
+notValid=None         validate=OK        lower=ERR (unrelated: the FK target is not live)
+```
+
+The third line is the control that makes the second mean something: the `Some(false)` lower failure
+is the `not_valid` refusal, not the fixture's missing FK target.
+
+That message is written for a validator bypass, and under this asymmetry it described a shape
+validate deliberately passed. The author sees an engine invariant instead of the actionable
+authoring error the `Some(true)` path gives them, and `false` is reachable from the surface - the
+recorder's `requireOptionalBoolean` passes a literal `false` through unchanged. `validate` now
+matches `Some(_)`, so the two gates refuse the same set and lower's message is true again.
+
+### The existing test could not have caught it, and nearly told me it did
+
+`not_valid_on_create_time_constraint_is_refused_everywhere` already had a closure parameterized on
+`Option<bool>` and only ever called it with `Some(true)`. Adding the other two calls looked free.
+Measuring the REASONS says otherwise:
+
+```
+notValid=Some(true)   -> "notValid is only valid on addForeignKey/addCheck ..."
+notValid=Some(false)  -> "column \"qty\" does not resolve on the enclosing target table"
+notValid=None         -> "column \"qty\" does not resolve on the enclosing target table"
+```
+
+The fixture's CHECK body references a column the table never declares. Its `Some(true)` assertion is
+sound - that one really is refused by the rule under test - but the fixture cannot carry the other
+two, because it refuses everything for an unrelated reason. An `assert!(!validates(...))` matrix
+built on it would have gone green while measuring an unresolvable column, and I would have recorded
+a fix for a bug I had not demonstrated.
+
+The new foreign-key case declares its local column, so its absent-facet control genuinely passes
+validate. The CHECK case keeps its one sound assertion and now says in a comment why it stops there.
+
+### One factual correction, measured
+
+The comment above that refusal said PostgreSQL "rejects NOT VALID in CREATE TABLE". Measured on
+18.4, it does not: the statement is ACCEPTED and the constraint is stored with `convalidated = true`.
+The server silently neutralizes the request. That is a better argument for refusing than the false
+one it replaced - a slot the server drops on the floor must not look authorable - so the rule stands
+and only its stated reason changed.
+
+### Gates
+
+fmt 0, clippy 0, doc 0. 126 targets / 2601 passed / 2 failed / 0 ignored / 0 live-database skip
+banners against PostgreSQL 18 and MySQL 8. The two failures remain the untracked
+`apply_dml_validation_pg` measurement from a concurrent investigation, not committed here.
+
 ## F412 - the false red a comment predicted, measured five days later and removed
 
 FOUND by authoring the shape a comment said would fail. The comment was written 2026-08-07 in
