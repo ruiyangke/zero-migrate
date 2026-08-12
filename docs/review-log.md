@@ -8990,6 +8990,44 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F385 - REFUTED AS CURRENT: `RENAME TO` reads `rename_type`, and both directions of a schema rename are denied
+
+Last of #13's four GUARD-side leads, and the third of them that names a real defect already repaired.
+
+`check_rename` (`crates/zero-migrate-guard/src/guard/mod.rs:1589`) reads `rename_type` first, and
+its comment records precisely what the lead describes:
+
+    // `RenameStmt` covers `ALTER <anything> RENAME TO`, and a role, database,
+    // or schema rename carries its target in `subname`/`newname` rather than
+    // in a relation or object list. Those scalar slots are invisible to
+    // `walk_schema_names`, so falling through to `Ok` here granted through a
+    // rename exactly the authority the other spellings hard-deny: `DROP
+    // SCHEMA control` is refused while `ALTER SCHEMA control RENAME TO x`
+    // was not. Route each back to the rule that owns it.
+
+Role goes to `ROLE_MANAGEMENT` unless `access.role` is granted, database to `DATABASE_MANAGEMENT`
+unconditionally, and schema checks BOTH ends against `grants_cross_schema` - because renaming a
+schema you do not own takes it away, and renaming your own onto another name claims that one. Object
+types that name their target through `relation` or `object` still fall through deliberately: the
+cross-schema walk already reaches those.
+
+VERIFIED BY RUNNING. `crates/zero-migrate-guard/tests/guard_smoke.rs:154`:
+
+    cargo test -p zero-migrate-guard --test guard_smoke renaming_a_role
+    test renaming_a_role_database_or_foreign_schema_is_denied ... ok
+    test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out
+
+Five inputs, and two are the ones worth having: `ALTER USER app1 RENAME TO postgres` is the USER
+spelling of a ROLE rename, which a check keyed on the word ROLE would miss; and the schema pair
+covers both directions rather than only the obvious one.
+
+ALL FOUR GUARD-SIDE LEADS ARE NOW SETTLED, none of them a live defect: one was a naming and docs
+problem that made correct code read as a bug (F380), and three named real escalations that had
+already been fixed (F381, F384, F385). The one live defect #13 has produced so far came from the
+RENDER side (F382). Three apply-side leads remain and they are a different kind of question -
+crash-recovery state rather than statement admission - so the run of refutations here is not
+evidence about those.
+
 ## F384 - REFUTED AS CURRENT: `DO LANGUAGE` is checked, on two independent layers, with the evasion pinned
 
 Fourth of #13's leads. Real once, repaired, and this time the repair left both an account AND a
