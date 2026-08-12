@@ -9055,6 +9055,18 @@ the paragraph above, so it belongs on the record rather than in a conclusion.
 
 WHETHER CI ON origin/main IS RED RIGHT NOW: still not checked. I read git history, not CI runs.
 
+ROOT CAUSE, and it was written down in the wrong place all along: `CONTRIBUTING.md` listed the Rust
+gate as fmt, clippy, build, test - and no `cargo doc` at all, while `.github/workflows/ci.yml:101`
+gates on one. Anybody following the documented gate, including me, would never run the check that
+fails. That is why three commits could break it in one afternoon with their gate runs recorded as
+green: the gate they ran was the documented one, and the documented one was incomplete.
+
+The doc line is now in that list with CI's flags verbatim, plus why neither option is cosmetic:
+without `-D warnings` a broken link is a warning that scrolls past, and without
+`--document-private-items` the resolvable set differs, so a doc build can pass locally and fail in
+CI. Both halves of that are things I got wrong earlier in this same entry, which is the argument for
+stating them where the command lives rather than only here.
+
 Same command now exits 0. fmt 0, clippy 0, doc 0; 121 targets / 2542 passed / 0 failed / 1 ignored.
 
 ## F394 - #223 resolved: the exception is named where the invariant is claimed, not only at the differ

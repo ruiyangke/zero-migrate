@@ -26,7 +26,15 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo build --workspace
 cargo test --workspace --exclude zero-migrate-node
 cargo test -p zero-migrate-node --no-default-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items
 ```
+
+Run the doc line with those flags exactly. CI gates on it, and the two options
+are not cosmetic: without `-D warnings` a broken link is a warning that scrolls
+past, and without `--document-private-items` the set of links rustdoc resolves
+differs, so a doc build can pass locally and fail in CI. Copying this line is
+the difference between a green you can trust and one that only means the
+compiler was happy.
 
 JavaScript:
 
