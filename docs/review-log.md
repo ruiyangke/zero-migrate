@@ -8990,6 +8990,77 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F404 - #79's snapshot prerequisite is discharged, and two of the three gaps I named were my own error
+
+MEASUREMENT, no code change. #79 could not proceed until the MySQL snapshot was known to answer the
+existence probe honestly. It now is, and the chain of blockers took three turns to resolve because
+two of them were mine.
+
+### What the probe actually reads
+
+    $ grep -o "live\.[a-z_]*" crates/zero-migrate/src/render/existence_probe.rs | sort -u
+    live.named_types
+    live.partitions
+    live.sequences
+    live.tables
+    live.views
+
+MySQL populates `tables` and `views`. The question was whether the other three being empty is a
+defect or a fact.
+
+### The original blocker was real and is fixed
+
+The ticket said a MySQL probe would break `dropView`, because the snapshot left `views` empty and
+`decide_view` would read an existing view as absent, resolve SatisfiedNoop, skip the DROP and
+journal completed. #207 / 6e6333e1 fixed it: `apply/backend/mysql/drift_sql.rs:701-705` now returns
+`Ok(SchemaSnapshot { tables, views, ..Default::default() })`.
+
+### My replacement blocker was wrong
+
+I then claimed `named_types` was the same defect one class over, because `dialect_table.rs:84,86`
+mark `createDomain`/`createEnum` base as Portable on MySQL. Withdrawn. Portable describes the
+AUTHORING op. Both enum arms take the non-PostgreSQL branch and emit nothing:
+
+    lower.rs:4390  Op::CreateEnum  -> if supports(MaterializedEnumType) { CREATE TYPE } else { Vec::new() }
+    lower.rs:4404  Op::DropEnum    -> if supports(MaterializedEnumType) { DROP TYPE }   else { Vec::new() }
+
+and that capability is PostgreSQL-only (`renderer.rs:71` true; `:98` and `:125` false). MySQL never
+creates a named type, so there is nothing to snapshot and empty is correct.
+
+### The third is correct too, for a different reason
+
+`createPartition` is TransparentDegradable on MySQL (`dialect_table.rs:93`), and degradable here
+means collapsed rather than skipped. Both arms return DML on the non-PostgreSQL path -
+`lower.rs:4791` and `lower.rs:4874`, the latter `return Ok(LoweredOp::Dml(...))` carrying a DELETE
+against the parent. The partition becomes rows in the parent table, so there is no child relation in
+the catalog and empty `partitions` is a fact.
+
+`createSequence` is Unsupported on MySQL (`dialect_table.rs:98`), so `sequences` was never in
+question.
+
+### So the prerequisite is discharged
+
+All three empty maps are correct on MySQL for three different reasons: the object is not supported,
+the op emits no DDL, or the op collapses to DML. The probe can be wired without repeating the views
+hazard, and the remaining #79 work is the wiring itself under the (A) and (B) designs already
+decided in F289.
+
+### One asymmetry found on the way, not a defect today
+
+`Op::DropEnum` builds its `GuardProbe::NamedType` at `lower.rs:4405` BEFORE the capability check, so
+on MySQL it constructs a probe for an op that then emits no statement. `Op::DropPartition` does the
+opposite - it returns the DML at `lower.rs:4886` BEFORE reaching its guard block, so no stray probe
+exists there. Inert today because no MySQL probe call site exists, but the enum arm is worth a look
+when one is added: a probe with no statement to guard is noise at best.
+
+### Method note
+
+The rule that settled every one of these is the same, and it is cheaper than the reasoning it
+replaces: read what the op EMITS, not what the disposition table calls it. A disposition names how
+the authoring surface treats an op; it does not tell you whether a database object results. Three
+times this session an objection built into my own conclusion was the wrong part, and this is the
+third.
+
 ## F403 - #226 built: the refusal ships, and every converted test was proven to detect it
 
 SHIPPED 919ff243, implementing the F402 decision. `render_sequence_op` yields `down: None` for
