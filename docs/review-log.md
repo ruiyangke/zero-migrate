@@ -8990,6 +8990,67 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F402 - #226 decided: refuse the dropSequence inverse, because the position has nowhere durable to live
+
+DECIDED, not yet built. The reproduction is committed ignored at a3a61efa: issue 1..5, drop, roll
+back, and the next `nextval` returns 1 rather than 6, with the rollback journalling success.
+
+### The option that looked viable dies on persistence, not on reachability
+
+I had three shapes and thought (b) - read the position at apply time, just before the DROP - was the
+plausible one, because live apply does hold a database handle before lowering. It is indeed
+reachable. It still fails, for a reason I had not seen:
+
+A later rollback does not replay a stored `down`. It RE-LOWERS from the authored envelopes -
+`lower_ordered_envelopes_to_plans_for_rollback(envelope_json: &[String], ...)` at
+`crates/zero-migrate-node/src/lower.rs:368`. And the journal persists no down SQL: `journal.rs:134`
+records that "a rollback event (the migration's `down` ran)" but there is no column carrying it.
+
+So a value read at apply time has nowhere to live until the rollback that would need it. Making (b)
+work is not "read the position", it is "extend a durable artifact, bind it to the checksum, and
+handle its compatibility" - a different and much larger piece of work.
+
+(a) fails earlier: `SequenceSnapshot` is populated by introspection that reads `s.seqstart`
+(`apply/drift.rs:1398`) and never `last_value`, and offline lowering has no database at all.
+
+### The asymmetry that makes refusal principled rather than defeatist
+
+For functions, triggers and policies the recorded DEFINITION is the whole object, which is why
+history-derived inverses restore them completely. A sequence's definition is half the object; the
+POSITION is the other half and no IR history knows it. That is the line between an op that can be
+inverted from the fold and one that cannot, and it is the same line that already leaves
+`alterSequence` refused (F401).
+
+### What refusing costs, stated rather than glossed
+
+`rolling_back_a_dropped_sequence_restores_it` in
+`crates/zero-migrate/tests/drop_sequence_rollback_pg.rs` drops and restores an UNCONSUMED sequence
+and passes today - `grep -c nextval` over that file returns 0. That workflow is correct now and
+becomes irreversible under this decision. Development churn, and sequences whose issued values carry
+no uniqueness obligation, are the same case.
+
+Taking it anyway: between a rollback that silently reissues live primary keys and one that refuses
+in the open, refusal is the only defensible default for a data-safety fault. The refusal is visible
+and actionable; today's outcome falsely claims restoration. This is also what the engine does
+everywhere else it cannot prove a thing.
+
+### The upgrade path, so this is a floor and not a ceiling
+
+Refusal can later be NARROWED rather than replaced. The blocking question is only "was this sequence
+ever consumed", which is one bit, not a value - and unlike the position, a bit could be captured at
+apply time and persisted. That would restore the unconsumed-sequence workflow while keeping the
+consumed case refused. It still needs durable rollback metadata bound to the checksum, so it is a
+separate piece of work and not a reason to delay the refusal.
+
+### Method note
+
+Two opinions as required, but not the usual pair: the Opus half could not be spawned - the session
+is at its 200-agent cap - so the second reading is mine, done against the code. Every load-bearing
+claim was re-checked here before being accepted, and the two that decide the outcome are the
+re-lowering call signature and the absence of a down column in the journal. What neither of us did
+is run a live abort or concurrency experiment; the recommendation rests on reading plus PostgreSQL's
+documented `setval` behaviour, not on an executed race.
+
 ## F401 - #23 closed: alterSequence needs no work, and the question found a live defect next door
 
 DECIDED and CLOSED with no code change for the op I asked about. #23 item (d) proposed giving
