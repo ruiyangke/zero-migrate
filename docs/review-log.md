@@ -8990,6 +8990,34 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F367 - REFUTED by measurement: a grant with a hole is not reported globally granted
+
+One of the twelve findings #12 collects against zero-migrate-policy. #12 warns that several of them
+aim at the publicly-constructible Rust API rather than the TOML loader, and says to trace each to a
+concrete failing input before changing anything. This one has no failing input.
+
+Composed through the shipped entry point, with a grant over everything except a carve-out:
+
+    [[grant]]
+    key = "sql.raw"
+    value = true
+    scope = { include = ["*"], exclude = ["secret_*"] }
+
+    PROBE holed.grant_is_top=false   whole.grant_is_top=true
+    PROBE holed.grants(inside_hole)=Some(Bool(false))  holed.grants(outside)=Some(Bool(true))
+
+Four behaviours, all correct: the holed grant is NOT universal, a genuinely universal grant still IS
+(so the probe discriminates rather than answering false to everything), and the grant reads false
+inside the carve-out and true outside it.
+
+The mechanism is `Exactness`. `grant_region` answers `Top` only from an EXACT `Scope::All` and
+reports a WIDENED `All` as `Scoped`, because an over-approximation is by construction a grant with a
+hole punched in it. That distinction is what #15 shipped. The comment claiming "a false `Top` cannot
+arise" is therefore accurate - checked rather than taken, because a comment asserting its own
+soundness is exactly the shape that turned out to be false in F332.
+
+ELEVEN OF THE TWELVE REMAIN UNVERIFIED. This entry closes one.
+
 ## F365 - the creatable-escape check runs on the live path now, and the audit found a second one missing
 
 Two things: F364's step 1 built, and the audit item F364 left open, measured.
