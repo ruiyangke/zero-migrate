@@ -8990,6 +8990,48 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F389 - CORRECTION to F388: the op lane does build a FieldDescriptor, and hardcodes the keyId
+
+zeroship checked my four cited sites against their own copy before believing them, found three
+exact, and refuted the fourth. They are right.
+
+I WROTE: "nothing in the migration path constructs a `FieldDescriptor`, so the declarative route is
+NOT reachable from migration authoring." FALSE. Verified at HEAD:
+
+    fold.rs:4296   fn fold_create_column_to_field(..) -> crate::render::declarative::FieldDescriptor
+                     let mut field = ir_column_to_field_resolved_create(c);
+    lower.rs:9684  pub(crate) fn ir_column_to_field_resolved_create(c: &IrColumn) -> FieldDescriptor
+    lower.rs:9601  ColType::Encrypted { of } => ... Some(serde_json::json!({
+    lower.rs:9607      "keyId": "default",
+
+`grep -rn '"keyId"' crates/zero-migrate/src/render/*.rs` returns three sites: that write, a fold
+test fixture asserting the same triple, and a READ in `declarative.rs`. It is the only keyId write
+in the render path.
+
+SO THE MECHANISM IS OVERWRITE, NOT DROP. The conclusion in F388 survives - `deterministic`/`db_e2e`
+is unreachable from op.* - but for a different reason, and the difference relocates the fix. I had
+scoped the repair as "build a path from op.* into the declarative lane". The path exists. The work
+is to give the IR carrier a place to hold mode/keyId and have `lower.rs:9607` READ it, falling back
+to the kernel defaults only when absent - which preserves the round-trip property the literal exists
+to defend rather than breaking it. #221 is corrected accordingly.
+
+HOW I GOT IT WRONG, and it is a shape not an accident. I traced from the DECLARATIVE side: asked
+what feeds `FieldDescriptor`, answered `DesiredSchema`/`CollectionDescriptor`, and stopped. I never
+traced from the op side outward, which is the direction that reaches
+`fold_create_column_to_field`. Reading a type's declared feeders is not finding its constructors,
+and I asserted the stronger claim from the weaker check.
+
+WHAT SHOULD HAVE CAUGHT IT WAS ALREADY IN MY HANDS. zeroship's -251 reported the generated
+descriptor carrying `"keyId": "default"`. Under my model that facet should have been ABSENT
+entirely. Their measurement and my claim made different predictions and I read past the
+disconfirming one - then said in -004 that I would have flagged a contradiction had there been one.
+They ran the comparison I should have run against my own answer.
+
+THIRD TIME IN THIS THREAD I have concluded from one side of a seam: F377 was reachability by grep,
+F386 was searching for an enum spelling instead of the function, and this is a type's feeders
+mistaken for its constructors. The common repair is not "be careful" - it is to ask what the CODE
+would have to do to produce the observation, and check that path specifically.
+
 ## F388 - two encryption lanes that never meet, and the one-way door between them is undocumented
 
 zeroship walked their own creator path and hit a wall, then asked one precise question: is the
