@@ -8990,6 +8990,49 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F375 - MEASURED, filed as #220: a trusted charter means whatever registry the admit caller passes
+
+#12's "registry rebinding" finding. Real as a hazard, not reachable on the shipped path, and it
+turns on a rule the docs already state as an operator checklist item - so it is a decision, not a
+patch, and it is filed rather than fixed.
+
+`admit(charter, draft, registry)` rebuilds the charter's layers under the PASSED registry.
+`RootCharter::charter_layers` calls `Layer::from_doc(LayerTag::Base, self.doc(), registry)`, and
+nothing checks this is the registry the charter was validated under. A knob's DEFAULT lives in the
+registry, and "raises above default" is the whole grant test, so one document says two things under
+two registries.
+
+Two registries differing only in one knob's default, an empty charter loaded under the strict one,
+and the same draft text both times:
+
+    PROBE same_registry = Err(GrantExceedsCharter { key: KnobKey("sql.raw"),
+                                                    offending_pattern: "*.*" })
+    PROBE rebound       = ADMITTED, grants=Some(Bool(true))
+
+Under the loose registry `true` IS the default, so the draft raises nothing, the grant check has
+nothing to check, and the composed policy answers `true` everywhere.
+
+WHAT IT IS NOT, stated because the distinction decides the severity. This is not admit reaching a
+wrong answer under a fixed vocabulary - under the loose registry the answer is internally
+consistent, because that registry says the knob is allow-by-default. It is the TRUSTED charter's
+meaning being chosen by the admit caller instead of by the registry that validated it.
+
+NOT REACHABLE ON THE SHIPPED PATH, verified: `effective_policy_from_charter_layers`
+(`crates/zero-migrate/src/model/table_shape.rs:761`) calls `policy_registry::builtin_registry()` for
+every load and every admit inside one function.
+
+AND ALREADY WRITTEN DOWN, which is what makes it a judgement call. `docs/policy.md`'s checklist says
+"Use one registry definition throughout load, compose, seal, and verify." The SEAL enforces exactly
+this across a storage or process boundary - it binds the registry digest, and `verify` carries
+`PolicyComposedUnderOtherRegistry` for the swap (#147). What is unenforced is the in-process path,
+where no seal is involved.
+
+#220 carries three options and the reason none was taken today: document it as a precondition,
+enforce it by having a loaded document remember `PolicyRegistry::digest()`, or make the registry a
+type parameter. The middle one adds a field to `PolicyDoc`, whose fields are public, so it is a
+breaking change to a published type and belongs with the versioning call #60 is already waiting on.
+Deciding a security-core API change at the end of a session is what #219 showed the cost of.
+
 ## F374 - the trust boundary stops sampling and starts proving
 
 F373's false-accept, fixed. `check_grant_key`'s two witness-sampling arms are gone; each RAISING
