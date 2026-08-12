@@ -8990,6 +8990,46 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F388 - two encryption lanes that never meet, and the one-way door between them is undocumented
+
+zeroship walked their own creator path and hit a wall, then asked one precise question: is the
+`t.encrypted({ mode, keyId, wraps })` sentinel path in `render/declarative.rs` reachable from `op.*`
+authoring? Answered in the mailbox; filed as #221.
+
+TWO LANES, SEPARATE TYPES:
+
+  - DECLARATIVE. `FieldDescriptor` (`crates/zero-migrate/src/render/declarative.rs:1730`) carries
+    `pub encrypted: Option<serde_json::Value>` at `:1845` and copies it VERBATIM at `:2077`, so
+    `{mode, keyId, wraps}` survives and DDLs to BYTEA with the sentinel. Fed by
+    `DesiredSchema`/`CollectionDescriptor`, consumed by `gen_types` and `apply/backend/capability.rs`.
+  - op.*. `ColType::Encrypted` carries the inner type ONLY. `render/fold.rs:8016` states it and calls
+    it fail-closed by construction, which it is.
+
+Nothing in the migration path constructs a `FieldDescriptor`, so the declarative route is NOT
+reachable from migration authoring. Their question had a clean answer: the door is real, and it is
+on the other lane.
+
+THE GAP IS NOT THE IR PROPERTY, WHICH IS RIGHT, BUT THE SEAM. An app moving from an inline
+`schema()` to migration-first crosses lane 1 to lane 2 and silently loses its encryption mode and
+key selection. Their sentence for it is better than mine: the migration records cleanly, the
+descriptor generates cleanly, and the first sign is a runtime failure naming a key the creator never
+chose. Fail-closed at the IR is not fail-loud at the seam.
+
+AND THE ENGINE CANNOT WARN AS IT STANDS, which is what makes this a design question rather than a
+missing check. By the time a migration reaches the engine the intent is already gone -
+`t.encrypted({ of })` is the only expressible form, so no layer of mine ever knows a keyId was
+chosen. The loss happens in the human translation step.
+
+WHAT I TOOK ON REPORT RATHER THAN RE-RAN, stated because the reproduction is theirs: their
+descriptor coming out `"keyId": "default"` and the runtime failure
+`Column key 'default' not configured (set ZEROSHIP_COLUMN_KEY_DEFAULT)` are their measurements at
+cb1bcb59. I verified the lane structure by reading at HEAD and told them so; had my reading
+contradicted their run I would have said that instead of agreeing.
+
+#221 carries three options - add an IR surface, make the recorder refuse rather than default, or
+document the one-way door - with the note that the first two change a published authoring API and
+so belong in the same versioning conversation as #60 and #220.
+
 ## F387 - REFUTED AS CURRENT: repeatables read a real marker, and the coverage limit is a dependency fact
 
 Second of #13's apply-side leads: "MySQL repeatables passing `had_inflight=false`". They did. The
