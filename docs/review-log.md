@@ -8990,7 +8990,7 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
-## F373 - MEASURED, filed as #219, NOT fixed here: admission depends on the order the draft's rules are written
+## F373 - a live false-accept at the trust boundary: an untrusted draft recovers authority the charter removed
 
 #12's "admission witness gaps" finding. Real, and it is an escalation across the trust boundary the
 crate's own module header calls "the SOLE untrusted crossing".
@@ -9010,26 +9010,61 @@ In A the draft holds `allow` at `app_two`, where the charter granted only `warn`
 opposite outcomes. The full reproduction - registry knob, charter TOML, draft TOML - is in #219 so
 it can be rebuilt verbatim without this repo.
 
-NOT REACHABLE WITH THE BUILTIN REGISTRY, and this is the part I checked hardest, because it decides
-whether this is an incident or a latent hole. Every object-scoped Grant knob there is
-`KnobKind::Bool`: `bool_grant` (`crates/zero-migrate-ir/src/policy_registry.rs:248`) hard-codes the
-kind, and the one object-scoped Grant written as an explicit `KnobDef`, `schema.alter_injected` at
-`:394`, is `KnobKind::Bool` too. Bool has exactly ONE value above default, so a draft's value is
-constant across its granted scope and one witness is representative. The `PerTable` entry at `:363`
-is `require_approval_knob` - `Require` polarity, which unions up and never reaches this check.
+I FIRST WROTE THAT THE BUILTIN REGISTRY WAS IMMUNE. THAT WAS WRONG, and the correction is the most
+important line in this entry. My reasoning was that every object-scoped Grant knob is
+`KnobKind::Bool` - which is TRUE, `bool_grant` (`crates/zero-migrate-ir/src/policy_registry.rs:248`)
+hard-codes the kind and the one explicit object-scoped Grant `KnobDef`, `schema.alter_injected` at
+`:394`, is Bool too - and that Bool therefore has one value above default, so a DRAFT's value is
+constant across its granted scope.
 
-So the shipped engine is not escalating today. What is missing is any reason it stays that way:
-`PolicyRegistry::empty().with(...)` is public and the crate documents the known set as
-runtime-extensible, so a host can register an object-scoped ordered grant right now, and the engine
-adding one would open the hole with no test failing.
+The draft side is not the only side that varies. Codex, asked read-only for the fix design, produced
+a counterexample on the CHARTER side and it reproduces on the shipped path with the builtin registry
+and nothing but Bool:
 
-DELIBERATELY NOT FIXED IN THIS ITERATION. The obvious repair - partition by the union of charter and
-draft rule scopes - may not be sound: `value_at` JOINS every covering rule, so three overlapping
-draft rules can still produce a region where the covering SET varies and a single witness is
-unrepresentative. Guessing at a trust-boundary fix late in a session is how #15's C-1 defect got
-there in the first place. The question is with codex read-only, the reproduction is recorded, and
-#219 carries the three open questions including whether the builtin registry should gate
-object-scoped non-Bool grants until the check is sound.
+    root charter:   sql.raw = true,  scope = "all"
+    upper layer:    sql.raw = false, scope = { include = ["app*"] }
+                    sql.raw = true,  scope = { include = ["app"] }
+    untrusted draft: sql.raw = true, scope = { include = ["app*"] }
+
+    PROBE charter_only  app=Some(Bool(true))  appx=Some(Bool(false))  other=Some(Bool(true))
+    PROBE three_layer   app=Some(Bool(true))  appx=Some(Bool(true))   other=Some(Bool(true))
+
+The charter alone DENIES raw SQL at `appx`. Add the untrusted draft and it is back to `true`. The
+draft recovered exactly the authority the upper layer removed. Run through
+`effective_policy_from_charter_layers`, which is what the CLI's repeated `--policy` and the
+JavaScript charter stack both call.
+
+Why the witness misses it: `pattern_witness` (`crates/zero-migrate-policy/src/compose.rs:1712`)
+builds the canonical witness of `app*` from its literal prefix, which is `app` - and `app` is
+precisely the hole the upper layer re-granted. At `app` the layer's join is true, so the comparison
+passes; at `appx` only the `false` rule covers and the charter is false, and nothing samples there.
+
+THIS IS THE SHAPE #15 WAS FILED FOR, one turn further on. #15 fixed the case where a mask drew no
+boundary at all by including default-valued rules in the partition. The boundary is now drawn, and
+the check still fails, because drawing a boundary does not make a region value-homogeneous when the
+sampling point is chosen from the region's literal prefix.
+
+SO THE SEVERITY IS NOT "latent hole a host could grow into". It is a false-accept reachable today,
+with the shipped registry, on the shipped composition path. #219 is corrected to say so.
+
+DELIBERATELY NOT FIXED IN THIS ITERATION, and codex's analysis is why rather than an excuse. It
+refuted the repair I had in mind - partitioning by charter AND draft scopes - with a three-rule
+counterexample: positive intersections are not atoms, so `D1 ⊓ D2` can contain both a point covered
+by `D3` and one not. Only a full Boolean arrangement is sound that way, and it cannot even be built
+here, because `Scope::difference` (`crates/zero-migrate-policy/src/scope/mod.rs:315`) is
+overapproximate-or-reject, so a widened "outside" cell has no fixed covering set.
+
+Its recommended fix avoids the arrangement entirely, and the reason it works is a lattice identity:
+`value_at` is a least upper bound, so `join(v_i) ⊑ c(o)` exactly when every covering `v_i ⊑ c(o)`.
+That turns the check into a per-draft-rule threshold proof against the layered charter - walk the
+layers top-first, prove the layer's joined value meets the rule's threshold where it covers,
+subtract every rule scope in that layer including default-valued masks, and require an empty
+residual. Order-independent, no arrangement, and it handles masks by construction.
+
+Its own strongest objection, recorded because it is the cost: with an overapproximating subtraction
+this will conservatively REJECT some valid policies. Both of us prefer that to keeping a
+false-accept path. #219 carries the fix, the counterexamples it must cover, and the note that a
+Bool-only registry assertion is a tripwire and not the mitigation.
 
 ## F372 - the third copy of F371's false claim, on the function that actually does the flattening
 
