@@ -8990,6 +8990,65 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F371 - `extends` accumulates, so a document could not tighten its base and never said so
+
+#12's "extends flattening grants" finding. Real, and the comment defending the behaviour named a
+mechanism the site does not have.
+
+MEASURED first, through the composed policy rather than the loaded document. Base grants
+`sql.raw = true` over `app_*`; the extending document grants `sql.raw = false` over `app_one`:
+
+    PROBE merged_rules=[ Grant{sql.raw, Bool(true)} @ app_*.* ,
+                         Grant{sql.raw, Bool(false)} @ app_one.* ]
+    PROBE sql.raw at app_one = Some(Bool(true))
+    PROBE sql.raw at app_two = Some(Bool(true))
+
+The operator wrote "deny raw SQL on app_one" and got "allow".
+
+THE MECHANISM, and the reason the comment was wrong. `overlay_docs`
+(`crates/zero-migrate-policy/src/document.rs:612`) concatenates the two rule lists into ONE
+`PolicyDoc`, which is one layer. Within a layer `GrantKeyMap::value_at`
+(`crates/zero-migrate-policy/src/compose.rs:296`) resolves a key by JOINING every covering rule, so
+rule order cannot express an override and a lower value cannot pull the composed value down. The
+comment claimed "this doc overrides on scalar knobs at query time" - which is exactly what
+`compose::overlay` (`compose.rs:1325`) does, because it builds TWO layers,
+`[Env=over] over [Base=base]`. The doc-level function borrowed its namesake's semantics without its
+layer boundary. That is the F332 shape: a comment defending behaviour by naming a fact untrue at
+its own site.
+
+DECISION, both opinions independently choosing (c) of three: (a) correct the comment only,
+(b) preserve the layer boundary so the child genuinely overrides, (c) refuse at load. The Opus half
+was run by me rather than a subagent - the session's subagent budget was exhausted at 200 - and
+codex ran read-only against the same three options.
+
+(b) is a type/model change to a feature no shipped path calls, and #60 is deciding whether this
+whole family is deleted. (a) leaves an operator's explicit deny silently reading as allow. (c)
+matches the repo's own precedent: `InjectForbidsAuthorPrimaryKeyWithoutPin` refuses
+`author_primary_key = "forbid"` with no pin PRECISELY because the restriction would be inert.
+
+CODEX IMPROVED THE IMPLEMENTATION, and the improvement is load-bearing. My sketch compared rule
+against rule; codex's answer was to compare the two grant MODELS at a witness, because the base's
+join can dominate a value that no single base rule does - two `StrSet` rules join to a superset of
+both - and a pairwise scan misses exactly that. `check_extends_grant_direction` builds both
+`GrantModel`s and samples inside `rule.scope meet base.covered_scope()`.
+
+It also corrected one of my reachability names: the catalog-aware method is
+`TrustedDoc::register_catalog_entry_with_catalog`, not `register_catalog_entry`.
+
+SHIPPED: `LoadError::ExtendsGrantDominatedByBase`, naming the key and both values. Both comments
+corrected to say ACCUMULATES and to point at the layer stack for tightening.
+
+MUTATION-PROVEN. With the call discarded, `cargo test -p zero-migrate-policy --test loader`:
+
+    test result: FAILED. 54 passed; 1 failed
+
+One failure, the new refusal. The two controls - raising a base grant, and granting a key the base
+never mentioned - pass under the mutation as well as without it, so the gate is not simply refusing
+every extending document.
+
+REACHABILITY, unchanged from F369 and stated again because it bounds the value: `extends` needs a
+`ProfileCatalog`, and the engine supplies none.
+
 ## F370 - REFUTED: a layer cannot grant what the root withheld, and the entry point now says so
 
 #12's "root bound omission" finding. Traced through `effective_policy_from_charter_layers`, the one
