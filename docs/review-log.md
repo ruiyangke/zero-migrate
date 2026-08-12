@@ -9035,17 +9035,35 @@ autocomplete behind them.
 measurement above so the next reader does not have to re-derive it, and points at `plans[]` and
 `history` for correlating with the journal. `index.d.ts` regenerates from it.
 
+### Three of the four agree, and status is the one that does not
+
+Extended after filing, by asking the third verb. `history` reads the journal directly, so it is the
+tie-breaker:
+
+```
+apply().applied            mig_7n42DGM5RcMsVSutIUuyV0
+journal schema_migrations  mig_7n42DGM5RcMsVSutIUuyV0
+history().events[].version mig_7n42DGM5RcMsVSutIUuyV0
+status().applied           mig_7n42DGM5RjYabNELZTDjt1   <- alone
+```
+
+That reframes the question. It is not "two namespaces exist, pick one for status" - it is that apply,
+the journal, and history already share ONE namespace and `status` is the single verb outside it. A
+consumer moving between any other pair of these sees consistent ids; only a pairing that involves
+status silently fails.
+
 ### Open question for Ruiyang
 
-Documented, not decided: should `status` report the JOURNAL version instead? A caller correlating a
-deploy log with `status` wants the id `apply` returned, and today no field on `StatusReply` carries
-it. The counter-argument is that status reconciles SUPPLIED plans against the journal, so a plan that
-has never been applied has no journal version to report and the field would be empty exactly when
-`pending` is most interesting.
+Documented, not decided: should `status` report the JOURNAL version? The measurement above makes that
+the conservative answer rather than the bold one - it moves the outlier onto the convention the other
+three already keep - but it is still an operator-visible contract change and it is your call.
 
-A third option: keep both, and add the journal version to `plans[]` where a plan that IS applied has
-one. That looks right to me, and it is an API addition rather than a rename, so I have not built it
-on my own judgement.
+The one real argument against: status reconciles SUPPLIED plans against the journal, so a plan that
+has never been applied has no journal version to report, and `pending` would need something to say
+in exactly the case it exists for. Which is why the third option looks best to me: keep the plan id
+where a plan id is the only thing that exists, and ADD the journal version to `plans[]` for the plans
+that have one. That is an addition rather than a rename, so nothing breaks and the correlation
+becomes possible. I have not built it on my own judgement.
 
 ## F416 - two documents called a shipped gate unbuilt, and the half that really is missing was never written down
 
