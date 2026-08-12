@@ -616,19 +616,15 @@ indexes inside `create({ indexes: [...] })` lowers to more than one journaled st
 so the migration is irreversible even though the author wrote one statement. The
 `createTable` plus index shape in the README's own example is not reversible.
 
-The refusal reads:
+The refusal names the migration you authored, not the derived step identity:
 
 ```
-migration mig_… is applied but absent from the supplied set; cannot roll back
-(its `down` is unavailable). That version is <name> (ddl step), and a plan that
-lowers to more than one journaled step cannot be reversed from its authored
-envelope: its data steps carry no reverse SQL. Roll forward with a compensating
-migration instead
+migration <name> cannot be rolled back: it lowers to more than one journaled step,
+and a plan with several steps has no reverse - its data steps carry no reverse SQL,
+so the engine reduced it to the per-step identity mig_… that no authored envelope
+can supply a `down` for. Only a migration that lowers to exactly ONE step is
+reversible. Roll forward with a compensating migration instead
 ```
-
-Read past the first clause. "Absent from the supplied set" is misleading when the
-migration IS in the set - the operative half is "a plan that lowers to more than one
-journaled step cannot be reversed".
 
 So treat `rollback` as narrow: it is useful for unwinding a small, single-step
 change, and it is not a general undo. Plan the forward fix first, as above.
