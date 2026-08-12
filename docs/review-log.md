@@ -9028,8 +9028,32 @@ The check that actually settled it was stashing my work and running the gate on 
 was available from the first minute and costs one command. When the question is "did I break this or
 was it already broken", the answer is a clean-tree run, not an argument about flags.
 
-NOT ESTABLISHED: when it regressed, and whether CI on origin/main is red right now. `git log -S` on
-the offending doc lines would date it. I did not look, and #224 carries that.
+NOW ESTABLISHED - I said `git log -S` would date it, so I ran it. It dates to me.
+
+    7d12e5cb 2026-08-10 13:18  fix(docs): cargo doc builds the workspace again        <- #190, green
+    b60b0e15 2026-08-10 15:55  feat(gen-artifacts): report whether the folded history is dialect-sensitive
+    8f439932 2026-08-10 16:16  fix(gen-types): carry leg-authored indexes and runtime options ...
+    6ae49df5 2026-08-10 16:38  fix(ownership): claim tables created inside a dialect leg
+
+`git log -S` on each offending link text returns those three commits as where it entered. All three
+are mine, from this review, inside three hours of #190 declaring the gate fixed. So the gate was
+green at 13:18 and red by 15:55 the same afternoon, and stayed red for about two days until
+4c0609f9. Every doc link merged in that window went unchecked, including the two later breaks - the
+second and third commits could not have been caught by a gate the first had already broken.
+
+The uncomfortable part is the shape: I shipped three commits whose own gate runs I recorded as
+green, and the doc stage either did not run or did not run with the CI flags on those three. I have
+NOT reconstructed which, and I am not going to guess at my own past invocations. What is certain is
+that a green I recorded did not mean what the CI command means.
+
+ONE DISCREPANCY I COULD NOT RESOLVE, stated rather than smoothed over: the redundant-explicit-link
+text in `precondition.rs` dates to `20f8abe8` (2026-07-11), a month before any of the above, yet
+#190 reports the gate green at 13:18 on 08-10 with that text already present. Either the
+redundant-explicit-links lint was not firing then, or #190's green came from a weaker invocation
+than CI's. I did not determine which. It does not change the repair, and it is the same question as
+the paragraph above, so it belongs on the record rather than in a conclusion.
+
+WHETHER CI ON origin/main IS RED RIGHT NOW: still not checked. I read git history, not CI runs.
 
 Same command now exits 0. fmt 0, clippy 0, doc 0; 121 targets / 2542 passed / 0 failed / 1 ignored.
 
