@@ -8990,6 +8990,49 @@ refusing the bad one. Whether it should join the up-front gate family is an oper
 change and wants its own decision. It would be an addition to the render-time check, not a
 replacement: the config-sourced zero on the DML path is not covered by any per-migration pre-scan.
 
+## F370 - REFUTED: a layer cannot grant what the root withheld, and the entry point now says so
+
+#12's "root bound omission" finding. Traced through `effective_policy_from_charter_layers`, the one
+composition any shipped code path performs, rather than through `admit` directly.
+
+Three shapes, printed by a throwaway probe before any test was written:
+
+    PROBE A absent_in_root=Err("policy layer 2 rejected: GrantExceedsCharter
+             { key: KnobKey(\"sql.raw\"), offending_pattern: \"app_*.*\" }")
+    PROBE B draft_wider_than_root=Err("policy layer 2 rejected: GrantExceedsCharter
+             { key: KnobKey(\"sql.raw\"), offending_pattern: \"app_*.* \\ app_one.*\" }")
+    PROBE C inside_root_scope=Ok  at_app_one=Some(Bool(true))  at_app_two=Some(Bool(false))
+
+A: a key the root never mentions is bounded at its registry default, so a later layer granting it
+escalates and is refused. B: the refusal names the RESIDUE, `app_*.* \ app_one.*` - the part of the
+request the root never covered, not the whole request. C: the control. A draft asking for what the
+root granted composes, and the grant stops at the root's boundary.
+
+C is what makes A and B mean anything. Without it both refusals are satisfied by a composer that
+refuses every second layer, which would pass the two assertions and ship a policy stack that
+composes nothing.
+
+The mechanism is `check_grant_key` at `crates/zero-migrate-policy/src/boundary.rs:120`. For a key
+the charter never grants, `layered_nondefault_grant_rules` returns empty, nothing is subtracted from
+the draft's granted scope, and the non-empty residue at `:176` is the escalation.
+
+WHAT IS ACTUALLY NEW, stated so this is not read as more than it is. The property is well covered at
+`admit`: disabling the residue rejection fails four tests in
+`crates/zero-migrate-policy/tests/compose_oracle.rs`, including
+`oracle_admit_ok_iff_pointwise_leq_and_effective_below_charter`. The three new tests in
+`crates/zero-migrate/tests/charter_root_bound.rs` are not the sole witness of that mutation and are
+not claimed to be. What was unpinned is that the SHIPPED composition routes to `admit` at all -
+`table_shape.rs:779` - and that is the exact class F363-F366 caught twice: a safety check proven on
+a path production never calls. Under the same mutation the two refusal tests fail and the control
+still passes.
+
+TWO OF THE FINDINGS #12 COLLECTS ARE ALSO ALREADY CLOSED, checked rather than assumed. "Seal not
+binding the presented registry" and "registry rebinding" were fixed under #147 and #148:
+`SealedPolicy::verify` derives the digest from `policy.registry()` at
+`crates/zero-migrate-policy/src/seal.rs:157`, carries a distinct
+`PolicyComposedUnderOtherRegistry` for the swap a matching caller pin cannot see, and
+`crates/zero-migrate-policy/tests/seal.rs` covers both with 13 tests.
+
 ## F369 - `extends` let two consistent documents assemble a contradiction neither one holds
 
 The loader refuses a document that injects a column an overlapping `[[validate]]` forbids
