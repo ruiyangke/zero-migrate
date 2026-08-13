@@ -427,9 +427,25 @@ Missing approval is different: approval is preflighted across each complete
 plan before its first authored step. Partial completion here means execution had
 already begun and a runtime database error or interruption occurred.
 
-Stop automatic retries, record the files reported as completed, inspect the live
-schema and journal, and use a new forward migration or the documented recovery
-procedure. See [Operating migrations](operations.md#failure-playbook).
+Two things narrow this in practice. Most conflicts never execute at all: the
+pending schema is projected before the first step runs, so a file that would
+collide with existing shape is refused up front with `failed to project pending
+schema after envelope "<name>"`, leaving none of its changes applied. What
+reaches the server is the class projection cannot see, which is mostly DATA — a
+unique index over rows that already hold duplicates, for example.
+
+And a partially applied file is resumable rather than wedged. Completed steps are
+journalled individually, so once you have fixed the cause, re-running the same
+deploy skips them and runs only the step that failed; it does not replay the
+completed one and fail on an object it just created. Stop automatic retries so a
+loop is not hammering a real error, but a deliberate retry after the repair is a
+supported recovery, not a risk — you do not need a new forward migration to get
+past the failed step.
+
+Record the files reported as completed, inspect the live schema and journal, and
+if the cause is not something you can repair in place, use a new forward migration
+or the documented recovery procedure. See
+[Operating migrations](operations.md#failure-playbook).
 
 ## Repeat runs and journal state
 
