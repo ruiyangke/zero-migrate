@@ -66,10 +66,17 @@ regenerated artifact with your change**. Skip that and CI fails with a bare
 `git diff` exit code that names no cause — the build is reproducible, so a dirty
 tree here always means the committed artifact is behind its source.
 
-Native addon (only when you touch the `#[napi]` surface):
+Native addon (only when you touch the `#[napi]` surface). CI enforces three more
+things here than the build alone, and the drift check is the same trap as
+`embedded-recorder.js` above: `index.d.ts` and `index.js` are COMMITTED napi
+codegen output, so a `#[napi]` change regenerates them and they must be committed
+with it.
 
 ```
 cd crates/zero-migrate-node && pnpm build
+pnpm --filter zero-migrate-node test           # addon JS gates, real .node
+pnpm --filter zero-migrate-node test:codegen   # generated env.db.ts typechecks
+git diff --exit-code -- crates/zero-migrate-node/index.d.ts crates/zero-migrate-node/index.js
 ```
 
 ### Live databases
