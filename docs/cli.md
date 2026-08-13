@@ -442,6 +442,29 @@ or its current statement rather than the lock itself.
 `apply` and `squash` still wait for the lock: they are the writers the lock exists
 to serialize, and a writer that gave up would leave the deploy undone.
 
+They wait **silently and without a deadline**. A writer queued behind another
+deploy prints nothing at all until it gets the lock, so in a pipeline log it is
+indistinguishable from one wedged on a slow `CREATE INDEX`. If you need to tell
+the two apart, `status` from another shell reports the holder; that is what the
+`busy` flag and `lockHolders` above are for. When the lock is released the waiter
+picks up where it would have started, sees the other deploy's committed journal,
+and applies whatever is still pending.
+
+`--query-timeout` is the only bound on that wait. It applies to the lock acquire
+like any other statement, so a writer that cannot get the lock in time gives up
+having changed nothing:
+
+```
+$ zero-migrate apply --env production --query-timeout 30000
+zero-migrate: failed to acquire project lock: db error: Query read timeout
+$ echo $?
+1
+```
+
+Prefer that in a pipeline with a job timeout of its own: a bounded failure you can
+retry reads better than a job killed mid-wait, and because the writer gave up
+before acquiring the lock, nothing was half-applied.
+
 ## `resolve`
 
 PostgreSQL online column rename leaves the old and new columns side by side until
