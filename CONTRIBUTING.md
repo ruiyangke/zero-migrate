@@ -53,6 +53,19 @@ workflow never ran it — which matters more here than for most gates, because o
 of its arms is a regression witness proving a ROTTED engine snippet is rejected.
 A doc gate nobody runs is a doc gate that cannot tell you the docs rotted.
 
+**One generated file is committed:** `packages/zero-migrate/dist/embedded-recorder.js`,
+built by `tsup` from `src/embedded-recorder.ts`. It is the only tracked file under
+any `dist/`. CI enforces that it matches a fresh build:
+
+```
+git diff --exit-code -- packages/zero-migrate/dist/embedded-recorder.js
+```
+
+So if you touch `src/embedded-recorder.ts`, run `pnpm -w build` and **commit the
+regenerated artifact with your change**. Skip that and CI fails with a bare
+`git diff` exit code that names no cause — the build is reproducible, so a dirty
+tree here always means the committed artifact is behind its source.
+
 Native addon (only when you touch the `#[napi]` surface):
 
 ```
