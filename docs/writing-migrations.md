@@ -1147,12 +1147,25 @@ does with it:
 | --- | --- |
 | PostgreSQL | Probed. Run, satisfied no-op, or fail on drift. |
 | SQLite | Probed. Run, satisfied no-op, or fail on drift. |
-| MySQL | Not probed, except for `dropView` (see below). Any statement the guarded operation emits runs unconditionally, so a repeat run fails with the server's own duplicate-object or missing-object error. |
+| MySQL | Not probed. Any statement the guarded operation emits runs unconditionally, so a repeat run fails with the server's own duplicate-object or missing-object error. `dropView` alone emits a native `DROP VIEW IF EXISTS`, which is narrower than it sounds: see below. |
 
-Twenty-two operation kinds accept `ifNotExists`/`ifExists`. On MySQL exactly one
-of them is still honoured: `view(name).drop({ ifExists: true })`, which lowers
-to a real `DROP VIEW IF EXISTS` that MySQL itself evaluates. For the other
-twenty-one, do not rely on a guard to make a MySQL migration re-runnable.
+Twenty-two operation kinds accept `ifNotExists`/`ifExists`. On MySQL, do not rely
+on any of them to make a migration re-runnable, `dropView` included.
+
+`view(name).drop({ ifExists: true })` is the one that lowers to a native
+`DROP VIEW IF EXISTS`, but reaching that statement is the hard part. Apply first
+projects a pending schema by folding the migration history, and the fold is
+guard-blind on purpose: a guard governs apply-time presence and never changes the
+folded logical shape. A drop of a view the history never created is therefore an
+error during projection, before any SQL is emitted. The native clause only
+protects against the view being absent at the *server* when the projection says
+it should be there, which is drift, not the absence `ifExists` is usually reached
+for.
+
+The projection runs only when at least one migration has already been applied. A
+guarded drop of a never-created view consequently succeeds against an empty
+database and fails against the same database once it has any history, so a scratch
+run is not evidence that a deploy will work.
 `zero-migrate lint --explain --dialect <target>` labels every guarded statement
 with the behaviour of the dialect you previewed for, so read the label rather
 than assuming:
