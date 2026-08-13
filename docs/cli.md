@@ -380,6 +380,17 @@ It exits 0 when the supplied migration set and journal are clean, and also when 
 peer's deploy held the project lock (see below). `--json` does not change this
 exit-code rule.
 
+“Drifted” here means the supplied migration set disagrees with the **journal** —
+a reused identity with a changed checksum, a versioned/repeatable kind mismatch,
+a backfill whose progress checksum no longer matches. It does **not** mean the
+live schema disagrees with the migrations. Structural drift is a separate
+comparison that is not run on this path (see
+[Security model](security-model.md)), so `status --strict` exits 0 even if a
+column, an index, or the whole table has been dropped out of band. The journal
+still says the migration applied, and that is all this gate reads. Use a
+structural snapshot comparison from a Rust host if you need the schema itself
+watched.
+
 Status is available for PostgreSQL and MySQL. The dialect always comes from the
 URL.
 
