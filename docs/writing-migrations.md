@@ -1152,9 +1152,18 @@ does with it:
 Twenty-two operation kinds accept `ifNotExists`/`ifExists`. On MySQL exactly one
 of them is still honoured: `view(name).drop({ ifExists: true })`, which lowers
 to a real `DROP VIEW IF EXISTS` that MySQL itself evaluates. For the other
-twenty-one, do not rely on a guard to make a MySQL migration re-runnable. A
-`--sql` preview labels every guarded statement with the behaviour of the dialect
-you previewed for, so read the label rather than assuming.
+twenty-one, do not rely on a guard to make a MySQL migration re-runnable.
+`zero-migrate lint --explain --dialect <target>` labels every guarded statement
+with the behaviour of the dialect you previewed for, so read the label rather
+than assuming:
+
+```
+$ zero-migrate lint --explain --dialect mysql
+-- [runtime-resolved] createTable "users" (ifNotExists): catalog-probed at apply
+-- (run / satisfied-noop / fail-drift); present createTable/addColumn is refused
+-- until MySQL column-type equality is implemented; the statement below is the
+-- bare DDL the apply runs when the probe says run
+```
 
 Two related options are not part of that set. `renameColumn` accepts no guard on
 any dialect. `table(name).trigger(name).drop({ ifExists: true })` is a separate
