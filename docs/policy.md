@@ -169,6 +169,19 @@ columns = [
 Grants become tighter as they move downward through admission. Requirements and
 injections accumulate; an untrusted draft cannot remove them.
 
+Concretely, for a root charter carrying a mandatory `[[inject]]`:
+
+| A later layer that…                              | Outcome |
+| --- | --- |
+| omits the inject                                 | the root's inject still applies |
+| adds its own **non-mandatory** `[[inject]]`      | accumulates alongside the root's |
+| adds a **mandatory** `[[inject]]`                | refused — only the root layer may mandate |
+| widens a grant beyond the root's scope           | refused |
+| `[[validate]]`s away a column the root injects   | refused as a contradiction |
+
+A charter that forbids a column its own `[[inject]]` contributes is refused when
+it loads, so the contradiction cannot reach a deploy from either direction.
+
 ## Scopes
 
 A rule can target everything, nothing, schemas, or tables:
