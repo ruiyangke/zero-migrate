@@ -439,8 +439,10 @@ No duration is reported for a holder. Neither engine records an acquisition time
 for its advisory lock, so every timestamp available would age the holder's session
 or its current statement rather than the lock itself.
 
-`apply` and `squash` still wait for the lock: they are the writers the lock exists
-to serialize, and a writer that gave up would leave the deploy undone.
+`apply` still waits for the lock: it is the writer the lock exists to serialize,
+and a writer that gave up would leave the deploy undone. (`squash` waits the same
+way, but it is not a CLI verb — `zero-migrate squash` is an unknown command. It is
+a `zero-migrate` Rust crate operation, reachable only by an embedder.)
 
 They wait **silently and without a deadline**. A writer queued behind another
 deploy prints nothing at all until it gets the lock, so in a pipeline log it is
