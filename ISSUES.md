@@ -8,6 +8,17 @@ Each entry states where it was observed and whether it has been re-checked
 against a newer commit, because a consumer usually pins an older engine than
 `main`.
 
+**Status as of 2026-08-13 (`23dca98d`): all three entries below are RESOLVED**, and
+each carries the commit that fixed it plus the tests that now pin it. They are kept
+rather than deleted because a consumer pinned to an older engine will still hit
+them, and the entry tells them which version to move to.
+
+Two of the three were fixed WEEKS before this re-check and nobody noticed, because
+nothing re-runs these reproductions: entry 1 said "not re-checked", and entry 2
+said "still present" on the strength of a run measured against a `main` that was
+already two weeks stale. A defect list that is not re-checked drifts into
+misinformation in both directions.
+
 ---
 
 ## 1. A clean authored `createTable` is denied as `RawCreateInInjectScope`
@@ -68,10 +79,34 @@ configured, and the failure is easy to mistake for a local problem.
 
 ## 2. Foreign-key value-format validation cannot see a target authored in an earlier migration
 
-**Observed on:** `ab96f0a04a583cac8bd46c8898acc54374ccac9a`. **Still present in
-the same form when the appbase adapter was compiled and exercised against
-`main` (`a243333c`)**, though that run reached it through the consumer's own
-workaround rather than re-triggering the raw failure.
+**RESOLVED.** The catalog fallback this entry asks for landed in `4d4f26b6`
+(2026-08-06), *"feat(migrate): prove a foreign-key target's value format from the
+live catalog"* — which answers the design question below directly: when the
+referenced target already exists in the live catalog, its own format evidence
+(PostgreSQL's native `uuid` type, or the engine's exact UUID/TypeID/ULID spelling
+CHECK on MySQL/SQLite) now proves the reference without an authored contract.
+
+**The "still present" note below was measured against a stale `main`.** It cites
+`a243333c`, dated 2026-07-22; the fix is from 2026-08-06, two weeks later. The
+note also says that run "reached it through the consumer's own workaround rather
+than re-triggering the raw failure", so it was weak evidence for the claim even at
+the time — worth stating, because a stale "still present" sends a consumer looking
+for a workaround they no longer need.
+
+Re-checked against `main` (`23dca98d`): `crates/zero-migrate/tests/catalog_format_proof.rs`
+pins it in both directions, 6/6. Catalog UUID evidence proves BOTH reference
+surfaces (the column-level `references` facet and the table-level single-column
+`fk` constraint, which run through separate validation loops). And it did not
+become a blanket allow — a live `text` target without UUID evidence, a differing
+catalog TypeID, and a chained target carrying no CHECK of its own all stay
+rejected.
+
+**Consequence for the workaround:** the downstream `advance_logical_columns`
+replay described below should no longer be necessary for targets that exist in
+the live catalog, which was the stated cost ("every consumer driving multi-file
+ordered applies has to rediscover this").
+
+**Originally observed on:** `ab96f0a04a583cac8bd46c8898acc54374ccac9a`.
 
 Lowering a migration whose table-level foreign key references a table created by
 an *earlier* migration fails when the runner does not carry authored logical
@@ -106,8 +141,25 @@ the whole class of consumer-side bookkeeping would go away.
 
 ## genArtifacts: a single `references` field emits its foreign key twice
 
+**NO LONGER REPRODUCES on `main` (`23dca98d`), re-checked 2026-08-13.** The
+reporter's own minimal reproduction — the `users`/`posts` descriptor pair below,
+`projectSchema: "public"`, `charterLayers: ["policy_version = 1\n"]` — now returns
+`ok=true`, and the reporter's `type: "string"` control still returns `ok=true` too,
+so the harness matches theirs.
+
+Checked for non-vacuity rather than trusting the boolean: a silently DROPPED
+`references` would also produce `ok=true` while losing the foreign key, which would
+be a worse defect wearing a green. The emitted `envDbTs` carries
+`references("users", "id")` exactly once — emitted, and emitted singly, which is
+the precise property this entry is about.
+
+The fixing commit was not identified; the searches over `fold.rs` and the
+descriptor path since 2026-08-06 did not isolate it, and naming a commit that has
+not been verified would be worse than leaving it unnamed.
+
 **Reported by:** zeroship (/home/ruiyang/Projects/appbase), 2026-08-07
-**Severity:** blocks descriptor-sourced `genArtifacts` for any schema with a relation
+**Severity (as reported):** blocks descriptor-sourced `genArtifacts` for any schema
+with a relation
 
 A descriptor field carrying `references` makes the fold emit the derived foreign
 key twice, so `genArtifacts` returns `ok=false` with a duplicate-constraint error.
