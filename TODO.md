@@ -37,16 +37,31 @@ Working notes; not staged.
 
 ## Highest leverage (unblock adoption beyond the niche)
 
-- [ ] Rendered-SQL preview / dry-run. Today `plan`/`preview` return structured
-  ops, never the SQL that will run, and there is no database-backed simulation.
+- [ ] Rendered-SQL preview / dry-run. **Partly shipped — re-checked 2026-08-13.**
+  `lint --explain --dialect <name>` DOES render the per-dialect SQL from the IR
+  (`CREATE TABLE "public"."departments" (… CHECK (…))`, `ALTER TABLE … ADD COLUMN
+  …`), so the claim that these verbs return "never the SQL that will run" is no
+  longer true; the capability exists under a different verb than this item
+  imagined. `docs/writing-migrations.md` used to point at a `--sql` flag that never
+  existed and now points here.
+  Still open, verified absent: a `--sql` render on `plan`/`preview` (`plan --sql`
+  answers `unknown flag --sql`), a Node `renderSql()`, and any database-backed
+  simulation. Scope this as "surface the existing renderer on more verbs", not as
+  "build a renderer".
   Every serious peer shows SQL (Flyway `check`, Alembic `sqlmigrate`, Atlas
-  lint/dry-run). Add a `--sql` render to CLI `preview`/`plan` and a Node
-  `renderSql()` that emits per-dialect statements from the IR. Trust and DX gap.
+  lint/dry-run). Trust and DX gap.
 
 - [ ] Drift detection in Node/CLI. Structural drift is currently Rust-only. Expose
   a `status --drift` / Node `drift()` that compares the live catalog to the
   expected post-apply shape at the latest applied revision (Atlas's headline
   feature). At minimum, gate `apply` when the live DB diverges.
+  **Re-checked 2026-08-13, still accurate**, with one distinction worth keeping so
+  the scope is not misread: `status --drift` answers `unknown flag`, and the addon
+  exposes no `drift()` — only `drifted` as a status STATE. That state is CHECKSUM
+  drift (an applied migration whose file changed), which apply already gates and
+  aborts on. STRUCTURAL drift — `diff_snapshots` over the live catalog — is the
+  unexposed half, and it has no production caller inside the engine either. So this
+  is "expose an existing Rust capability", not "the engine cannot detect drift".
 
 - [ ] Close the Node/Rust capability asymmetry. Users repeatedly hit "supported,
   but not from your host":
