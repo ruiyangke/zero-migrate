@@ -86,10 +86,25 @@ Working notes; not staged.
   schema-diff/`generate` path from a desired-state definition, or state clearly
   why imperative-only is the deliberate bet. Do not leave this implicit.
 
-- [ ] Broaden MySQL parity. "Write once" degrades fast on MySQL 8: no column
-  rename, no composite/non-id FK, no standalone check, no partial/expression
-  index, no partitioning. Prioritize column rename (expand-contract already exists
-  in `render/expand_contract.rs`) and expression/partial indexes.
+- [ ] Broaden MySQL parity. "Write once" degrades on MySQL 8: no column rename, no
+  standalone check, no partial/expression index, no native partitioning.
+  Prioritize column rename (expand-contract already exists in
+  `render/expand_contract.rs`) and expression/partial indexes.
+  **Re-measured against live MySQL 8.4, 2026-08-13.** Each claim was applied
+  through the host `apply` path rather than read off the matrix:
+  - column rename — refused, `UNSUPPORTED ... renameColumn`, dialect mysql. Holds.
+  - standalone check / partial / expression index — `No` in the support matrix
+    with notes attributing each to the current engine. Consistent.
+  - partitioning — `create({ partitionBy })` is refused twice over: first for a
+    missing `whenUnsupported: "collapse"`, then, once collapse is affirmed, with
+    `PARTITION_BOUNDS_NOT_TOTAL` until a `default: true` partition child covers
+    the range. So MySQL never gets a partitioned table, and the collapse path is
+    explicit rather than silent. Holds, in effect.
+  - **composite / non-`id` foreign keys — WRONG, and now removed from the list.**
+    Both apply cleanly on live MySQL: a composite `(pa,pb) -> parent(a,b)` and a
+    non-`id` `(pcode) -> parent(code)` both land as real constraints, matching
+    `support-matrix.md`, which says `Yes` for all three dialects. This entry sent
+    roadmap attention at something already shipped.
 
 ## Depth and safety polish
 
