@@ -572,10 +572,15 @@ migration identity and update the dependency.
 ### JavaScript history
 
 JavaScript `history()` returns PostgreSQL events. MySQL and SQLite history are
-not available through the public JavaScript API. The CLI has no history command.
+not available through the public JavaScript API, and the same boundary holds at
+the CLI: `zero-migrate history` refuses a SQLite or MySQL target with
+`history supports only PostgreSQL`. See [`history`](cli.md#history) for the
+command itself.
 
 On a fresh database, status or history may initialize the journal, so do not
-assume the first call is physically read-only.
+assume the first call is physically read-only. Measured on PostgreSQL, a first
+`status` or `history` against a project that has never deployed creates the meta
+schema and its five journal tables; `plan` and `lint` create nothing.
 
 ### Checksum drift
 
