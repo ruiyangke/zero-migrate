@@ -259,11 +259,37 @@ During apply:
 Do not give migration credentials permission to update, delete, or truncate the
 journal. Do not “repair” history manually after a failure.
 
-Append-only is enforced, not only advised. On PostgreSQL a trigger on
-`schema_migrations` refuses `UPDATE`, `DELETE` and `TRUNCATE` — including from
-the role that owns the table — with `migration journal is append-only (no
-UPDATE/DELETE)`. Withholding those grants is defence in depth on top of that, so
-a credential over-granted by mistake still cannot rewrite history. Inserting a
+Append-only is enforced, not only advised — but how completely depends on the
+target, and the difference decides whether withholding grants is your second line
+of defence or your only one.
+
+| | `UPDATE` | `DELETE` | `TRUNCATE` |
+| --- | --- | --- | --- |
+| PostgreSQL | refused | refused | refused |
+| MySQL | refused | refused | **NOT refused** |
+| SQLite | refused | refused | no such statement |
+
+On PostgreSQL a trigger on `schema_migrations` refuses `UPDATE`, `DELETE` and
+`TRUNCATE` — including from the role that owns the table — with `migration
+journal is append-only (no UPDATE/DELETE)`. Withholding those grants is defence
+in depth on top of that, so a credential over-granted by mistake still cannot
+rewrite history.
+
+**On MySQL that last sentence does not hold for `TRUNCATE`.** MySQL triggers do
+not fire on `TRUNCATE TABLE`, which the server treats as DDL rather than a row
+operation, so no trigger can intercept it: a single `TRUNCATE` erases the journal
+and the engine cannot prevent it. `UPDATE` and `DELETE` are refused there exactly
+as on PostgreSQL. For `TRUNCATE` specifically, **withholding the grant is the only
+control**, which makes the advice above load-bearing rather than belt-and-braces
+on MySQL.
+
+SQLite has no `TRUNCATE` statement, and the unqualified `DELETE FROM
+schema_migrations` that stands in for it is refused — SQLite's truncate
+optimisation does not bypass the guard.
+
+`DROP TABLE` is outside this boundary on every target: an owner can always drop a
+table it owns, on any of the three. The journal's defence against that is the
+independently stored manifest described above, not a database rule. Inserting a
 malformed event is separately rejected by the `schema_migrations_event_shape`
 check constraint; that is a well-formedness rule and not an authenticity one, so
 it is the independently stored manifest above, not the constraint, that
