@@ -527,6 +527,21 @@ An explicitly aborted online rename appears in top-level `aborted`, not
 cannot become pending again. A plan that depends on that aborted identity stays
 `blocked`; point it to a newly authored replacement migration instead.
 
+`dependsOn` is an IR-level field, and a JavaScript migration module cannot set
+it — a module exports `up`, `down`, and `name` only. So for JavaScript-authored
+projects the `blocked` state above is unreachable: with no dependency declared,
+nothing is ever blocked on an aborted identity, and the recovery is simply to
+author a replacement migration. There is no dependency to repoint. See
+[Node API](node-api.md).
+
+**Status does not read the live schema.** An empty `pending` list, a plan
+reading `applied`, and a clean `status --strict` all mean the journal agrees with
+the supplied migration set — not that the database still matches it. A column,
+an index, or the whole table can be dropped out of band and none of these change.
+If the symptom is “the migration is applied but the schema is wrong”, no status
+field will show it; compare a structural snapshot from a Rust host instead. See
+[CLI](cli.md#status) and [Security model](security-model.md).
+
 Also inspect `pendingContracts`, `blocked`, and `unexpectedJournal`.
 `pendingContracts` is separate from the top-level plan `pending` list. An
 expanded but unresolved rename normally has a `partial` plan with applied
