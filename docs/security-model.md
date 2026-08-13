@@ -259,6 +259,16 @@ During apply:
 Do not give migration credentials permission to update, delete, or truncate the
 journal. Do not “repair” history manually after a failure.
 
+Append-only is enforced, not only advised. On PostgreSQL a trigger on
+`schema_migrations` refuses `UPDATE`, `DELETE` and `TRUNCATE` — including from
+the role that owns the table — with `migration journal is append-only (no
+UPDATE/DELETE)`. Withholding those grants is defence in depth on top of that, so
+a credential over-granted by mistake still cannot rewrite history. Inserting a
+malformed event is separately rejected by the `schema_migrations_event_shape`
+check constraint; that is a well-formedness rule and not an authenticity one, so
+it is the independently stored manifest above, not the constraint, that
+establishes the expected migration set.
+
 Structural schema drift is separate from checksum history. Rust hosts can
 capture and compare PostgreSQL or SQLite structural snapshots; it is not
 automatically run on every JavaScript apply. MySQL provides a limited catalog
