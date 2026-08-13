@@ -70,8 +70,11 @@ Working notes; not staged.
     file back. `docs/getting-started.md` and `docs/cli.md` both already said so.
   - [ ] History for MySQL and SQLite (currently PostgreSQL-only). Re-checked, still
     true: both refuse with "history supports only PostgreSQL".
-  - [ ] Full custom policy from Node (currently table-shape ceiling only). NOT
-    re-checked.
+  - [ ] Full custom policy from Node (currently table-shape ceiling only).
+    Re-checked 2026-08-13, still true and corroborated twice: every Node entry
+    point takes only ordered policy CHARTER documents (TOML), and
+    `docs/security-model.md` states it outright - "a general end-to-end custom
+    executor policy is not exposed yet".
   - [ ] Migrator-role config from the CLI (currently Node/Rust only). Re-checked,
     still true: no `--migrator-role` flag on any CLI command.
 
