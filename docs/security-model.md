@@ -283,6 +283,12 @@ as on PostgreSQL. For `TRUNCATE` specifically, **withholding the grant is the on
 control**, which makes the advice above load-bearing rather than belt-and-braces
 on MySQL.
 
+Because the cause is the statement type rather than any one table, this applies to
+**every** guarded journal table on MySQL — `schema_migrations`,
+`schema_migrations_supersedes` and `schema_migrations_recovery` alike. Measured
+directly on `schema_migrations`; the others follow from the same MySQL rule rather
+than from a separate observation.
+
 SQLite has no `TRUNCATE` statement, and the unqualified `DELETE FROM
 schema_migrations` that stands in for it is refused — SQLite's truncate
 optimisation does not bypass the guard.
