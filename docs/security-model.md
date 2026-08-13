@@ -148,6 +148,20 @@ PostgreSQL has the strongest SQL text guard. Policy-gated statements are parsed
 before execution and checked for dangerous file, program, privilege, session,
 and cross-schema behavior.
 
+**`safety.destructive_ops` is enforced by that text guard, and therefore on
+PostgreSQL only.** The posture defaults to `forbid`, and on PostgreSQL a
+`DROP TABLE` is refused before execution with
+`DATA_SECURITY_DESTRUCTIVE_OPS_FORBID`. On MySQL and SQLite the same authored
+migration, the same policy and the same approval apply the drop: those dialects
+are served by the descriptor guard, which is constructed without the policy and
+returns a clean outcome for every statement. Do not rely on this knob to stop a
+destructive migration on MySQL or SQLite; gate those deploys with
+`safety.require_approval` and review, which do apply on all three.
+
+Measured on all three backends with an identical migration. This is a limitation
+of where the posture is evaluated, not a statement that destructive operations are
+intended to be unguarded elsewhere.
+
 Use a dedicated, non-login migrator role with only the project-schema
 permissions required by approved migrations. The Rust `ExecutorConfig` does not
 select this role unless the host configures it; the public CLI cannot configure
