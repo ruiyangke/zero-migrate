@@ -44,7 +44,14 @@ pnpm -w build
 pnpm --filter zero-migrate check
 pnpm --filter zero-migrate test
 pnpm --filter zero-migrate-cli typecheck
+pnpm --filter zero-migrate-cli test:docs
 ```
+
+`test:docs` runs the documentation examples as real code (6 tests, no database
+needed). It was absent from this list while the script existed, so the documented
+workflow never ran it — which matters more here than for most gates, because one
+of its arms is a regression witness proving a ROTTED engine snippet is rejected.
+A doc gate nobody runs is a doc gate that cannot tell you the docs rotted.
 
 Native addon (only when you touch the `#[napi]` surface):
 
