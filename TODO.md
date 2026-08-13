@@ -114,8 +114,21 @@ Working notes; not staged.
   workhorse, especially for MySQL.
 
 - [ ] Backfill tail handling. The fixed terminal cursor does not chase rows
-  inserted after capture (correct but surprising). Add loud docs and a
-  post-backfill check that reports/counts rows beyond the captured boundary.
+  inserted after capture (correct but surprising).
+  **Re-checked 2026-08-13: the "loud docs" half is DONE and can be dropped from
+  this item.** The behaviour is documented in six places — `operations.md` (twice,
+  including "use a later migration for rows inserted after this backfill began"),
+  `troubleshooting.md`, `concepts.md`, `architecture.md`, and `security-model.md`.
+  `troubleshooting.md:401` states it as plainly as the item asks for:
+
+  > The cursor range is not a transaction-wide snapshot, so rows inserted after
+  > capture are not guaranteed to be included even when their cursor sorts within
+  > the range. Create a later migration for those rows.
+
+  What genuinely remains is the second half: **a post-backfill check that
+  reports or counts rows beyond the captured boundary.** No such counter or
+  report exists in the engine or the CLI. So this is "add the tail count", not
+  "document the behaviour".
 
 - [x] Rollback posture, documented explicitly. The "no public rollback" half of this
   item was stale: `zero-migrate-cli` exports a `rollback` verb, and it unwinds real
