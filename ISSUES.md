@@ -12,9 +12,26 @@ against a newer commit, because a consumer usually pins an older engine than
 
 ## 1. A clean authored `createTable` is denied as `RawCreateInInjectScope`
 
-**Observed on:** `ab96f0a04a583cac8bd46c8898acc54374ccac9a`
+**RESOLVED.** Fixed by `6b4cf165` (2026-08-06), *"fix(guard): admit a create that
+carries the shape its charter injects"* — 18 days after this was observed. Of the
+two possibilities this entry raised, it was the first: the rule was a blanket deny
+on any create inside an inject scope, and the fix made it a CONFORMANCE check. A
+create carrying every injected column with the pinned primary key is now admitted;
+the structured resolver renders those columns into the text it hands the guard, so
+the authored path conforms by construction.
+
+Re-checked against `main` (`43bec481`): `crates/zero-migrate-guard/tests/namespace_authority.rs`
+§1b pins it in both directions — `raw_create_carrying_the_full_injected_shape_is_admitted`
+(a shape all but identical to the one quoted below), plus
+`create_short_one_injected_column_is_denied` and
+`conforming_create_outside_the_create_table_grant_is_still_denied`, so the fix did
+not become a blanket allow. 30/30 pass.
+
+A consumer still seeing this is pinned to an engine older than `6b4cf165`.
+
+**Originally observed on:** `ab96f0a04a583cac8bd46c8898acc54374ccac9a`
 (branch `feat/no-builtin-policies-1-gab96f0a`), via the appbase adapter's
-live-Postgres tests. **Not re-checked against `main`.**
+live-Postgres tests.
 
 Two tests that assert an authored IR set lowers with no policy denials both fail
 once a live Postgres is configured:
