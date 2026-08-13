@@ -122,8 +122,19 @@ Working notes; not staged.
 ## Ecosystem and maturity (npm track, in progress)
 
 - [ ] Publish JS packages to npm (currently source-checkout only). Restructure,
-  native multi-package distribution, and CLI work are done and verified; READMEs,
-  licenses, the release workflow, and pack verification remain.
+  native multi-package distribution, and CLI work are done and verified.
+  **Re-checked 2026-08-13: all four things this item listed as "remaining" now
+  exist.** READMEs and LICENSEs are present in both `packages/zero-migrate` and
+  `packages/zero-migrate-cli`; `.github/workflows/release.yml` is written, with a
+  per-target build matrix and an npm publish job; and pack verification is in it
+  (`pnpm pack` per package, including the `workspace:*` rewrite the file's own
+  comment calls out).
+  What actually remains is narrower than the prose suggests: **the workflow has
+  never run.** `git tag` is empty, and the workflow is tag-triggered — its own
+  header says "First automated run: tag a prerelease (for example v0.1.0-rc.1) to
+  validate", and flags the linux-arm64 cross-compile (libpg_query, bundled SQLite)
+  as the step most likely to need adjustment. So this is "push a prerelease tag and
+  fix what breaks", not "build the release machinery".
 - [ ] CI/CD integrations (GitHub Action / GitLab component) for plan plus gate.
 - [ ] MariaDB support decision (currently MySQL 8 only; documented non-goal?).
 - [ ] Guidance and tooling for the unsandboxed-JS trust boundary in platform hosts.
