@@ -1147,7 +1147,7 @@ does with it:
 | --- | --- |
 | PostgreSQL | Probed. Run, satisfied no-op, or fail on drift. |
 | SQLite | Probed. Run, satisfied no-op, or fail on drift. |
-| MySQL | Not probed. Any statement the guarded operation emits runs unconditionally, so a repeat run fails with the server's own duplicate-object or missing-object error. `dropView` alone emits a native `DROP VIEW IF EXISTS`, which is narrower than it sounds: see below. |
+| MySQL | Probed at apply like the others, but the guard is not resolved while the pending schema is projected. A state the folded history disagrees with is refused during projection, before the probe can run: see below. |
 
 Twenty-two operation kinds accept `ifNotExists`/`ifExists`. On MySQL, do not rely
 on any of them to make a migration re-runnable, `dropView` included.
@@ -1162,10 +1162,16 @@ protects against the view being absent at the *server* when the projection says
 it should be there, which is drift, not the absence `ifExists` is usually reached
 for.
 
+Nothing about this is specific to views. A `create({ ifNotExists: true })` against
+a table some other process created out of band is refused the same way, with
+`fold: table ... already exists` rather than the guard absorbing it or MySQL
+reporting its own duplicate-table error. PostgreSQL accepts both cases, because it
+resolves the guard while projecting and MySQL does not.
+
 The projection runs only when at least one migration has already been applied. A
-guarded drop of a never-created view consequently succeeds against an empty
-database and fails against the same database once it has any history, so a scratch
-run is not evidence that a deploy will work.
+guarded operation consequently succeeds against an empty database and fails
+against the same database once it has any history, so a scratch run is not
+evidence that a deploy will work.
 `zero-migrate lint --explain --dialect <target>` labels every guarded statement
 with the behaviour of the dialect you previewed for, so read the label rather
 than assuming:
