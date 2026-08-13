@@ -434,13 +434,26 @@ schema after envelope "<name>"`, leaving none of its changes applied. What
 reaches the server is the class projection cannot see, which is mostly DATA — a
 unique index over rows that already hold duplicates, for example.
 
-And a partially applied file is resumable rather than wedged. Completed steps are
-journalled individually, so once you have fixed the cause, re-running the same
-deploy skips them and runs only the step that failed; it does not replay the
-completed one and fail on an object it just created. Stop automatic retries so a
-loop is not hammering a real error, but a deliberate retry after the repair is a
-supported recovery, not a risk — you do not need a new forward migration to get
-past the failed step.
+What to do next differs by target, and the difference is the transactional one
+above rather than a gap in one dialect.
+
+On PostgreSQL a partially applied file is resumable rather than wedged. Completed
+steps are journalled individually, so once you have fixed the cause, re-running
+the same deploy skips them and runs only the step that failed; it does not replay
+a completed step and fail on an object it just created. A deliberate retry after
+the repair is a supported recovery — you do not need a new forward migration to
+get past the failed step.
+
+On MySQL a retry is deliberately **refused** instead. Auto-committed DDL leaves an
+inflight marker, and the engine will not replay possibly-applied `CREATE`/`ALTER`
+statements, because it cannot know which of them reached the server. The refusal
+names the version and prints the exact `DELETE` that clears the marker, along with
+both repair routes; run it once you have confirmed the live shape, and the deploy
+completes. Fixing the underlying cause alone is not enough there — a retry that
+yielded the moment it looked survivable would not be fail-closed.
+
+In both cases, stop automatic retries first, so a loop is not hammering a real
+error.
 
 Record the files reported as completed, inspect the live schema and journal, and
 if the cause is not something you can repair in place, use a new forward migration
