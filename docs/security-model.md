@@ -384,6 +384,16 @@ runs correctly still cannot return data a `down` dropped.
 - Node `plan`/`validate` are offline checks and do not inspect the live database.
 - CLI plan, apply, and status accept a trusted ownership registry through
   `--registry <file>` for later changes to existing tables.
+- The registry decides WHICH TABLES a deploy may touch. It does not make one
+  schema deployable by several independent migration sets: every deploy must
+  supply the complete applied set for its schema, because the journal is
+  per-schema and the fold needs every applied step to project the pending shape.
+  Two applications deploying their own directories into one schema therefore
+  block each other after the first round, each refused with `authored migration
+  prefix is incomplete`; put them in one migration set with per-table ownership,
+  or give each its own schema. Measured, not inferred - a deploy that omits
+  another application's applied migration genuinely cannot compute the right
+  pending schema.
 - The CLI cannot configure a PostgreSQL migrator role or custom audit actor.
 - Node status is plan-aware on PostgreSQL and MySQL when given the ordered
   migration set; the CLI supplies its migration directory automatically.
