@@ -183,12 +183,20 @@ Build every column with the immutable `t` and `ids` helpers:
 | `t.uuid()` | UUID |
 | `t.bytes()` | Binary data |
 | `t.json()` | JSON |
-| `t.inet()` | IP address or network |
+| `t.inet()` | IP address or network (`inet` on PostgreSQL, a string column elsewhere) |
 | `t.vector({ dimensions, metric? })` | Vector data, PostgreSQL only (see below) |
-| `t.geoPoint()` | Geographic point |
+| `t.geoPoint()` | Geographic point, see the note below |
 | `t.enum(nameOrHandle)` | Declared enum |
 | `t.domain(nameOrHandle)` | Declared domain |
 | `t.encrypted({ of })` | Application-encrypted storage |
+
+`t.geoPoint` has the same shape of caveat. It renders a real spatial type on both
+servers — `geography` on PostgreSQL (which needs PostGIS installed; the engine
+does not create it) and `POINT SRID 4326` on MySQL — and it also emits an index on
+the column. MySQL treats that as a SPATIAL index and requires every part of one to
+be `NOT NULL`, so a NULLABLE `t.geoPoint()` fails there while
+`t.geoPoint().notNull()` applies cleanly. On SQLite the column degrades to `BLOB`
+with no spatial behaviour.
 
 `t.vector` is PostgreSQL-only in practice, and it needs the `vector` extension
 installed before the migration runs — the engine does not create it, and a stock
