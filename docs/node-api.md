@@ -200,6 +200,31 @@ directly, start Node with a TypeScript loader such as `tsx`.
 
 ```ts
 function currentIrVersion(): number;
+
+interface PreviewSqlSource {
+  /** Complete IR envelope JSON documents, in migration order. */
+  envelopes: string[];
+  /** The target SQL dialect. */
+  dialect: "postgres" | "mysql" | "sqlite";
+  /** Schema used for operations that omit an explicit qualifier. */
+  defaultSchema: string;
+  /** App attribution stamped into the offline preview lowering context. */
+  ownerApp: string;
+  /** Ordered policy-charter TOML documents (root bound, then narrowing layers). */
+  charterLayers: string[];
+}
+
+/** Renders authored envelopes to SQL. NEVER opens a database connection. */
+function previewSql(source: PreviewSqlSource): string[];
+```
+
+`previewSql()` is the only entry point here that touches no database. It renders
+what WOULD be sent for a dialect, so a host can show or review SQL before any
+credentials exist. Because nothing is executed, it also cannot report anything a
+live catalog decides: guarded operations appear as `[runtime-resolved]` labels
+rather than as the statement the probe will choose.
+
+```ts
 ```
 
 Returns the migration format version supported by the installed runtime. The
@@ -785,6 +810,10 @@ interface StatusReply {
 }
 
 function status(options: HostStatusOptions): Promise<StatusReply>;
+
+/** Status for a host that already holds IR envelopes rather than migration
+ *  modules. Same reply, same policy and registry requirements. */
+function statusEnvelopes(options: HostEnvelopeStatusOptions): Promise<StatusReply>;
 ```
 
 ### Rolling back
