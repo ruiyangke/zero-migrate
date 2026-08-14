@@ -280,6 +280,7 @@ respectively.
 | `nullsNotDistinct` | Yes, PostgreSQL 15+ | No | No |
 | `brin`, `gin`, `gist`, `ivfflat`, `hnsw` | Yes | No | No |
 | Index comments | Yes | No | No |
+| Derived `vector`/`geoPoint` index | Yes, native method | Yes, plain index | No |
 
 Use `btree` for portable migrations. Through the current API:
 
@@ -291,6 +292,12 @@ Use `btree` for portable migrations. Through the current API:
 
 PostgreSQL vector index methods require the matching database extension and
 operator setup. Provision those prerequisites before apply.
+
+The last row is the one index nobody writes: `t.vector` and `t.geoPoint` each
+derive one, to model what the PostgreSQL data plane creates. It is emitted only
+where the target can build it, so MySQL gets the column and no index — a `blob`
+cannot be indexed there without a key length, and a SPATIAL index would require
+`NOT NULL`. See [Writing migrations](writing-migrations.md#the-derived-index-on-these-two-types).
 
 ## Constraints
 

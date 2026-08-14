@@ -192,20 +192,37 @@ Build every column with the immutable `t` and `ids` helpers:
 
 `t.geoPoint` has the same shape of caveat. It renders a real spatial type on both
 servers — `geography` on PostgreSQL (which needs PostGIS installed; the engine
-does not create it) and `POINT SRID 4326` on MySQL — and it also emits an index on
-the column. MySQL treats that as a SPATIAL index and requires every part of one to
-be `NOT NULL`, so a NULLABLE `t.geoPoint()` fails there while
-`t.geoPoint().notNull()` applies cleanly. On SQLite the column degrades to `BLOB`
+does not create it) and `point` on MySQL. On SQLite the column degrades to `BLOB`
 with no spatial behaviour.
 
-`t.vector` is PostgreSQL-only in practice, and it needs the `vector` extension
-installed before the migration runs — the engine does not create it, and a stock
-PostgreSQL fails at apply with `type "vector" does not exist`. Declaring a vector
-column also emits an index on it. On MySQL the column degrades to `BLOB` and that
-index is one MySQL cannot build (`BLOB/TEXT column used in key specification
-without a key length`), so the migration fails; on SQLite it degrades to `BLOB`
-with an ordinary index and no vector behaviour at all. Do not use `t.vector` in a
-migration that must run on more than one target.
+`t.vector` gives vector semantics on PostgreSQL only, and there it needs the
+`vector` extension installed before the migration runs — the engine does not create
+it, and a stock PostgreSQL fails at apply with `type "vector" does not exist`.
+Elsewhere the column degrades to `BLOB`: on SQLite that is storage with no vector
+behaviour at all, and on MySQL the same. **A `t.vector` column that round-trips on
+SQLite is not doing anything vector-shaped**, so do not reach for it in a migration
+that must run on more than one target.
+
+### The derived index on these two types
+
+Both types also declare an index you did not write. It exists to model what the
+PostgreSQL data plane builds — `USING ivfflat` for a vector, `USING gist` for a
+geoPoint — so a runtime-created index is not seen as drift and dropped.
+
+That index is emitted **only where the target can build it**:
+
+| Target | Derived index |
+| --- | --- |
+| PostgreSQL | Yes, with its native access method |
+| SQLite | Yes, an ordinary index over the `BLOB` |
+| MySQL | **No** |
+
+MySQL cannot build either one. A vector lands as `blob`, and an index over one is
+refused with `BLOB/TEXT column used in key specification without a key length`; a
+geoPoint's index would be SPATIAL, which requires every part to be `NOT NULL`. Both
+refusals used to arrive at apply, after `lint` had already passed the same
+migration. The column is still created on MySQL, so the declaration stays usable —
+what is dropped is an index you never asked for and MySQL could not have had.
 
 Columns are nullable unless you call `.notNull()`. Modifiers return new
 definitions, so a base definition can be reused safely:
