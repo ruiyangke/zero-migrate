@@ -121,12 +121,31 @@ The environment variables are:
 | `ZERO_MIGRATE_OWNER_APP` | Deploying application ID |
 | `ZERO_MIGRATE_SCHEMA` | Project schema or database |
 | `ZERO_MIGRATE_REGISTRY` | Ownership registry path |
-| `ZERO_MIGRATE_POLICY` | Policy charter path |
+| `ZERO_MIGRATE_POLICY` | Ordered policy charter layers |
 | `ZERO_MIGRATE_CONFIG` | Explicit config path |
 | `ZERO_MIGRATE_ENV` | Config environment name |
 
 `DATABASE_URL` is the legacy URL fallback. It is used only when no explicit URL,
 `ZERO_MIGRATE_URL`, or selected config `url` is present.
+
+`ZERO_MIGRATE_POLICY` carries an ordered list of charter layers, not a single
+path. Separate them with the OS path separator exactly like `PATH` — `:` on
+POSIX, `;` on Windows — in root-to-narrowing order, the same order repeated
+`--policy` flags use:
+
+```bash
+export ZERO_MIGRATE_POLICY="./policy-root.toml:./policy-production.toml"
+```
+
+It **replaces** a selected config `policy` array rather than adding to it. Because
+layers only ever narrow, dropping one widens effective policy, so replacing a
+multi-layer config `policy` with fewer environment layers is a loosening. The CLI
+writes a warning naming both layer counts when that happens. A value that is empty
+or contains only separators carries no layers and is treated as unset, so the
+config `policy` still applies.
+
+Unlike config paths, environment layers are resolved from the current working
+directory, not from the directory containing the config file.
 
 An explicit empty value is still explicit and is validated as an error; it does
 not fall through to a lower-precedence source. If no config file is present,
