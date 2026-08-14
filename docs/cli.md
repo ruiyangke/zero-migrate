@@ -124,6 +124,9 @@ The environment variables are:
 | `ZERO_MIGRATE_POLICY` | Ordered policy charter layers |
 | `ZERO_MIGRATE_CONFIG` | Explicit config path |
 | `ZERO_MIGRATE_ENV` | Config environment name |
+| `ZERO_MIGRATE_TLS_CA` | CA bundle path to pin |
+| `ZERO_MIGRATE_HOST_ALLOWLIST` | Comma-separated reachable hosts |
+| `ZERO_MIGRATE_QUERY_TIMEOUT_MS` | Per-statement bound in milliseconds |
 
 `DATABASE_URL` is the legacy URL fallback. It is used only when no explicit URL,
 `ZERO_MIGRATE_URL`, or selected config `url` is present.
@@ -171,10 +174,49 @@ variables, and defaults.
 | `--policy <file>` | Policy charter layer; repeat in root-to-narrowing order |
 | `--owner-app <app>` | Deploying application ID; default `app_cli` |
 | `--schema <schema>` | Confined project schema; default `public` |
+| `--tls-ca <file>` | Pin a CA bundle for the database TLS connection |
+| `--host-allowlist <hosts>` | Comma-separated hosts a connection may reach |
+| `--query-timeout <ms>` | Per-statement bound, including the lock acquire |
 | `--json` | Emit machine-readable output where supported |
 | `--help` | Print help and exit 0 |
 | `--version` | Print the package version and exit 0 |
 | `--verbose` | `version` only: also report the loaded addon's identity |
+
+## Transport controls
+
+Three flags constrain the connection itself. They are enforced by the host, which
+owns the socket, so they apply to the `postgres` and `mysql` drivers only — SQLite
+runs in-process and never opens one. Each also reads an environment variable:
+`ZERO_MIGRATE_TLS_CA`, `ZERO_MIGRATE_HOST_ALLOWLIST`, and
+`ZERO_MIGRATE_QUERY_TIMEOUT_MS`. Flags win over environment variables, and leaving
+all three unset leaves the driver defaults untouched.
+
+Unlike every other setting above, these three have **no `zero-migrate.toml`
+field**: they are flag or environment only. A config file cannot weaken the
+transport controls a deploy runs under.
+
+```bash
+zero-migrate apply --env production \
+  --tls-ca ./ca.pem \
+  --host-allowlist db-primary.internal,db-replica.internal \
+  --query-timeout 30000
+```
+
+`--tls-ca` takes a **file path**, not PEM text. The bundle is pinned for the
+session and the server certificate is verified against it, independently of any
+`sslmode` in the connection URL.
+
+`--host-allowlist` refuses the connection before it is opened unless every host
+the URL designates is listed. That is every host, not just the one in the URL's
+authority: a PostgreSQL URI may also carry a `host` query parameter, which the
+driver prefers over the authority, so both must be allowlisted. Comparison is
+exact, and the URL parser lowercases the host in a URL's authority, so write
+allowlist entries in lowercase. Name each host in full: there is no suffix or
+wildcard matching, deliberately, because a suffix rule that accepted
+`example.com` would also accept `evil-example.com`.
+
+`--query-timeout` bounds every statement, including the lock acquire described
+under [When a deploy is already running](#when-a-deploy-is-already-running).
 
 `zero-migrate version` prints one bare version string and nothing else, so
 `$(zero-migrate version)` stays usable, and it answers without loading the native
