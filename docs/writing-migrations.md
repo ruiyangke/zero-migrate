@@ -188,7 +188,7 @@ Build every column with the immutable `t` and `ids` helpers:
 | `t.geoPoint()` | Geographic point, see the note below |
 | `t.enum(nameOrHandle)` | Declared enum |
 | `t.domain(nameOrHandle)` | Declared domain |
-| `t.encrypted({ of })` | Application-encrypted storage |
+| `t.encrypted({ of })` | Application-encrypted storage, see the note below |
 
 `t.geoPoint` has the same shape of caveat. It renders a real spatial type on both
 servers — `geography` on PostgreSQL (which needs PostGIS installed; the engine
@@ -202,6 +202,37 @@ Elsewhere the column degrades to `BLOB`: on SQLite that is storage with no vecto
 behaviour at all, and on MySQL the same. **A `t.vector` column that round-trips on
 SQLite is not doing anything vector-shaped**, so do not reach for it in a migration
 that must run on more than one target.
+
+### `t.encrypted` creates two columns
+
+One `t.encrypted({ of })` declaration produces **two** stored columns: the encrypted
+column itself, holding opaque bytes, and a `<name>_masked` companion holding a
+masked rendering. The companion is not optional and takes no options — the
+declaration accepts only `of` — so a schema review, a `SELECT *`, or a column count
+will show a column nobody wrote.
+
+Both columns are annotated so a reader can tell them from ordinary storage:
+
+```text
+secret         zero-migrate:enc:randomised:default:string
+secret_masked  zero-migrate:mask:kind=full,classification=pii
+```
+
+Note the companion's default classification is `pii`.
+
+Where those annotations live differs by target, and one target does not carry them
+at all:
+
+| Target | Encrypted column | Annotations |
+| --- | --- | --- |
+| PostgreSQL | `bytea` | column comments |
+| SQLite | `BLOB` | inline SQL comments, preserved in `sqlite_master` |
+| MySQL | `longblob` | **none** |
+
+The columns themselves are created identically on all three; only the annotations
+differ. On MySQL nothing in the database distinguishes an encrypted column from an
+ordinary `longblob`, so anything downstream that relies on the annotation to find
+encrypted columns needs another source of truth there.
 
 ### The derived index on these two types
 
