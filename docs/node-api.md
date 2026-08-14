@@ -1,8 +1,9 @@
 # Node API
 
 `zero-migrate-cli` is the JavaScript/TypeScript API for validating migration
-modules, applying ordered PostgreSQL, MySQL, or SQLite schema and data changes, resolving
-PostgreSQL online column renames, and reading migration state.
+modules, applying ordered PostgreSQL, MySQL, or SQLite schema and data changes, unwinding
+them again, resolving PostgreSQL online column renames, and reading migration
+state.
 
 [Documentation home](README.md) · [Getting started](getting-started.md) ·
 [CLI reference](cli.md) · [Writing migrations](writing-migrations.md) ·
@@ -749,6 +750,28 @@ interface UnexpectedJournalEntry {
   journalKind?: "apply" | "baseline" | "squash" | "repeatable";
 }
 
+interface RollbackTargetDto {
+  /** `"toVersion"` unwinds everything applied AFTER the named version, keeping it;
+   *  `"steps"` unwinds the n most recently applied; `"all"` unwinds everything.
+   *  Required: every default would be a guess about how much schema to tear down. */
+  kind: "toVersion" | "steps" | "all";
+  /** The version to stop at. Only for `"toVersion"`. */
+  version?: string;
+  /** How many migrations to unwind. Only for `"steps"`. */
+  steps?: number;
+}
+
+interface RollbackOutcome {
+  /** Versions whose `down` ran and were journaled `rolled_back`, in the order they
+   *  were unwound: reverse topological order of `depends_on`. */
+  rolledBack: string[];
+  /** Versions crossed WITHOUT running a `down`, because they declare none and the
+   *  request carried both `force` and `backupAcknowledged`. Empty otherwise. */
+  skippedIrreversible: string[];
+}
+
+function rollback(options: HostRollbackOptions): Promise<RollbackOutcome>;
+
 interface StatusReply {
   currentVersion?: string;
   applied: string[];
@@ -763,6 +786,27 @@ interface StatusReply {
 
 function status(options: HostStatusOptions): Promise<StatusReply>;
 ```
+
+### Rolling back
+
+`rollback()` takes the same migrations, owner, registry and policy charter as
+`apply()`, plus a `target` saying how far to unwind. `approved` is required: a
+`down` is destructive by construction, so the engine refuses without it.
+
+A migration that declares no `down` is IRREVERSIBLE and rollback refuses it by
+default rather than inventing a reverse — re-adding a dropped column would look
+like a restore while its values stayed gone. Passing `force` together with
+`backupAcknowledged` does not fabricate one either: it CROSSES that migration,
+leaves its effect in place, and names it in `skippedIrreversible`. Read that field;
+an empty `rolledBack` with a populated `skippedIrreversible` means nothing was
+undone.
+
+The reply deliberately carries no `applied` list. A host reading `applied` off a
+rollback reply would see an empty array and conclude nothing happened, which is the
+opposite of what a successful unwind means.
+
+See [Operating migrations](operations.md) for the recovery playbook these options
+belong to.
 
 ```ts
 import { readFile } from "node:fs/promises";
