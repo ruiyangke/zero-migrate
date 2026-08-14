@@ -148,19 +148,22 @@ PostgreSQL has the strongest SQL text guard. Policy-gated statements are parsed
 before execution and checked for dangerous file, program, privilege, session,
 and cross-schema behavior.
 
-**`safety.destructive_ops` is enforced by that text guard, and therefore on
-PostgreSQL only.** The posture defaults to `forbid`, and on PostgreSQL a
-`DROP TABLE` is refused before execution with
-`DATA_SECURITY_DESTRUCTIVE_OPS_FORBID`. On MySQL and SQLite the same authored
-migration, the same policy and the same approval apply the drop: those dialects
-are served by the descriptor guard, which is constructed without the policy and
-returns a clean outcome for every statement. Do not rely on this knob to stop a
-destructive migration on MySQL or SQLite; gate those deploys with
-`safety.require_approval` and review, which do apply on all three.
+**`safety.destructive_ops` is enforced on all three targets**, and the posture
+defaults to `forbid`, so a `DROP TABLE` is refused before execution with
+`DATA_SECURITY_DESTRUCTIVE_OPS_FORBID` unless the charter grants `warn` or
+`allow`.
 
-Measured on all three backends with an identical migration. This is a limitation
-of where the posture is evaluated, not a statement that destructive operations are
-intended to be unguarded elsewhere.
+The posture is evaluated in two places, because it is a property of the OPERATION
+rather than of any SQL text. PostgreSQL's text guard reads it while checking the
+rendered statement. MySQL and SQLite are served by the descriptor guard, which
+carries no policy, so their posture is evaluated over the structured IR op set
+before lowering. Both refuse with the same rule id and the same
+`op #N (kind): rendered statement denied by guard` shape.
+
+The deny-list rules above stay PostgreSQL-only, and that is not a gap: they scan
+raw SQL for file, program, privilege and session behaviour, and neither MySQL nor
+SQLite has a raw-SQL door for such text to arrive through — both refuse it
+outright.
 
 Use a dedicated, non-login migrator role with only the project-schema
 permissions required by approved migrations. The Rust `ExecutorConfig` does not

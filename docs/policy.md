@@ -144,8 +144,8 @@ value = true
 key = "safety.destructive_ops"
 value = "warn"
 scope = "all"
-# Enforced on PostgreSQL only — see "PostgreSQL protection" in security-model.md.
-# On MySQL and SQLite this posture does not block a destructive statement.
+# Enforced on PostgreSQL, MySQL and SQLite. PostgreSQL evaluates it in the SQL-text
+# guard; MySQL and SQLite evaluate it over the IR op set before lowering.
 
 [[require]]
 key = "safety.require_approval"
