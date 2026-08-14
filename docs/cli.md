@@ -427,11 +427,12 @@ A target is required, and exactly one of the three:
 
 Passing none is refused (`rollback needs a target`), and so is passing two.
 
-A version is the engine's `mig_…` ID recorded in the journal, not the filename
-timestamp. Take it from what `apply` printed, or from the journal's `version`
-column. Note that the IDs in `status`'s `applied` and `pending` lists are **not**
-these values and `--to` rejects them with `is not currently applied`; `--steps` and
-`--all` need no version and are unaffected.
+A version is a `mig_…` ID, not the filename timestamp. `--to` accepts either
+spelling a migration has: the logical version `status` reports in `applied` and
+`pending`, or the journaled step version `apply` prints and the journal's `version`
+column stores. These are different values for the same migration, and both resolve
+to the same anchor. A version in neither space is refused with `is not currently
+applied`, and nothing is unwound.
 
 `--approve` is required. A `down` is destructive by construction, so there is no
 unapproved rollback. `--dir` must still point at the migrations, and the **whole**
