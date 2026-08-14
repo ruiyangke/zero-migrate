@@ -29,6 +29,7 @@ zero-migrate new <name> [options]
 zero-migrate lint [options]
 zero-migrate plan [options]
 zero-migrate apply [options]
+zero-migrate rollback (--to <version> | --steps <n> | --all) --approve [options]
 zero-migrate status [options]
 zero-migrate resolve <migration> (--commit | --rollback) --approve [options]
 zero-migrate history [options]
@@ -41,6 +42,7 @@ zero-migrate --version
 | `lint` | None | Validate migrations for all supported dialects, or one selected dialect |
 | `plan` | PostgreSQL or MySQL | Show pending migrations and the SQL that would be applied |
 | `apply` | PostgreSQL, MySQL, or SQLite | Apply migrations in filename and authored-step order |
+| `rollback` | PostgreSQL, MySQL, or SQLite | Unwind applied migrations, newest first, down to a target |
 | `status` | PostgreSQL or MySQL | Reconcile migrations with journal state |
 | `resolve` | PostgreSQL | Commit or roll back one pending online column rename by migration name |
 | `history` | PostgreSQL | Print the append-only migration audit trail |
@@ -401,6 +403,92 @@ still supplies an explicit no-inject charter:
 ```toml
 policy_version = 1
 ```
+
+## `rollback`
+
+Unwind applied migrations by running their `down`, newest first, down to a target.
+
+```bash
+zero-migrate rollback --env production --steps 1 --approve
+```
+
+```text
+rollback: 1 rolled back
+  reversed mig_7n42DGM5OoRYCHDiem5nsW
+```
+
+A target is required, and exactly one of the three:
+
+| Flag | Meaning |
+| --- | --- |
+| `--to <version>` | Unwind everything applied **after** this version, keeping it |
+| `--steps <n>` | Unwind the `n` most recently applied migrations |
+| `--all` | Unwind every applied migration |
+
+Passing none is refused (`rollback needs a target`), and so is passing two.
+
+A version is the engine's `mig_…` ID recorded in the journal, not the filename
+timestamp. Take it from what `apply` printed, or from the journal's `version`
+column. Note that the IDs in `status`'s `applied` and `pending` lists are **not**
+these values and `--to` rejects them with `is not currently applied`; `--steps` and
+`--all` need no version and are unaffected.
+
+`--approve` is required. A `down` is destructive by construction, so there is no
+unapproved rollback. `--dir` must still point at the migrations, and the **whole**
+authored set is loaded rather than a prefix: the engine reconstructs each `down`
+from its envelope, and a migration left out of the directory has no reverse SQL,
+which is reported as a refusal rather than skipped.
+
+A rolled-back migration returns to **pending**. Rollback undoes the schema change
+and the journal entry, so the next `apply` will run it again.
+
+### Migrations that declare no `down`
+
+Such a migration is irreversible, and rollback refuses it rather than inventing a
+reverse — re-adding a dropped column would look like a restore while its values
+stayed gone.
+
+`--force` crosses it instead: the migration's effect stays in place and its version
+is listed under `skippedIrreversible`. `--force` alone is refused; it requires
+`--backup-acknowledged` as well, an explicit statement that a backup exists:
+
+```text
+zero-migrate: force needs backupAcknowledged as well: skipping a migration that
+declares no down discards the data it removed, so it takes an explicit
+acknowledgement that a backup exists
+```
+
+**Read `skippedIrreversible`.** An empty `rolledBack` beside a populated
+`skippedIrreversible` means nothing was undone.
+
+### Exit status
+
+Rollback exits 0 whenever it completes, **including when it unwound nothing**:
+
+```text
+rollback: 0 rolled back
+  nothing was applied in the requested range
+```
+
+A pipeline that must fail when there was nothing to undo has to read the output,
+not the exit code. `--json` emits the machine-readable form:
+
+```json
+{
+  "rolledBack": ["mig_7n42DGM5OoRYCHDiem5nsW"],
+  "skippedIrreversible": []
+}
+```
+
+There is deliberately no `applied` list. A caller reading `applied` off a rollback
+reply would see an empty array and conclude nothing happened, which is the opposite
+of what a successful unwind means.
+
+Rollback is a writer, so it contends for the project lock like `apply`, and the two
+engines differ. PostgreSQL's acquire is `pg_advisory_lock`, which is unbounded, so
+a rollback **waits**. MySQL's is `GET_LOCK` with the project-lock budget, ten
+seconds by default, so a rollback **fails** once that elapses and names the holding
+session. See [When a deploy is already running](#when-a-deploy-is-already-running).
 
 ## `status`
 
