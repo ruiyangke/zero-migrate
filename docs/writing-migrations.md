@@ -413,9 +413,12 @@ foreign keys, never one composite relationship. A composite foreign key must
 reference a primary-key or unique tuple, and the two column lists must match in
 order and per-position type; the portable null rule is `MATCH SIMPLE`.
 
-Some table-level features are target-specific. If the same migration must run
-on all three databases, prefer a named unique index over `uniques`, and review
-foreign keys and checks against the [compatibility guide](dialects.md).
+Some table-level features are target-specific, and `uniques` is not a style
+preference: **SQLite refuses a table-level unique constraint at create time**, so
+a migration that must run on all three databases has to spell it as a named unique
+index instead. That form is supported everywhere, and on SQLite it survives the
+table rebuild that later column changes go through. Review foreign keys and checks
+against the [compatibility guide](dialects.md).
 
 ## Changing columns
 
