@@ -184,11 +184,20 @@ Build every column with the immutable `t` and `ids` helpers:
 | `t.bytes()` | Binary data |
 | `t.json()` | JSON |
 | `t.inet()` | IP address or network |
-| `t.vector({ dimensions, metric? })` | Vector data |
+| `t.vector({ dimensions, metric? })` | Vector data, PostgreSQL only (see below) |
 | `t.geoPoint()` | Geographic point |
 | `t.enum(nameOrHandle)` | Declared enum |
 | `t.domain(nameOrHandle)` | Declared domain |
 | `t.encrypted({ of })` | Application-encrypted storage |
+
+`t.vector` is PostgreSQL-only in practice, and it needs the `vector` extension
+installed before the migration runs — the engine does not create it, and a stock
+PostgreSQL fails at apply with `type "vector" does not exist`. Declaring a vector
+column also emits an index on it. On MySQL the column degrades to `BLOB` and that
+index is one MySQL cannot build (`BLOB/TEXT column used in key specification
+without a key length`), so the migration fails; on SQLite it degrades to `BLOB`
+with an ordinary index and no vector behaviour at all. Do not use `t.vector` in a
+migration that must run on more than one target.
 
 Columns are nullable unless you call `.notNull()`. Modifiers return new
 definitions, so a base definition can be reused safely:
