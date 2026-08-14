@@ -147,9 +147,17 @@ config `policy` still applies.
 Unlike config paths, environment layers are resolved from the current working
 directory, not from the directory containing the config file.
 
-An explicit empty value is still explicit and is validated as an error; it does
-not fall through to a lower-precedence source. If no config file is present,
-the CLI continues to work with flags, environment variables, and defaults.
+An explicit empty value is still explicit: it overrides a lower-precedence source
+rather than falling through to it, and is then refused. Setting `--schema ""` or
+`ZERO_MIGRATE_SCHEMA=""` does not fall back to the `public` default — it is
+rejected by name, which is what makes an unset CI variable such as
+`--schema "$DEPLOY_SCHEMA"` a clean failure instead of a deploy against the wrong
+schema. `ZERO_MIGRATE_POLICY` is the one exception, described above: it carries a
+layer list, so an empty value means zero layers rather than one empty layer, and
+the config `policy` still applies.
+
+If no config file is present, the CLI continues to work with flags, environment
+variables, and defaults.
 
 ## Common flags
 
