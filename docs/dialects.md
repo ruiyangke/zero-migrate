@@ -179,13 +179,14 @@ shown in preview and status; the engine cannot prove the external invariant.
 | --- | --- | --- | --- |
 | Columns and primary key | Yes | Yes | Yes |
 | Column-level unique | Yes | Yes | Yes |
-| Table-level `uniques` | Yes | No | Yes |
+| Table-level `uniques` | Yes | Yes | No |
 | Table-level simple foreign key to `id` | Yes | Yes | Yes |
 | Table-level composite/non-`id` foreign key | Yes | Yes | Yes |
 | Table-level `checks` | Yes | No | No |
 | Exclusion constraints | Yes | No | No |
 | Plain btree indexes | Yes | Yes | Yes |
-| Expression or partial indexes | Yes | Yes | No |
+| Partial indexes | Yes | No | Yes |
+| Expression indexes | Yes | Yes | No |
 | Native partitioning | Yes | No | No |
 
 For a three-target unique key, create a named unique btree index instead of
