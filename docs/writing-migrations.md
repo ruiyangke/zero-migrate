@@ -435,9 +435,9 @@ Available column operations are:
 - `add({ type, ifNotExists?, schema? })`
 - `drop({ ifExists?, schema? })`
 - `rename({ to, type, schema? })`
-- `setType({ to, schema? })`
-- `setNotNull()` and `dropNotNull()`
-- `setDefault(value)` and `dropDefault()`
+- `setType({ to, schema? })` on PostgreSQL only
+- `setNotNull()` and `dropNotNull()` on PostgreSQL only
+- `setDefault(value)` and `dropDefault()` on PostgreSQL and MySQL
 - `comment(textOrNull)` on PostgreSQL
 
 Create a fresh `.column(name)` selector for each operation. A selector does
@@ -447,6 +447,23 @@ reused for a second terminal.
 Column rename works on PostgreSQL and SQLite, but not MySQL. The `type` passed
 to `rename` describes the unchanged column type. A rename cannot also change
 type, and custom `using` expressions are not supported on any target.
+
+Every one of those per-target limits is a refusal raised before any SQL reaches
+the server, not a runtime surprise: the engine renders alter-column DDL in
+PostgreSQL syntax, and SQLite reaches most column alterations only through a table
+rebuild it will not perform implicitly. Measured on live servers for all three
+targets, the alter-column matrix is:
+
+| Operation | PostgreSQL | MySQL | SQLite |
+| --- | --- | --- | --- |
+| `add` / `drop` | yes | yes | yes |
+| `rename` | yes | no | yes |
+| `setType` | yes | no | no |
+| `setDefault` / `dropDefault` | yes | yes | no |
+| `setNotNull` / `dropNotNull` | yes | no | no |
+
+`add`, `drop`, index add/drop and table rename are the portable set, and on SQLite
+they preserve existing rows through the rebuild.
 
 ### PostgreSQL online rename workflow
 
