@@ -322,6 +322,12 @@ Add `--explain` to print the offline SQL rendering for every selected dialect:
 zero-migrate lint --dir ./migrations --explain
 ```
 
+With `--explain`, human output also includes analysis advisories for the lowered
+migration. Each advisory names the affected table, the statement kind, and the
+lock involved so an operator can assess the risk before deployment. Advisories
+are informational: they do not make an otherwise valid migration fail and do
+not change the command's exit code.
+
 SQL explanation applies the selected environment's ordered policy charter,
 including its table-shape injection: a rendered `CREATE TABLE` carries the
 charter-injected columns, pinned primary key, and injected indexes that apply
@@ -357,6 +363,10 @@ zero-migrate plan --env production
 `plan` is a live dry run. It requires a database URL, connects to the target,
 asks the journal-aware status API which migrations are pending, and renders SQL
 only for those migrations using the URL-derived dialect and selected policy.
+Human output also surfaces analysis advisories for the lowered plan, naming the
+affected table, statement kind, and lock involved. These advisories are
+informational only: they neither block planning nor change a successful exit
+code.
 
 Human output starts with:
 
