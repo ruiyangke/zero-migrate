@@ -45,3 +45,6 @@ crates/zero-migrate-node/npm/
 # accident via `git add -A`; ignoring it is what stops a third. Whether such a stub
 # should exist at all is a separate open question and this entry does not answer it.
 sdks/
+
+# Working notes for the review loop. Deliberately never committed.
+docs/review-log/
