@@ -53,6 +53,7 @@ from the longer-term platform direction.
 | Guide | What it helps you do |
 | --- | --- |
 | [Getting started](getting-started.md) | Set up this pre-release and complete the first ordered schema/data migration |
+| [Upgrading](upgrading.md) | Convert migrations from up()/down() to the schema/data protocol |
 | [Writing migrations](writing-migrations.md) | Use the TypeScript API for tables, columns, indexes, constraints, expressions, views, and data operations |
 | [Choosing a database target](dialects.md) | Keep migrations portable and use target-specific features intentionally |
 | [CLI reference](cli.md) | Create, preview, validate, apply, and inspect from a terminal |
