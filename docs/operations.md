@@ -59,13 +59,15 @@ live-dependent work, but a complete MySQL structural-drift comparison is not
 available today.
 
 A `rollback` verb ships on the public JavaScript path (`zero-migrate-cli`). For
-eligible schema work it uses the structural reverse produced while lowering the
-forward operation. For eligible data work it runs the module's recorded
-`inverse()`. An authored `down()` is never accepted or called. Rollback is not a
-substitute for a forward fix; see [Rollback strategy](#rollback-strategy) for
-when to reach for it and the rails it requires. PostgreSQL online column rename
-remains the supported staged schema-change workflow. See [Rust
-API](embedding.md) for the public Rust surface.
+eligible schema work apply stores the structural reverse produced while
+lowering the forward operation, and rollback replays that SQL verbatim. For
+eligible data work it runs the module's recorded `inverse()` as structured,
+parameterized DML. An authored `down()` is never accepted or called. Rollback
+is not a substitute for a forward fix; see [Rollback
+strategy](#rollback-strategy) for when to reach for it and the rails it
+requires. PostgreSQL online column rename remains the supported staged
+schema-change workflow. See [Rust API](embedding.md) for the public Rust
+surface.
 
 ## Know the deployment identities
 
@@ -270,7 +272,9 @@ From an operator's perspective, apply:
 5. visits each pending step in authored order, checks its database-specific
    preconditions, and executes it;
 6. records completed work with a stable step identity and the complete
-   migration checksum, including bound values;
+   migration checksum, including bound values, and stores any exact structural
+   reverse produced against the catalog apply observed in the journal's `down`
+   field;
 7. releases the lock and closes the database session.
 
 An approval, ownership, or validation failure before execution leaves the
@@ -535,7 +539,9 @@ makes them fail the filter, or run a final catch-up with writes stopped.
 ## Status, history, and drift
 
 The journal is append-only history rather than a mutable checklist. It records
-stable step identity, the complete migration checksum, actor, time, and outcome.
+stable step identity, the complete migration checksum, actor, time, outcome,
+and the apply-time reverse SQL for a reversible structural step. The reverse is
+nullable so journals upgraded from earlier versions keep their existing rows.
 
 ### JavaScript status
 
@@ -593,8 +599,10 @@ schema and its five journal tables; `plan` and `lint` create nothing.
 
 ### Checksum drift
 
-Apply compares known migration content with recorded history. If applied content
-has changed, stop the deployment and investigate; do not edit history by hand.
+Apply and rollback compare known migration content with recorded history. If
+applied content has changed, they refuse to proceed: a stored reverse does not
+make an edited migration safe to unwind. Stop the deployment and investigate;
+do not edit history by hand.
 
 ### Structural drift
 
@@ -606,17 +614,29 @@ apply and status work, but that view is not a complete structural-drift check.
 ## Rollback strategy
 
 `zero-migrate-cli` exports a `rollback` verb. A DDL module exports only
-`schema()`; eligible structural operations use the reverse produced during
-forward lowering. A DML module exports `data()` and exactly one of a recorded
-`inverse()` or `irreversible: "reason"`. Rollback runs that recorded `inverse()`;
-`up()` and `down()` are gone, with no deprecated spelling or compatibility
-alias.
+`schema()`; apply stores the exact reverse SQL produced for an eligible
+structural operation during forward lowering against the catalog it observed.
+Rollback executes a non-NULL stored reverse verbatim, without lowering the
+inverse again or consulting the current catalog to select different SQL. A DML
+module exports `data()` and exactly one of a recorded `inverse()` or
+`irreversible: "reason"`. Rollback runs that recorded `inverse()`; `up()` and
+`down()` are gone, with no deprecated spelling or compatibility alias.
 
 The inverse is lowered through the same guarded IR authoring path as forward
 operations and may contain only transactional DML. PostgreSQL, MySQL, and SQLite
-execute it as parameterized DML. The inverse and its `rolled_back` journal event
-commit together; status then reports the plan pending, and a later apply replays
-the forward `data()` operations.
+execute it as parameterized DML. A structured data inverse takes precedence if
+a stored textual reverse could also apply, so bound DML values are never inlined
+into reverse SQL. The inverse and its `rolled_back` journal event commit
+together; status then reports the plan pending, and a later apply replays the
+forward `data()` operations.
+
+An applied row from before this protocol has `down = NULL`. Rollback preserves
+compatibility by deriving its structural reverse from the migration and live
+catalog as earlier versions did, but the fallback is deliberately visible.
+Operator-facing output names the affected migration and says its reverse is
+being reconstructed because no stored reverse is available. Investigate that
+advisory: the reconstructed result can depend on the engine version doing the
+rollback, unlike an apply-time stored reverse.
 
 Prefer this order anyway:
 

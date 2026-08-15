@@ -416,6 +416,13 @@ ownership, policy, cursor, checksum, or live database checks. Each file is a
 separate apply call. If a later file fails, earlier committed files remain
 applied.
 
+When an eligible schema step has a reverse, apply writes the exact reverse SQL
+produced while lowering the forward operation against the catalog it observed
+to the applied journal row's `down` field. That apply-time SQL is the durable
+rollback instruction; it is not an author-provided `down()` hook. Structured
+data reverses remain recorded `inverse()` operations, so their bound values are
+not inlined into this textual field.
+
 The policy is an ordered list of TOML documents. The first is the trusted root
 bound; each later layer may narrow it. An installation with no injected shape
 still supplies an explicit no-inject charter:
@@ -426,9 +433,10 @@ policy_version = 1
 
 ## `rollback`
 
-Unwind eligible applied migrations, newest first, to a target. For a reversible
-data migration, the reverse is the operations recorded from its `inverse()`;
-rollback never calls an authored `down()`.
+Unwind eligible applied migrations, newest first, to a target. Schema rollback
+prefers the apply-time reverse stored in the journal and executes that SQL
+verbatim. For a reversible data migration, the reverse is the operations
+recorded from its `inverse()`; rollback never calls an authored `down()`.
 
 ```bash
 zero-migrate rollback --env production --steps 1 --approve
@@ -458,9 +466,11 @@ applied`, and nothing is unwound.
 
 `--approve` is required; there is no unapproved rollback. `--dir` must still
 point at the migrations, and the **whole** authored set is loaded rather than a
-prefix. The CLI records every candidate module again so the engine has the exact
-authored inverse stream and can verify its checksum. Leaving an applied
-migration out of the directory is a refusal, not a skip.
+prefix. The CLI records every candidate module again so the engine can verify
+its checksum, obtain any structured data inverse, and reconstruct a reverse for
+a legacy row if necessary. A stored reverse does not make an edited migration
+safe: checksum drift is still refused. Leaving an applied migration out of the
+directory is a refusal, not a skip.
 
 Reversibility has two hard limits: the forward plan must lower to exactly **one**
 journaled step, and a recorded `inverse()` must lower only to transactional DML.
@@ -470,16 +480,27 @@ so a refusal does not unwind an earlier candidate first.
 
 The recorded inverse is lowered through the same guarded IR authoring path as
 the forward operations. PostgreSQL, MySQL, and SQLite execute it as parameterized
-DML. The inverse and its `rolled_back` journal event commit together. The event
-stream is append-only: rollback does not erase the earlier `applied` event. Its
-new net state makes `status` report the plan **pending**, and the next `apply`
-replays the forward `data()` operations.
+DML. If both a stored textual reverse and a structured `inverse()` could apply,
+the structured inverse wins; rollback never inlines its DML values into SQL
+text. The inverse and its `rolled_back` journal event commit together. The
+event stream is append-only: rollback does not erase the earlier `applied`
+event. Its new net state makes `status` report the plan **pending**, and the next
+`apply` replays the forward `data()` operations.
 
 Schema migrations do not accept `inverse()`. Where the engine can derive an
-exact reverse for an eligible single-step schema plan, rollback uses that
-engine-owned structural reverse; it never invokes author-provided `up()` or
-`down()`. Destructive DDL for which no exact reverse exists is refused rather
-than approximated.
+exact reverse for an eligible single-step schema plan, apply stores that
+engine-owned structural reverse and rollback replays it without lowering the
+inverse again or consulting the current catalog to choose different SQL. It
+never invokes author-provided `up()` or `down()`. Destructive DDL for which no
+exact reverse exists is refused rather than approximated.
+
+Rows written before stored reverses were introduced have `down = NULL`. For
+those legacy rows only, rollback reconstructs the reverse from the migration
+source and live catalog as earlier versions did. This compatibility fallback is
+visible: human output includes an advisory naming the migration and saying that
+its reverse is being reconstructed because no stored reverse is available. It
+should be treated as a prompt to review an engine-version-dependent unwind, not
+as equivalent to replaying an apply-time reverse.
 
 ### Irreversible migrations
 
