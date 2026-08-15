@@ -806,6 +806,28 @@ Neither route inspects the database. Recovery does not verify schema shape; it
 records the operator's assertion about it. Verifying the live shape is a step you
 perform first, outside zero-migrate.
 
+MySQL rollback uses a distinct
+`schema_migrations_rollback_inflight` marker. It means a `down` began and may
+have auto-committed only some of its statements, leaving an unverified
+partially-reverted shape. While that marker remains, rollback refuses to replay
+the `down`, and apply refuses when the supplied migration set contains that
+version; it does not report the version as a clean `skipped` migration.
+
+Inspect the live schema against the migration's `down`, then finish or undo the
+partial revert yourself. Only after the schema is in the shape you have verified,
+clear the rollback marker and run apply again:
+
+```sql
+DELETE FROM `<projectSchema>_migrations`.schema_migrations_rollback_inflight
+ WHERE version = '<version>';
+```
+
+This is a different marker and repair from
+`schema_migrations_inflight`: the apply-side marker means an `up` may be
+half-applied, while the rollback-side marker means a `down` may be
+half-reverted. A genuinely applied migration with no rollback marker remains
+idempotent and is skipped normally on re-apply.
+
 ### Interrupted backfill
 
 - keep the migration name, source, ordered cursor tuple, and batch definition
