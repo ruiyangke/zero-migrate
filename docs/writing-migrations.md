@@ -10,10 +10,10 @@ features, and safe rollout.
 
 > **Data migrations execute end to end:** PostgreSQL and MySQL Node/CLI apply run
 > structured `insert`, `update`, `delete`, and `backfill` steps. SQLite runs all
-> four through Node, the CLI, or Rust. Schema and data steps stay in the
-> order written in `up()`. Deletes and backfills that still need to run require
-> explicit approval, checked across the whole plan before any authored step
-> executes.
+> four through Node, the CLI, or Rust. Put DDL in a `schema()` migration and DML
+> in a separate `data()` migration; operations within either phase stay in
+> authored order. Deletes and backfills that still need to run require explicit
+> approval, checked across the whole plan before any authored step executes.
 
 ## Your first migration
 
@@ -25,7 +25,7 @@ import { ids, now, table, t } from "zero-migrate";
 export const name = "create_accounts";
 
 export default {
-  up() {
+  schema() {
     table("accounts").create({
       columns: {
         id: ids.typeId({ prefix: "acct" }).primaryKey(),
@@ -51,7 +51,7 @@ The important parts are:
 
 - `name` is the migration's stable identity as well as its label in previews and
   history. It must be unique within the project.
-- `up()` contains the ordered changes.
+- `schema()` contains the ordered DDL changes.
 - `table("accounts")` selects the object to change.
 - `t` and `ids` build column definitions.
 - String values such as `"invited"` are data, never SQL fragments.
@@ -64,44 +64,103 @@ or edit a migration after it has been applied to a shared environment.
 
 Keep these rules in mind for every migration:
 
-1. Put operation calls directly and synchronously inside `up()`.
-2. Do not make `up()` async, start timers, fetch remote data, or read changing
-   external state.
+1. Put DDL calls directly inside `schema()`, or put DML calls directly inside
+   `data()` and its optional `inverse()`. Never put both phases in one module.
+2. Keep phase functions synchronous. Do not start timers, fetch remote data, or
+   read changing external state.
 3. Give indexes, constraints, triggers, and policies stable names.
 4. Use the structured expression helpers instead of SQL strings.
 5. Preview and validate for every database target you deploy.
 
 > **Run migration modules as trusted code.** The public Node API and CLI import
-> JavaScript/TypeScript modules without a sandbox. Top-level code and `up()` can
-> access the process environment, filesystem, network, and child processes with
-> the host application's authority. If you accept generated or untrusted
-> migration source, evaluate it in a separate external sandbox with no secrets
-> or production authority, then use a reviewed Rust/custom-host workflow for
-> deployment.
+> JavaScript/TypeScript modules without a sandbox. Top-level code and migration
+> phase functions can access the process environment, filesystem, network, and
+> child processes with the host application's authority. If you accept generated
+> or untrusted migration source, evaluate it in a separate external sandbox with
+> no secrets or production authority, then use a reviewed Rust/custom-host
+> workflow for deployment.
 
-The package accepts a default object, as above, or a named `up` function:
+Every module exports exactly one forward phase on its default object. A DDL
+migration uses `schema()`:
 
-```javascript
+```ts
+import { table, t } from "zero-migrate";
+
 export const name = "add_account_status";
 
-export function up() {
-  // migration operations
-}
+export default {
+  schema() {
+    table("accounts")
+      .column("status")
+      .add({ type: t.string({ length: 32 }).notNull().default("active") });
+  },
+};
 ```
 
-Authoring a `down()` is refused: the recorder drains one op list, the envelope
-carries no rollback slot, and rollback runs an inverse the engine synthesises
-from the recorded ops. A body written there would never execute, so the build
-stops with `AUTHORED_DOWN_UNSUPPORTED` instead of discarding it. Treat migrations
-as forward-only: back up before destructive work and prepare a new forward-fix
-migration when needed.
+A DML migration uses `data()` and must declare exactly one rollback disposition:
+an `inverse()` containing the authored reverse, or `irreversible` with a non-empty
+operator-facing reason. `inverse()` and `irreversible` are valid only beside
+`data()`. A module containing both `schema()` and `data()` is refused. The
+boundary is enforced from the operations each callback records, not from the
+callback's name: DML recorded by `schema()` and DDL recorded by `data()` or
+`inverse()` are both rejected.
+
+```ts
+import { table } from "zero-migrate";
+
+export const name = "seed_starter_plan";
+
+export default {
+  data() {
+    table("plans").insert({
+      rows: { id: "starter", price_cents: 0 },
+    });
+  },
+  inverse() {
+    table("plans").delete({
+      where: (col) => col("id").eq("starter"),
+    });
+  },
+};
+```
+
+```ts
+import { table } from "zero-migrate";
+
+export const name = "purge_expired_sessions";
+
+export default {
+  data() {
+    table("sessions").delete({
+      where: (col) => col("expires_at").lt("2026-01-01T00:00:00Z"),
+    });
+  },
+  irreversible: "the deleted session rows cannot be reconstructed",
+};
+```
+
+Migration rollback is deliberately narrow. The forward plan must lower to
+exactly one journaled step, and every operation in `inverse()` must lower to
+transactional DML; any other inverse is refused before execution. When those
+conditions hold, rollback lowers the recorded `inverse()` through the same
+guarded `IrAuthor` as the forward operations and executes parameterized DML on
+PostgreSQL, MySQL, or SQLite. It commits the inverse together with its
+`rolled_back` journal event, after which `status` reports the plan pending and a
+later apply replays it. A plan with more than one journaled step is not
+reversible. A migration declaring `irreversible` is also refused at rollback,
+and the refusal quotes the author's reason. Rollback is therefore not universal;
+keep backups and a forward-fix procedure for everything outside these limits.
+
+The recorder refuses both `up()` and `down()`. Neither name has a compatibility
+path or an alias.
 
 ## The end-to-end workflow
 
 A normal workflow is:
 
 1. Scaffold or create a timestamped migration file.
-2. Add schema and data operations to `up()` in the order they must run.
+2. Add DDL to `schema()`, or add DML to `data()` with `inverse()` or an
+   `irreversible` reason. Split DDL and DML into separate files.
 3. Preview the operations and review their order.
 4. Validate for the intended target database.
 5. Review destructive changes and target-specific capabilities.
@@ -541,12 +600,14 @@ deployments. A typical migration is:
 ```ts
 export const name = "rename_profiles_bio";
 
-export function up() {
-  table("profiles").column("bio").rename({
-    to: "biography",
-    type: t.text(),
-  });
-}
+export default {
+  schema() {
+    table("profiles").column("bio").rename({
+      to: "biography",
+      type: t.text(),
+    });
+  },
+};
 ```
 
 On PostgreSQL, this rename must be the only operation in the migration that
@@ -786,8 +847,8 @@ Keep writers quiesced through both the import and synchronization.
 
 Behavior to know:
 
-- Schema and data operations run in authored order. A mixed migration does not
-  drop its data steps, and a data-only migration performs real work.
+- Operations within `schema()`, `data()`, or `inverse()` retain authored order.
+  Schema and data operations cannot share a migration module.
 - Multi-row inserts require the same keys in every row.
 - `insert` does not support `INSERT ... SELECT`.
 - `onConflict` uses an exact conflict target on PostgreSQL and SQLite. MySQL 8
@@ -958,30 +1019,32 @@ import { domain, enumType, sequence, table, t } from "zero-migrate";
 
 export const name = "create_account_types";
 
-export function up() {
-  const accountState = enumType("account_state").create({
-    values: ["invited", "active", "disabled"],
-  });
+export default {
+  schema() {
+    const accountState = enumType("account_state").create({
+      values: ["invited", "active", "disabled"],
+    });
 
-  domain("positive_cents").create({
-    as: t.bigInt(),
-    check: (value) => value.ge(0),
-    notNull: true,
-  });
+    domain("positive_cents").create({
+      as: t.bigInt(),
+      check: (value) => value.ge(0),
+      notNull: true,
+    });
 
-  table("accounts").create({
-    columns: {
-      state: t.enum(accountState).notNull(),
-      balance: t.domain("positive_cents"),
-    },
-  });
+    table("accounts").create({
+      columns: {
+        state: t.enum(accountState).notNull(),
+        balance: t.domain("positive_cents"),
+      },
+    });
 
-  sequence("invoice_number_seq").create({
-    as: t.bigInt(),
-    start: 1000,
-    increment: 1,
-  });
-}
+    sequence("invoice_number_seq").create({
+      as: t.bigInt(),
+      start: 1000,
+      increment: 1,
+    });
+  },
+};
 ```
 
 Enum and domain declarations work across all three targets, although their
@@ -992,9 +1055,10 @@ Standalone sequences and `nextval` defaults are PostgreSQL-only. Sequence
 integer options must be JavaScript safe integers; increment cannot be zero and
 cache must be positive.
 
-Like every operation terminal, `.create()` belongs inside the synchronous
-`up()` function. Top-level terminals are rejected so every migration contains
-only the changes authored in its own `up()` function.
+Like every operation terminal, `.create()` belongs inside the appropriate
+synchronous phase callback. Top-level terminals are rejected so every migration
+contains only the changes recorded by its own `schema()`, `data()`, or
+`inverse()` callback.
 
 ## Partitions
 
@@ -1119,7 +1183,7 @@ a storage-backed field into a migration column:
 import { dbType as dbT, fromDb, table } from "zero-migrate";
 
 export default {
-  up() {
+  schema() {
     const accountEmail = dbT.string().required().unique();
     const avatarBytes = dbT.bytes().optional();
 
@@ -1316,7 +1380,8 @@ helpers. The runtime API remains ordinary JavaScript.
 | A default is treated as text | Strings are literals; use a structured helper rather than SQL text |
 | Null comparison is rejected | Use `isNull()` or `isNotNull()` |
 | A generated/index/check expression is rejected | Remove volatile functions, aggregates, and target-only helpers |
-| A rollback body is refused | Authored `down()` and public rollback are not supported |
+| An `up()` or `down()` module is refused | Replace it with `schema()` for DDL, or `data()` plus `inverse()` / `irreversible` for DML; neither legacy name is supported or aliased |
+| A rollback is refused | The forward plan must lower to exactly one journaled step, and an authored inverse must lower only to transactional DML; a declared-irreversible migration has no reverse to run |
 
 See [Troubleshooting](troubleshooting.md) for setup, validation, driver, policy,
 and recovery errors.
@@ -1324,7 +1389,8 @@ and recovery errors.
 ## Pre-apply checklist
 
 - Use a unique timestamped filename and stable exported `name`.
-- Keep `up()` synchronous and deterministic.
+- Keep `schema()`, `data()`, and `inverse()` synchronous and deterministic; put
+  DDL and DML in separate migration modules.
 - Preview the exact operation order.
 - Validate against every database target you deploy.
 - Confirm delete/backfill approval; test the exact ordered primary/unique cursor

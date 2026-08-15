@@ -19,8 +19,9 @@ Remember two important boundaries:
 
 - Migration modules execute as ordinary JavaScript. Do not run an untrusted or
   generated module in a process that has secrets or database access.
-- JavaScript/CLI apply executes schema and data steps in authored order on
-  PostgreSQL and MySQL. SQLite apply is available through Node, the CLI, and Rust.
+- JavaScript/CLI apply executes DDL from `schema()` modules and DML from
+  separate `data()` modules on PostgreSQL, MySQL, and SQLite. Calls within each
+  phase retain their authored order.
 
 ## Setup and command problems
 
@@ -80,34 +81,82 @@ Check that:
 
 Files run in lexicographic order. Use sortable timestamp or version prefixes.
 
-### The module has no `up()`
+### The module exports neither `schema()` nor `data()`
 
-Export one of these shapes:
-
-```typescript
-export function up() {
-  // migration calls
-}
-```
+The module's default export must use exactly one of the three supported shapes.
+A DDL migration uses `schema()`:
 
 ```typescript
+import { table, t } from "zero-migrate";
+
+export const name = "create_accounts";
+
 export default {
-  up() {
-    // migration calls
+  schema() {
+    table("accounts").create({
+      columns: {
+        id: t.int().notNull().primaryKey(),
+        email: t.string({ length: 254 }).notNull(),
+      },
+    });
   },
 };
 ```
 
-Keep `up()` synchronous. The public authoring path does not use module-level
-dependencies, supersession metadata, or a high-level `down()` workflow. Ship a
-new forward migration when a deployed schema needs correction.
+A reversible DML migration uses `data()` and records its reverse independently
+in `inverse()`:
+
+```typescript
+import { table } from "zero-migrate";
+
+export const name = "seed_starter_plan";
+
+export default {
+  data() {
+    table("plans").insert({
+      rows: { id: "starter", price_cents: 0 },
+    });
+  },
+  inverse() {
+    table("plans").delete({
+      where: (column) => column("id").eq("starter"),
+    });
+  },
+};
+```
+
+When no truthful reverse exists, a DML migration records the reason instead:
+
+```typescript
+import { table } from "zero-migrate";
+
+export const name = "purge_expired_sessions";
+
+export default {
+  data() {
+    table("sessions").delete({
+      where: (column) =>
+        column("expires_at").lt("2026-01-01T00:00:00Z"),
+    });
+  },
+  irreversible: "the deleted session rows cannot be reconstructed",
+};
+```
+
+Keep every callback synchronous. DDL and DML may not share a module, and the
+recorder enforces this from the operations actually recorded rather than trusting
+the callback name. DML inside `schema()` and DDL inside `data()` are refused.
+`up()` and `down()` are gone; neither has a deprecated compatibility alias.
+Module-level dependencies and supersession metadata are not part of this
+JavaScript authoring format.
 
 ### The same module produces different previews
 
 A migration may be evaluated more than once. Do not use `Date.now()`,
 `Math.random()`, environment-dependent branches, network reads, or mutable
-module state inside `up()`. Use database expression helpers such as `now()`,
-`uuidV4()`, and supported `uuidV7()` when you need values at apply time.
+module state inside `schema()`, `data()`, or `inverse()`. Use database expression
+helpers such as `now()`, `uuidV4()`, and supported `uuidV7()` when you need
+values at apply time.
 
 Run preview repeatedly while investigating:
 
@@ -187,8 +236,8 @@ reviewed, and tested.
 
 ### Apply succeeds but row data is unchanged
 
-Insert, update, delete, and backfill steps execute on PostgreSQL and MySQL. If
-the expected rows did not change:
+Insert, update, delete, and backfill steps execute on PostgreSQL, MySQL, and
+SQLite. If the expected rows did not change:
 
 1. Run preview and confirm the data step is in the selected dialect branch.
 2. Confirm the connection and `projectSchema` point to the intended database.
@@ -379,6 +428,10 @@ failed. Choose based on which column the deployed application currently uses.
 
 ### A backfill cursor is rejected
 
+Every backfill must declare `cursorStability`, using either
+`{ mode: "guardUpdates" }` or a reviewed named external invariant such as
+`{ mode: "externalInvariant", name: "account_ids_are_immutable" }`.
+
 On PostgreSQL and MySQL, use an exact ordered, non-null primary or unique
 candidate-key tuple with supported comparison semantics. One column from a
 composite key is not sufficient, and the backfill cannot assign any cursor
@@ -421,7 +474,7 @@ Applying a directory is not one transaction. Earlier files can remain applied
 when a later file fails. A single file can also contain several database changes
 that commit separately, so an error later in that file can leave earlier
 changes applied. PostgreSQL ordinary steps are transactional, while MySQL DDL
-auto-commits. Backfills commit one bounded batch at a time on both targets.
+auto-commits. Backfills commit one bounded batch at a time on all three targets.
 
 Missing approval is different: approval is preflighted across each complete
 plan before its first authored step. Partial completion here means execution had
@@ -461,6 +514,27 @@ or the documented recovery procedure. See
 [Operating migrations](operations.md#failure-playbook).
 
 ## Repeat runs and journal state
+
+### Rollback is refused, or a rolled-back migration is pending again
+
+Node and CLI rollback run the `inverse()` recorded with an eligible `data()`
+migration. They lower it through the same guarded IR authoring path as the
+forward operations and execute it as parameterized DML on PostgreSQL, MySQL, or
+SQLite. The inverse and its `rolled_back` journal event commit together. A
+successful rollback therefore makes plan-aware status report that plan pending;
+this is expected, and the next apply replays its forward `data()` phase.
+
+Two limits are non-negotiable: the forward plan must lower to exactly one
+journaled step, and the recorded inverse must lower only to transactional DML.
+Rollback refuses the whole selection before execution when either limit is
+violated. It also refuses an `irreversible` data migration by default and quotes
+the author's reason. `--force --backup-acknowledged` can cross such a migration,
+but it does not undo it; inspect `skippedIrreversible` rather than treating the
+command as a successful reverse. Rollback always requires trusted approval.
+
+The `--rollback` flag on `zero-migrate resolve` is a different operation: it
+aborts a pending PostgreSQL online rename by keeping the source column and
+dropping the destination.
 
 ### Applying the same module again does not report `skipped`
 
@@ -545,10 +619,10 @@ the ordered `migrations` set. The CLI loads that set from `--dir` automatically.
 If `pending` is unexpectedly empty, confirm the intended directory, exported
 names, `ownerApp`, `projectSchema`, registry, and policy charter match apply.
 
-Inspect `plans` for each migration and its schema, data, and backfill step. A
-mixed migration can be `partial`, and edited applied content is `drifted`.
-Saved backfill progress without a completion event reports that step as
-`inflight` and the plan as `partial`.
+Inspect `plans` for each migration and its schema, data, and backfill steps. A
+multi-step plan can be `partial`, and edited applied content is `drifted`. Saved
+backfill progress without a completion event reports that step as `inflight` and
+the plan as `partial`.
 
 An explicitly aborted online rename appears in top-level `aborted`, not
 `applied` or `pending`. Its plan and deferred `onlineContract` steps have state
@@ -557,7 +631,8 @@ cannot become pending again. A plan that depends on that aborted identity stays
 `blocked`; point it to a newly authored replacement migration instead.
 
 `dependsOn` is an IR-level field, and a JavaScript migration module cannot set
-it — a module exports `up`, `down`, and `name` only. So for JavaScript-authored
+it. Its default export contains `schema()`, or `data()` with `inverse()` or
+`irreversible`; it may separately export `name`. So for JavaScript-authored
 projects the `blocked` state above is unreachable: with no dependency declared,
 nothing is ever blocked on an aborted identity, and the recovery is simply to
 author a replacement migration. There is no dependency to repoint. See
@@ -629,8 +704,10 @@ Do not convert sequence values to `Number`; large values can lose precision.
   both the application and journal databases. Close conflicting connections,
   confirm both files are writable, and do not override their safety settings
   during apply.
-- SQLite backfills require a consistently typed, single-column `INTEGER` or
-  `TEXT` primary key.
+- SQLite backfills require an exact ordered, non-null primary or unique
+  candidate-key tuple, an explicit cursor-stability mode, supported declared
+  `INTEGER` or `TEXT` affinity for every component, and matching live storage
+  classes.
 
 ## Avoid these recovery shortcuts
 
@@ -642,8 +719,10 @@ Do not convert sequence values to `Number`; large values can lose precision.
 - Do not retry while another apply may still be running.
 - Do not grant broad database permissions to bypass a scoped denial.
 - Do not log database URLs, secrets, or row data.
-- Do not treat low-level reverse operations as a supported rollback workflow;
-  zero-migrate does not currently provide high-level rollback orchestration.
+- Do not hand-run reverse SQL and fabricate journal state. Use Node or CLI
+  rollback only with the migration's recorded `inverse()`; the forward plan must
+  lower to exactly one journaled step and the inverse must contain only
+  transactional DML.
 
 ## Getting help
 

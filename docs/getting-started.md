@@ -83,7 +83,7 @@ import { ids, now, table, t } from "zero-migrate";
 export const name = "create_users";
 
 export default {
-  up() {
+  schema() {
     table("users").create({
       columns: {
         id: ids.typeId({ prefix: "user" }).primaryKey(),
@@ -101,20 +101,25 @@ export default {
       on: ["email"],
       unique: true,
     });
-
-    table("users").insert({
-      rows: {
-        id: "user_01h455vb4pex5vsknk084sn02q",
-        email: "first@example.com",
-        display_name: "First user",
-      },
-    });
   },
 };
 ```
 
-A migration module exports either a named `up()` function or a default object
-with an `up()` method. Keep all migration calls synchronous inside that method.
+A migration module's default export has exactly one synchronous forward phase:
+`schema()` for DDL, or `data()` for DML. A data migration must also declare
+exactly one rollback disposition: a recorded `inverse()` or a non-empty
+`irreversible: "reason"`. DDL and DML cannot share a module. The recorder checks
+the operations each phase actually recorded, so putting an insert in `schema()`
+or a table creation in `data()` is refused regardless of the callback's name.
+`up()` and `down()` are gone; neither is deprecated or accepted as an alias.
+
+For a reversible data migration, rollback records and runs the authored
+`inverse()`. Reversibility has two limits: the forward plan must lower to exactly
+one journaled step, and the inverse must lower only to transactional DML. The
+inverse goes through the same guarded IR authoring and lowering path as the
+forward operations, then executes as parameterized DML on PostgreSQL, MySQL, or
+SQLite. Its transaction commits together with a `rolled_back` journal event, so
+`status` reports the plan pending and a later apply replays its forward `data()`.
 
 The most important authoring rules are:
 
@@ -140,7 +145,7 @@ import { ids, now, table, t } from "zero-migrate";
 export const name = "create_projects";
 
 export default {
-  up() {
+  schema() {
     table("projects").create({
       columns: {
         id: ids.typeId({ prefix: "proj" }).primaryKey(),
@@ -255,9 +260,9 @@ key should put those rules in this file instead; see [Policy model](policy.md).
 
 ## 6. Apply the migration
 
-> **Authored order is execution order:** the table creation, index, and insert in
-> this walkthrough run in exactly that sequence. Data-only migrations run too;
-> data operations are not removed from a mixed plan.
+> **Authored order is execution order:** the table creation and index in this
+> walkthrough run in exactly that sequence. Separate data migrations run in
+> filename order alongside schema migrations; DDL and DML never share a module.
 
 Apply the directory:
 
@@ -312,8 +317,8 @@ pnpm exec tsx dist/cli-bin.js status \
 ```
 
 Status loads the migration directory and reconciles each complete plan with the
-PostgreSQL or MySQL journal. Mixed migrations include their DDL, DML, and
-backfill steps. Once a backfill has saved progress but has not written its final
+PostgreSQL or MySQL journal. Schema and data migrations each report all of their
+recorded steps. Once a backfill has saved progress but has not written its final
 completion event, its step is `inflight` and its plan is `partial` rather than
 fully applied.
 
@@ -372,7 +377,8 @@ console.log(result);
 ```
 
 As with the CLI, importing the module executes ordinary JavaScript. PostgreSQL
-and MySQL apply preserve every schema and data step in authored order.
+and MySQL apply preserve every recorded step in authored order across the
+separate schema and data modules.
 
 ## 9. Change an existing table
 
@@ -384,7 +390,7 @@ import { table, t } from "zero-migrate";
 export const name = "add_user_timezone";
 
 export default {
-  up() {
+  schema() {
     table("users")
       .column("timezone")
       .add({ type: t.string({ length: 64 }).notNull().default("UTC") });
@@ -442,7 +448,7 @@ import { table, t } from "zero-migrate";
 export const name = "rename_user_display_name";
 
 export default {
-  up() {
+  schema() {
     table("users").column("display_name").rename({
       to: "full_name",
       // Must equal the live type of `display_name`, which step 2 declared as
@@ -454,10 +460,10 @@ export default {
 };
 ```
 
-On PostgreSQL, keep this rename as the only operation in the migration that
-targets `users`. Operations on different tables may remain in the same file.
-Move every other `users` schema or data change into a later migration and apply
-it only after the rename is resolved.
+On PostgreSQL, keep this rename as the only operation in the schema migration
+that targets `users`. DDL on different tables may remain in the same file. Move
+every other `users` schema change into a later schema migration and apply it only
+after the rename is resolved. Put any DML in its own data migration regardless.
 
 The source column must exist, the destination must not exist, and `type` must
 match the source column's live PostgreSQL type. The walkthrough's `users.id`

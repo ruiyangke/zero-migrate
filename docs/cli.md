@@ -10,9 +10,10 @@ run.
 [Troubleshooting](troubleshooting.md)
 
 Migration modules are trusted code. The CLI imports them into its own process
-and runs `up()` while recording operations. Top-level module code and `up()` have
-the same file, network, and environment access as the CLI process. Do not load
-untrusted migrations.
+and records their `schema()` or `data()` operations, plus `inverse()` when one is
+declared. Top-level module code and every migration callback have the same file,
+network, and environment access as the CLI process. Do not load untrusted
+migrations.
 
 ## Run from this checkout
 
@@ -42,7 +43,7 @@ zero-migrate --version
 | `lint` | None | Validate migrations for all supported dialects, or one selected dialect |
 | `plan` | PostgreSQL or MySQL | Show pending migrations and the SQL that would be applied |
 | `apply` | PostgreSQL, MySQL, or SQLite | Apply migrations in filename and authored-step order |
-| `rollback` | PostgreSQL, MySQL, or SQLite | Unwind applied migrations, newest first, down to a target |
+| `rollback` | PostgreSQL, MySQL, or SQLite | Unwind eligible applied migrations, newest first, to a target |
 | `status` | PostgreSQL or MySQL | Reconcile migrations with journal state |
 | `resolve` | PostgreSQL | Commit or roll back one pending online column rename by migration name |
 | `history` | PostgreSQL | Print the append-only migration audit trail |
@@ -264,17 +265,25 @@ The CLI reads the top level of the migration directory and accepts `.ts`,
 `.mts`, `.cts`, `.js`, `.mjs`, and `.cjs`. It excludes `.d.ts` and sorts files
 lexicographically. Timestamp prefixes therefore define apply order.
 
-Each module exports a synchronous named `up()` or `default.up()`:
+Each module's default export selects exactly one forward phase. A DDL migration
+provides `schema()`:
 
 ```ts
 export const name = "create_users";
 
 export default {
-  up() {
+  schema() {
     // zero-migrate operations
   },
 };
 ```
+
+A DML migration provides `data()` plus exactly one of a recorded `inverse()` or
+a non-empty `irreversible: "reason"`. `schema()`, `data()`, and `inverse()` are
+synchronous. The recorder enforces the DDL/DML split from the operations that
+were actually recorded, not merely from the function name: DML in `schema()` and
+DDL in `data()` are both refused. `up()` and `down()` are gone, not deprecated or
+aliased.
 
 The exported migration name is durable identity and must be unique within the
 directory. Do not rename or edit an applied migration. Add a new migration
@@ -380,9 +389,10 @@ readers loses that concurrency until something sets the mode back. Do not run
 zero-migrate apply --env production
 ```
 
-`apply` loads files in filename order and executes every migration's schema and
-data steps in authored order. It supports PostgreSQL, MySQL 8, and SQLite; the
-URL selects the dialect.
+`apply` loads files in filename order and executes each schema migration's DDL
+or each data migration's DML in authored order. DDL and DML cannot share a
+module. Apply supports PostgreSQL, MySQL 8, and SQLite; the URL selects the
+dialect.
 
 Deletes, backfills, online rename expansion, and other approval-gated work
 require an explicit operator decision:
@@ -406,7 +416,9 @@ policy_version = 1
 
 ## `rollback`
 
-Unwind applied migrations by running their `down`, newest first, down to a target.
+Unwind eligible applied migrations, newest first, to a target. For a reversible
+data migration, the reverse is the operations recorded from its `inverse()`;
+rollback never calls an authored `down()`.
 
 ```bash
 zero-migrate rollback --env production --steps 1 --approve
@@ -434,30 +446,42 @@ column stores. These are different values for the same migration, and both resol
 to the same anchor. A version in neither space is refused with `is not currently
 applied`, and nothing is unwound.
 
-`--approve` is required. A `down` is destructive by construction, so there is no
-unapproved rollback. `--dir` must still point at the migrations, and the **whole**
-authored set is loaded rather than a prefix: the engine reconstructs each `down`
-from its envelope, and a migration left out of the directory has no reverse SQL,
-which is reported as a refusal rather than skipped.
+`--approve` is required; there is no unapproved rollback. `--dir` must still
+point at the migrations, and the **whole** authored set is loaded rather than a
+prefix. The CLI records every candidate module again so the engine has the exact
+authored inverse stream and can verify its checksum. Leaving an applied
+migration out of the directory is a refusal, not a skip.
 
-A rolled-back migration returns to **pending**. Rollback undoes the schema change
-and the journal entry, so the next `apply` will run it again.
+Reversibility has two hard limits: the forward plan must lower to exactly **one**
+journaled step, and a recorded `inverse()` must lower only to transactional DML.
+A module with two authored operations can therefore be ineligible if they lower
+to two journaled steps. The complete candidate set is checked before execution,
+so a refusal does not unwind an earlier candidate first.
 
-### Migrations that declare no `down`
+The recorded inverse is lowered through the same guarded IR authoring path as
+the forward operations. PostgreSQL, MySQL, and SQLite execute it as parameterized
+DML. The inverse and its `rolled_back` journal event commit together. The event
+stream is append-only: rollback does not erase the earlier `applied` event. Its
+new net state makes `status` report the plan **pending**, and the next `apply`
+replays the forward `data()` operations.
 
-Such a migration is irreversible, and rollback refuses it rather than inventing a
-reverse — re-adding a dropped column would look like a restore while its values
-stayed gone.
+Schema migrations do not accept `inverse()`. Where the engine can derive an
+exact reverse for an eligible single-step schema plan, rollback uses that
+engine-owned structural reverse; it never invokes author-provided `up()` or
+`down()`. Destructive DDL for which no exact reverse exists is refused rather
+than approximated.
 
-`--force` crosses it instead: the migration's effect stays in place and its version
-is listed under `skippedIrreversible`. `--force` alone is refused; it requires
-`--backup-acknowledged` as well, an explicit statement that a backup exists:
+### Irreversible migrations
 
-```text
-zero-migrate: force needs backupAcknowledged as well: skipping a migration that
-declares no down discards the data it removed, so it takes an explicit
-acknowledgement that a backup exists
-```
+A data migration can declare `irreversible: "reason"` instead of `inverse()`.
+Rollback refuses it and reports that author-provided reason rather than
+inventing a reverse.
+
+For an engine-classified irreversible structural step, `--force` crosses it by
+skipping it: the migration's effect stays in place and its version is listed
+under `skippedIrreversible`. `--force` does not override an authored
+`irreversible` data declaration. It is honored only together with
+`--backup-acknowledged`, an explicit statement that a backup exists.
 
 **Read `skippedIrreversible`.** An empty `rolledBack` beside a populated
 `skippedIrreversible` means nothing was undone.
@@ -679,10 +703,10 @@ not change the exit code.
 
 ## Non-goals
 
-The CLI intentionally has no `down` command and no `clean` command. Migrations
-are forward-only: restore an applied migration's original source and author a
-new migration for the next change. The CLI also does not erase journal state or
-drop a project schema/database.
+The CLI intentionally has no `down` authoring hook or command and no `clean`
+command. Reversible DML uses the recorded `inverse()` protocol; other recovery
+uses a new forward migration or a tested restore procedure. The CLI does not
+erase journal state or drop a project schema/database.
 
 ## Next
 

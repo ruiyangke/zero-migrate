@@ -43,7 +43,7 @@ import { ids, now, table, t } from "zero-migrate";
 export const name = "create_projects";
 
 export default {
-  up() {
+  schema() {
     table("projects").create({
       columns: {
         id: ids.typeId({ prefix: "proj" }).primaryKey(),
@@ -59,6 +59,13 @@ export default {
 ```
 
 Calling these helpers describes the change; it does not connect to a database.
+
+Each module's default export has exactly one forward phase. A `schema()` module
+contains DDL only. A `data()` module contains DML only and declares either a
+recorded `inverse()` or `irreversible: "reason"`. Schema and data operations
+cannot share a module. The recorder enforces that boundary from the operations
+actually recorded, not from the callback's name. It refuses `up()` and
+`down()`; neither name has a compatibility alias.
 
 Migration modules are still executable JavaScript. The Node API and CLI do not
 sandbox them. Run trusted modules directly, or evaluate untrusted/generated
@@ -247,7 +254,7 @@ blocked until they reference a replacement migration.
 | --- | --- | --- | --- |
 | PostgreSQL | Yes, schema and data | Yes, schema and data | Broadest feature set; supports transactional and explicitly non-transactional work |
 | MySQL 8 | Yes, schema and data | Yes, schema and data | Supported DDL subset; DDL auto-commits; data migrations require trigger-free InnoDB targets |
-| SQLite | No | Yes, schema and data | Cross-process migration coordination; unsafe application/journal settings are refused; some table changes require rebuilds |
+| SQLite | Yes, schema and data | Yes, schema and data | Cross-process migration coordination; unsafe application/journal settings are refused; some table changes require rebuilds |
 
 There is no MariaDB compatibility promise. Treat the MySQL target as MySQL 8.
 
@@ -260,7 +267,7 @@ See [Dialect support](dialects.md).
 - The JavaScript packages are not published to npm yet; use the documented
   source-checkout workflow.
 - JavaScript apply executes supported DDL, `insert`, `update`, `delete`, and
-  `backfill` steps in authored order on PostgreSQL and MySQL 8.
+  `backfill` steps in authored order on PostgreSQL, MySQL 8, and SQLite.
 - Pending deletes and backfills require explicit approval. Approval is
   preflighted across the complete plan before any authored step executes.
 - Backfills capture a fixed terminal cursor before the first batch, resume after
@@ -288,7 +295,16 @@ See [Dialect support](dialects.md).
   ordered migration set; the CLI supplies the discovered directory.
 - JavaScript history is currently PostgreSQL-only.
 - Structural schema drift checks require an explicit Rust workflow.
-- There is no public high-level rollback command; prefer a forward fix.
+- Node and CLI rollback replay the recorded `inverse()` of each selected data
+  migration through the same guarded lowering path as forward operations, then
+  execute parameterized transactional DML. A successful commit appends a
+  `rolled_back` event; status reports that plan pending, and a later apply
+  replays it.
+- Reversibility is deliberately narrow: the forward plan must lower to exactly
+  one journaled step, and the inverse must lower only to transactional DML.
+  Rollback refuses plans or inverse operations outside those limits before
+  execution. It also refuses `irreversible` migrations and quotes the author's
+  reason.
 
 ## Rust integrations
 

@@ -1,9 +1,9 @@
 # Node API
 
 `zero-migrate-cli` is the JavaScript/TypeScript API for validating migration
-modules, applying ordered PostgreSQL, MySQL, or SQLite schema and data changes, unwinding
-them again, resolving PostgreSQL online column renames, and reading migration
-state.
+modules, applying ordered PostgreSQL, MySQL, or SQLite schema and data changes,
+unwinding eligible single-step plans, resolving PostgreSQL online column
+renames, and reading migration state.
 
 [Documentation home](README.md) · [Getting started](getting-started.md) ·
 [CLI reference](cli.md) · [Writing migrations](writing-migrations.md) ·
@@ -18,7 +18,7 @@ state.
 
 > **Trusted modules only:** the public API imports and executes migration
 > JavaScript or TypeScript in the host process with no sandbox. Top-level module
-> code and `up()` have the same environment, filesystem, network, and process
+> code and the migration callback have the same environment, filesystem, network, and process
 > authority as the calling application. Untrusted or generated source must be
 > evaluated in an external sandbox with no secrets or ambient authority. Use a
 > reviewed Rust/custom-host workflow to move the approved result into deployment.
@@ -46,17 +46,16 @@ import { table, t } from "zero-migrate";
 
 export const name = "create_users";
 
-export function up() {
-  table("users").create({
-    columns: {
-      email: t.string({ length: 254 }).notNull(),
-    },
-  });
-
-  table("users").insert({
-    rows: { email: "first@example.com" },
-  });
-}
+export default {
+  name: "create_users",
+  schema() {
+    table("users").create({
+      columns: {
+        email: t.string({ length: 254 }).notNull(),
+      },
+    });
+  },
+};
 ```
 
 Validate it and apply it:
@@ -113,7 +112,9 @@ import {
   history,
   plan,
   resolvePending,
+  rollback,
   status,
+  statusEnvelopes,
   validate,
 } from "zero-migrate-cli";
 
@@ -121,13 +122,16 @@ import type {
   ApplyOutcome,
   DriverConfig,
   HostApplyOptions,
+  HostEnvelopeStatusOptions,
   HostHistoryOptions,
   HostPlanOptions,
+  HostRollbackOptions,
   HostStatusOptions,
   IrEnvelope,
   MigrationModule,
   PlanReport,
   ResolvePendingOptions,
+  RollbackOutcome,
 } from "zero-migrate-cli";
 ```
 
@@ -136,38 +140,63 @@ import type {
 | `currentIrVersion()` | Yes | Yes | Yes | No |
 | `validate()` | Yes | Yes | Yes | No |
 | `plan()` | Yes | Yes | Yes | No |
-| `apply()` | DDL + all data steps | DDL + all data steps (MySQL 8) | No | Yes |
+| `apply()` | DDL + all data steps | DDL + all data steps (MySQL 8) | DDL + all data steps | Yes |
+| `rollback()` | Eligible single-step plans | Eligible single-step plans | Eligible single-step plans | Yes |
 | `resolvePending()` | Online column rename | No | No | Yes |
-| `status()` | Yes | Yes, with supplied migrations | No | Yes |
+| `status()` | Yes | Yes, with supplied migrations | Use read-only `statusEnvelopes()` | Yes |
 | `history()` | Yes | No | No | Yes |
 
 ## Migration module contract
 
-The public `MigrationModule` type accepts named or default exports:
+Author one of these three default migration definitions. A migration name can be
+declared inside the default object or as a named `name` export:
 
 ```ts
+type MigrationDefinition =
+  | {
+      name?: string;
+      schema(): void;
+      data?: never;
+      inverse?: never;
+      irreversible?: never;
+    }
+  | {
+      name?: string;
+      schema?: never;
+      data(): void;
+      inverse(): void;
+      irreversible?: never;
+    }
+  | {
+      name?: string;
+      schema?: never;
+      data(): void;
+      inverse?: never;
+      irreversible: string;
+    };
+
 interface MigrationModule {
-  up?: () => void;
-  down?: () => void;
   name?: string;
-  default?: {
-    up?: () => void;
-    down?: () => void;
-    name?: string;
-  };
+  default: MigrationDefinition;
 }
 ```
 
-A named `up` takes precedence over `default.up`. A module without either one
-throws.
+A definition must provide exactly one forward callback: `schema()` for DDL or
+`data()` for DML. One module cannot contain both DDL and DML. A data migration
+must also provide either `inverse()` or a non-empty `irreversible` reason; it
+cannot provide both. `schema()` migrations do not accept either reverse form.
+The recorder classifies the module from the operations it records, not from the
+callback's name: DML in `schema()` and DDL in `data()` or `inverse()` are
+rejected. It also refuses `up()` and `down()`; neither name is an alias.
 
-Importing a module runs its top-level code, and zero-migrate invokes `up()` with the
-caller's full process permissions. There is no in-process sandbox. `up()` must
-be synchronous and should be deterministic: keep database calls, file I/O,
+Importing a module runs its top-level code, and zero-migrate invokes `schema()`,
+`data()`, or `inverse()` with the caller's full process permissions. There is no
+in-process sandbox. Migration callbacks must be synchronous and should be
+deterministic: keep database calls, file I/O,
 timers, randomness, and clock-dependent behavior out of trusted authoring code.
 That guidance improves reproducibility; it is not a security boundary.
-Async functions and returned promises are rejected. `plan()` invokes `up()`
-once and validates the exact envelope it returns.
+Async functions and returned promises are rejected. `plan()` invokes the
+forward callback once and validates the exact envelope it returns.
 
 The migration name is chosen from named `name`, `default.name`,
 `nameFallback`, or `migration`, in that order.
@@ -177,11 +206,17 @@ project and do not rename it after apply. Editing the operations or bound values
 of an applied migration keeps its identity but changes its checksum, so apply
 stops with checksum drift.
 
-A module that authors a `down()` is refused with `AUTHORED_DOWN_UNSUPPORTED`
-rather than built: the envelope carries no rollback slot, so the body would be
-discarded and rollback would run the engine's synthesised inverse instead. There
-is no public rollback function. Module flags, dependencies, supersession, and
-preconditions are also not accepted by this migration-module format.
+The public `rollback()` function records the supplied modules again and runs a
+reversible data migration's authored `inverse()`. It lowers that recorded stream
+through the same guarded `IrAuthor` as the forward operations and executes it as
+parameterized DML on PostgreSQL, MySQL, or SQLite. The two hard reversibility
+limits are that the forward plan must lower to exactly one journaled step and
+the inverse must lower only to transactional DML. Other shapes are refused
+before execution. A successful rollback commits the inverse together with its
+`rolled_back` journal event, so `status` reports the plan pending and a later
+`apply()` replays it. An `irreversible` migration instead refuses rollback and
+reports the author's reason. Module dependencies, supersession, and
+preconditions are not accepted by this migration-module format.
 
 The structured preview returned in `plan().envelope` is:
 
@@ -190,8 +225,14 @@ interface IrEnvelope {
   ir_version: number;
   name: string;
   ops: unknown[];
+  inverse_ops?: unknown[];
+  irreversible?: string;
 }
 ```
+
+`inverse_ops` is the independently recorded reverse stream for reversible data.
+`irreversible` carries the author's reason instead. Schema envelopes contain
+neither field.
 
 When running compiled ESM, import the emitted `.js` file. When executing `.ts`
 directly, start Node with a TypeScript loader such as `tsx`.
@@ -276,8 +317,9 @@ if (!verdict.ok) {
 }
 ```
 
-Invalid migration structure returns `{ ok: false, error }`. A missing `up()`, an
-exception thrown by `up()`, or a runtime setup failure throws normally.
+Invalid recorded IR returns `{ ok: false, error }`. A missing `schema()` or
+`data()`, an exception thrown by a migration callback, or a runtime setup failure
+throws normally.
 
 ### `plan()`
 
@@ -351,12 +393,21 @@ package does not discover or update it.
 ## `apply()`
 
 ```ts
+interface NetworkSecurityOptions {
+  tlsCa?: string;
+  hostAllowlist?: string[];
+  queryTimeoutMs?: number;
+}
+
 type DriverConfig =
-  | { kind: "postgres"; url: string }
-  | { kind: "mysql"; url: string };
+  | { kind: "postgres"; url: string; security?: NetworkSecurityOptions }
+  | { kind: "mysql"; url: string; security?: NetworkSecurityOptions }
+  | { kind: "sqlite"; appPath: string; journalPath: string };
 
 interface HostApplyOptions {
   migration: MigrationModule;
+  priorMigrations?: readonly MigrationModule[];
+  priorNameFallbacks?: readonly (string | undefined)[];
   ownerApp: string;
   projectSchema: string;
   driver: DriverConfig;
@@ -386,6 +437,8 @@ function apply(options: HostApplyOptions): Promise<ApplyOutcome>;
 | Option | Required | Meaning |
 | --- | --- | --- |
 | `migration` | Yes | Imported synchronous migration module |
+| `priorMigrations` | No | Ordered modules before `migration`, used to reconstruct owned table shapes |
+| `priorNameFallbacks` | No | Filename-derived names aligned one-for-one with `priorMigrations` |
 | `ownerApp` | Yes | Application ID stamped onto the migration identity |
 | `projectSchema` | Yes | PostgreSQL schema or MySQL database |
 | `driver` | Yes | Database kind and URL |
@@ -482,8 +535,9 @@ need the aggregate state of the migration.
 
 ### Current apply behavior
 
-- DDL, insert, update, delete, and backfill steps run on PostgreSQL and MySQL in
-  authored order. Values are bound separately from statement structure.
+- DDL, insert, update, delete, and backfill steps run on PostgreSQL, MySQL, and
+  SQLite. Operations within each module retain authored order, and values are
+  bound separately from statement structure.
 - Pending delete and backfill steps require `approved: true`. A backfill also
   requires an exact ordered, non-null primary or unique candidate-key tuple with
   compatible comparison semantics and explicit cursor stability; the transform
@@ -518,12 +572,13 @@ need the aggregate state of the migration.
 - Repeating an unchanged migration uses stable step identities and skips work
   already recorded with the same checksum. Renaming or editing an applied
   migration is not a way to rerun it; use a new uniquely named migration.
-- SQLite schema and data apply and status are available through Node, the CLI,
-  and Rust, via the bundled in-process backend (`applyIrSqlite`/`statusIrSqlite`)
-  with cross-process coordination.
-- There is no rollback, rendered-SQL preview, or full database-backed dry run.
-- Driver configuration accepts only a URL; extra TLS, allowlist, or timeout
-  objects are not part of the public type.
+- SQLite schema and data apply and rollback are available through Node, the CLI,
+  and Rust via the bundled in-process backend. SQLite plan-aware status uses the
+  read-only `statusEnvelopes()` path.
+- There is no full database-backed dry run.
+- PostgreSQL and MySQL drivers accept optional CA pinning, host allowlisting, and
+  per-query timeouts through `security`. SQLite uses separate application and
+  journal paths.
 
 ## PostgreSQL online column rename
 
@@ -535,12 +590,14 @@ import { table, t } from "zero-migrate";
 
 export const name = "rename_users_display_name";
 
-export function up() {
-  table("users").column("display_name").rename({
-    to: "full_name",
-    type: t.text(),
-  });
-}
+export default {
+  schema() {
+    table("users").column("display_name").rename({
+      to: "full_name",
+      type: t.text(),
+    });
+  },
+};
 ```
 
 On PostgreSQL, the rename must be the only operation in this migration that
@@ -701,6 +758,125 @@ Use plan-aware `status()` during the coexistence window. Its
 `pendingContracts` field is the durable source for obligations that must be
 resolved, even if the original `apply()` output is unavailable.
 
+## `rollback()`
+
+```ts
+interface RollbackTargetDto {
+  /** Unwind everything applied after this version, keeping the named version. */
+  kind: "toVersion";
+  version: string;
+}
+
+interface RollbackStepsTargetDto {
+  /** Unwind the specified number of most recently applied migrations. */
+  kind: "steps";
+  steps: number;
+}
+
+interface RollbackAllTargetDto {
+  /** Unwind every eligible applied migration in the supplied set. */
+  kind: "all";
+}
+
+interface HostRollbackOptions {
+  migrations: readonly MigrationModule[];
+  nameFallbacks?: readonly (string | undefined)[];
+  ownerApp: string;
+  projectSchema: string;
+  driver: DriverConfig;
+  registry?: Record<string, string>;
+  policy: readonly string[];
+  migratorRole?: string;
+  target:
+    | RollbackTargetDto
+    | RollbackStepsTargetDto
+    | RollbackAllTargetDto;
+  approved?: boolean;
+  force?: boolean;
+  backupAcknowledged?: boolean;
+  appliedBy?: string;
+}
+
+interface RollbackOutcome {
+  /** Forward step versions whose reverse committed with a `rolled_back` event. */
+  rolledBack: string[];
+  /** Versions crossed without a reverse under force + backup acknowledgement. */
+  skippedIrreversible: string[];
+}
+
+function rollback(options: HostRollbackOptions): Promise<RollbackOutcome>;
+```
+
+`rollback()` takes the complete ordered migration set and a required `target`;
+there is no default because guessing how much to unwind would be destructive.
+Pass `approved: true` after reviewing the reverse. `nameFallbacks`, when
+present, must align one-for-one with `migrations`.
+
+For reversible data, rollback runs the exact operations recorded from
+`inverse()`. It lowers them through the same guarded `IrAuthor` used for the
+forward stream, then executes parameterized DML on PostgreSQL, MySQL, or SQLite.
+The two hard limits are that the forward plan must lower to exactly one
+journaled step and the inverse must lower only to transactional DML. A
+multi-step forward plan or any non-DML/non-transactional inverse is refused
+before a reverse runs.
+
+Eligible single-step schema plans use the engine's structural reverse rather
+than an authored callback. Structural reversal does not recreate data lost by a
+drop, and unsupported shapes refuse rather than pretending to restore it.
+
+A data migration declaring `irreversible` is refused by default and reports the
+authored reason. `force: true` together with `backupAcknowledged: true` may cross
+an irreversible migration, but it does not fabricate or execute a reverse: the
+effect remains in place and the version is returned in `skippedIrreversible`.
+
+A successful recorded inverse and its `rolled_back` journal event commit as one
+unit. Plan-aware `status()` then reports that migration pending; applying the
+unchanged module again replays its forward `data()` operations.
+
+```ts
+import { readFile } from "node:fs/promises";
+import { rollback, status } from "zero-migrate-cli";
+import * as createUsers from "./migrations/20260715153045_create_users.js";
+import * as seedStarterUser from "./migrations/20260715154500_seed_starter_user.js";
+
+const policy = [await readFile("./policy.toml", "utf8")];
+const migrations = [createUsers, seedStarterUser];
+const nameFallbacks = [
+  "20260715153045_create_users",
+  "20260715154500_seed_starter_user",
+];
+
+const outcome = await rollback({
+  ownerApp: "app_demo",
+  projectSchema: "app_demo",
+  driver: { kind: "postgres", url: process.env.DATABASE_URL! },
+  registry: { users: "app_demo" },
+  policy,
+  migrations,
+  nameFallbacks,
+  target: { kind: "steps", steps: 1 },
+  approved: true,
+  appliedBy: "deploy-service",
+});
+
+const state = await status({
+  ownerApp: "app_demo",
+  projectSchema: "app_demo",
+  driver: { kind: "postgres", url: process.env.DATABASE_URL! },
+  registry: { users: "app_demo" },
+  policy,
+  migrations,
+  nameFallbacks,
+});
+
+console.log(outcome.rolledBack, state.pending);
+```
+
+The reply deliberately has no `applied` field: `rolledBack` names reverses that
+actually committed, while `skippedIrreversible` names migrations crossed without
+undoing their effects. See [Operating migrations](operations.md) for the
+recovery playbook around forced crossings.
+
 ## `status()`
 
 ```ts
@@ -775,28 +951,6 @@ interface UnexpectedJournalEntry {
   journalKind?: "apply" | "baseline" | "squash" | "repeatable";
 }
 
-interface RollbackTargetDto {
-  /** `"toVersion"` unwinds everything applied AFTER the named version, keeping it;
-   *  `"steps"` unwinds the n most recently applied; `"all"` unwinds everything.
-   *  Required: every default would be a guess about how much schema to tear down. */
-  kind: "toVersion" | "steps" | "all";
-  /** The version to stop at. Only for `"toVersion"`. */
-  version?: string;
-  /** How many migrations to unwind. Only for `"steps"`. */
-  steps?: number;
-}
-
-interface RollbackOutcome {
-  /** Versions whose `down` ran and were journaled `rolled_back`, in the order they
-   *  were unwound: reverse topological order of `depends_on`. */
-  rolledBack: string[];
-  /** Versions crossed WITHOUT running a `down`, because they declare none and the
-   *  request carried both `force` and `backupAcknowledged`. Empty otherwise. */
-  skippedIrreversible: string[];
-}
-
-function rollback(options: HostRollbackOptions): Promise<RollbackOutcome>;
-
 interface StatusReply {
   currentVersion?: string;
   applied: string[];
@@ -816,29 +970,9 @@ function status(options: HostStatusOptions): Promise<StatusReply>;
 function statusEnvelopes(options: HostEnvelopeStatusOptions): Promise<StatusReply>;
 ```
 
-### Rolling back
-
-`rollback()` takes the same migrations, owner, registry and policy charter as
-`apply()`, plus a `target` saying how far to unwind. `approved` is required: a
-`down` is destructive by construction, so the engine refuses without it.
-
-A migration that declares no `down` is IRREVERSIBLE and rollback refuses it by
-default rather than inventing a reverse — re-adding a dropped column would look
-like a restore while its values stayed gone. Passing `force` together with
-`backupAcknowledged` does not fabricate one either: it CROSSES that migration,
-leaves its effect in place, and names it in `skippedIrreversible`. Read that field;
-an empty `rolledBack` with a populated `skippedIrreversible` means nothing was
-undone.
-
-The reply deliberately carries no `applied` list. A host reading `applied` off a
-rollback reply would see an empty array and conclude nothing happened, which is the
-opposite of what a successful unwind means.
-
-See [Operating migrations](operations.md) for the recovery playbook these options
-belong to.
-
 ```ts
 import { readFile } from "node:fs/promises";
+import { status } from "zero-migrate-cli";
 import * as createUsers from "./migrations/20260715153045_create_users.js";
 import * as backfillUsers from "./migrations/20260715154500_backfill_users.js";
 
@@ -864,7 +998,7 @@ used by apply for plan-aware status on PostgreSQL or MySQL.
 The modules follow the same planning rules as apply, so `plans[].steps` includes
 every DDL, insert/update/delete, backfill, and online step. Top-level `applied`,
 `pending`, and `aborted` contain logical migration-plan IDs; the nested entries
-contain the actual journaled step IDs. A mixed migration is fully applied only
+contain the actual journaled step IDs. A multi-step plan is fully applied only
 when all of its required steps are applied with the expected checksum.
 
 The complete reply has these additional diagnostics:
@@ -908,10 +1042,12 @@ An aborted plan does not satisfy `dependsOn`. A supplied dependent plan remains
 replacement migration and update the dependency to that new migration identity.
 
 `dependsOn` is an IR-level field, and **a JavaScript migration module cannot set
-it**. A module exports `up`, `down`, and `name` only; a `dependsOn` property on
-the module, on its `default` export, or spelled `depends_on` is ignored, and the
-envelope the host builds carries no dependency list. The field is reachable from
-Rust embedders through `IrAuthor` and from hand-authored IR envelopes.
+it**. A module's default export contains `schema()`, or `data()` with
+`inverse()` / `irreversible`; its optional named export is `name`. A `dependsOn`
+property on the module, on its `default` export, or spelled `depends_on` is
+ignored, and the envelope the host builds carries no dependency list. The field
+is reachable from Rust embedders through `IrAuthor` and from hand-authored IR
+envelopes.
 
 For JavaScript-authored migrations this means the paragraph above describes a
 state you cannot reach: with no dependency to declare, no plan is ever `blocked`
@@ -1028,21 +1164,23 @@ This checks authored structure only; it does not open or inspect a SQLite file.
 | `validate()` | returns `ok: false` for an invalid migration | throws for module/runtime errors |
 | `plan()` | returns `ok: false` for an invalid migration | throws for module/runtime errors |
 | `apply()` | rejects | rejects with validation, approval, driver, or database error |
+| `rollback()` | rejects | rejects with reversibility, approval, driver, or database error |
 | `resolvePending()` | rejects | rejects with approval, identity, driver, or database error |
 | `status()` | rejects | rejects with driver or journal error |
 | `history()` | rejects | rejects with driver or journal error |
 
-`apply()`, `resolvePending()`, `status()`, and `history()` close their connection
-whether the main operation succeeds or fails. A close failure can itself reject
-the call. Log the complete error and inspect journal/schema state before deciding
-whether to retry.
+`apply()`, `rollback()`, `resolvePending()`, `status()`, and `history()` close
+their network connection whether the main operation succeeds or fails. A close
+failure can itself reject the call. Log the complete error and inspect
+journal/schema state before deciding whether to retry.
 
 ## Practical limitations
 
-- PostgreSQL and MySQL apply execute DDL and all structured data steps; SQLite
-  apply is not exposed by Node.
-- Plan-aware status supports PostgreSQL and MySQL when `migrations` is supplied;
-  history remains PostgreSQL-only.
+- PostgreSQL, MySQL, and SQLite apply and rollback execute supported DDL and
+  structured data steps. SQLite plan-aware status uses `statusEnvelopes()` with
+  `readOnly: true`; `status()` itself refuses a SQLite driver.
+- Plan-aware `status()` supports PostgreSQL and MySQL when `migrations` is
+  supplied; history remains PostgreSQL-only.
 - Online column rename and `resolvePending()` are PostgreSQL-only. The rename
   must be its table's only operation in that migration; operations on other
   tables are allowed. Later changes to the renamed table remain blocked until
@@ -1054,9 +1192,12 @@ whether to retry.
 - Follow-up table changes require a trusted ownership registry.
 - Migration names must remain unique and stable; content edits after apply are
   checksum drift.
-- `down`, flags, dependencies, supersession, and preconditions are not carried.
-- Rollback, rendered SQL, and a full database-backed dry run are not exposed.
-- Database driver configuration is URL-only.
+- `up()` and `down()` do not exist. Module flags, dependencies, supersession, and
+  preconditions are not carried.
+- A full database-backed dry run is not exposed; use offline `plan()`,
+  `validate()`, and `previewSql()` before apply.
+- Network drivers accept URL-based PostgreSQL/MySQL targets and optional
+  transport controls; SQLite uses explicit application and journal paths.
 - Node `apply()` accepts executable migration modules only. A platform that
   accepts untrusted source therefore needs a separate sandbox and a reviewed
   Rust/custom-host integration.
@@ -1068,7 +1209,8 @@ whether to retry.
 | Required runtime cannot load | Repeat Getting started for this OS/architecture and set the documented absolute `ZERO_MIGRATE_ADDON_PATH` before the first call |
 | `Cannot find package 'pg'` or `'mysql2'` | Run the repository's `pnpm install --frozen-lockfile` setup again |
 | `Unknown file extension ".ts"` | Run Node with `--import=tsx`, or import compiled JavaScript |
-| Migration exports no `up()` | Export a synchronous named `up` or `default.up` |
+| Migration exports neither `schema()` nor `data()` | Export a default object with synchronous `schema()` for DDL, or `data()` plus `inverse()` / `irreversible` for DML |
+| Migration exports `up()` or `down()` | Replace the legacy member; neither name is deprecated or aliased |
 | `<unregistered>` ownership error | Pass the authoritative `{ table: ownerApp }` registry |
 | Plan succeeds but apply rejects | Plan is offline and does not run every apply-time check |
 | PostgreSQL rename conflicts with another operation | Keep the rename as that table's only operation; move same-table schema and data work to a later migration applied after resolution |
@@ -1079,6 +1221,7 @@ whether to retry.
 | MySQL status lacks pending/step detail | Pass the ordered `migrations` set and matching registry to `status()`; MySQL `history()` is not public |
 | `Do not know how to serialize a BigInt` | Use the JSON replacer shown above |
 | Repeat apply reports checksum drift | Restore the immutable applied source and create a new uniquely named migration for the new change |
+| Rollback refuses a migration | The forward plan must lower to exactly one journaled step, and an authored inverse must lower only to transactional DML; otherwise use a compensating forward migration |
 | A table is blocked by a pending rename | Finish the application cutover and call `resolvePending()` with `action: "apply"`, or move back to the source column and use `action: "abort"`; both require approval |
 
 See [Troubleshooting](troubleshooting.md) for longer diagnostic flows.

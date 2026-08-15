@@ -56,7 +56,7 @@ from the longer-term platform direction.
 | [Writing migrations](writing-migrations.md) | Use the TypeScript API for tables, columns, indexes, constraints, expressions, views, and data operations |
 | [Choosing a database target](dialects.md) | Keep migrations portable and use target-specific features intentionally |
 | [CLI reference](cli.md) | Create, preview, validate, apply, and inspect from a terminal |
-| [Node API](node-api.md) | Call `plan`, `validate`, `apply`, `resolvePending`, `status`, and `history` from JavaScript |
+| [Node API](node-api.md) | Call `plan`, `validate`, `apply`, `rollback`, `resolvePending`, `status`, and `history` from JavaScript |
 | [Operating migrations](operations.md) | Plan deployments, approve destructive work, monitor history, recover, and roll forward |
 | [Core concepts](concepts.md) | Understand identity, ownership, portability, policy, plans, and history |
 | [Policy model](policy.md) | Configure the public policy types and host responsibilities |
@@ -81,7 +81,7 @@ from the longer-term platform direction.
 | Migration status | PostgreSQL, MySQL, and SQLite through Node/CLI; backend-specific support in Rust |
 | Detailed history | PostgreSQL in Node and Rust |
 | Pending migration calculation in Node | Available when `status()` receives the migration modules; CLI `status` loads its directory |
-| High-level rollback | Not available; use reviewed roll-forward migrations |
+| Rollback | Eligible single-step schema work and data migrations with a recorded `inverse()` through Node API and CLI on PostgreSQL, MySQL, and SQLite |
 | Database-backed dry run from Node | Not available |
 | Trusted table-shape policy charter in Node | Required on `apply()` and plan-aware `status()`; CLI apply/status require `--policy` |
 | Arbitrary custom executor policy in Node | Not exposed by the current public options |
@@ -136,12 +136,24 @@ Additional limits to plan around:
 - Pending delete and backfill steps require `approved: true` in Node or
   `--approve` in the CLI after review. Matching completed steps skip without
   renewed approval.
+- A migration module's default object exports either `schema()` for DDL, or
+  `data()` for DML together with exactly one of a recorded `inverse()` or an
+  `irreversible: "reason"` declaration. DDL and DML cannot share a module. The
+  recorder enforces that boundary from the operations actually recorded, not
+  from the callback's name. It refuses `up()` and `down()`; neither has a
+  compatibility alias.
+- Rollback is intentionally limited: the forward plan must lower to exactly one
+  journaled step, and a recorded `inverse()` must lower only to transactional
+  DML. The inverse follows the same guarded lowering path as forward DML and
+  executes as parameterized DML on PostgreSQL, MySQL, and SQLite. Its commit
+  appends a `rolled_back` event, so status reports the plan pending and re-apply
+  replays it. An `irreversible` migration is refused with the author's reason.
 
 ## Terms used in these guides
 
 | Term | Meaning |
 | --- | --- |
-| migration module | A JavaScript or TypeScript module with a synchronous `up()` function |
+| migration module | A JavaScript or TypeScript module whose default export has one synchronous `schema()` DDL phase, or a synchronous `data()` DML phase plus `inverse()` or `irreversible` |
 | preview | The structured database changes produced by a migration module |
 | host | The trusted process that validates and applies migrations |
 | owner | The application allowed to change a table |

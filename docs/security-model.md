@@ -5,7 +5,8 @@ delete an entire schema. zero-migrate treats the requested database changes as
 untrusted input and keeps database authority in the trusted host and database.
 
 The public Node API and CLI execute migration modules as ordinary JavaScript.
-They do not sandbox imports, top-level code, or `up()`. A module can access the
+They do not sandbox imports, top-level code, `schema()`, `data()`, or the
+`inverse()` a rollback later runs. A module can access the
 host's environment, files, network, and any imported Node API. Run only trusted
 module code directly. Evaluate untrusted/generated source in an external sandbox
 with no secrets or authority, then move only a reviewed migration plan into a

@@ -16,6 +16,12 @@ capabilities are summarized only where they affect an operator's choice.
 > approval. Approval is preflighted across the complete plan before its first
 > authored step; matching completed steps skip without renewed approval.
 
+Migration modules use one of three default-export shapes: `schema()` for DDL;
+`data()` plus `inverse()` for reversible DML; or `data()` plus a non-empty
+`irreversible` reason when no reverse exists. DDL and DML cannot share a module.
+The recorder checks the operations each callback actually records, so renaming a
+callback cannot bypass the boundary.
+
 ## Operational support matrix
 
 ### Public JavaScript API
@@ -25,10 +31,11 @@ capabilities are summarized only where they affect an operator's choice.
 | Offline validation and plan | Yes | Yes | Yes |
 | Schema and data apply with journal | Yes | Yes | Yes |
 | Insert/update/delete/backfill apply | Yes | Trigger-free InnoDB targets | Yes |
-| Destructive approval | Node API | Node API | No |
-| CLI approval | `--approve` | `--approve` | No |
+| Destructive approval | Node API | Node API | Node API |
+| CLI approval | `--approve` | `--approve` | `--approve` |
+| Rollback within the limits below | Yes | Yes | Yes |
 | Online column rename and explicit resolution | Yes | No | No |
-| Plan-aware status | Yes | Yes | No |
+| Plan-aware status | Yes | Yes | Yes |
 | History | Yes | No | No |
 | Reads the target catalog before apply/plan-aware status | Yes | Yes | No |
 | Live schema simulation | No | No | No |
@@ -51,12 +58,14 @@ catalog snapshot of tables, columns, and ordered indexes for preparing
 live-dependent work, but a complete MySQL structural-drift comparison is not
 available today.
 
-A `rollback` verb ships on the public JavaScript path (`zero-migrate-cli`), and it
-unwinds real schema: it reconstructs each `down` from the authored envelope rather
-than from an authored `down()` body. It is not a substitute for a forward fix - see
-[Rollback strategy](#rollback-strategy) for when to reach for it and the rails it
-requires. PostgreSQL online column rename remains the supported staged
-schema-change workflow. See [Rust API](embedding.md) for the public Rust surface.
+A `rollback` verb ships on the public JavaScript path (`zero-migrate-cli`). For
+eligible schema work it uses the structural reverse produced while lowering the
+forward operation. For eligible data work it runs the module's recorded
+`inverse()`. An authored `down()` is never accepted or called. Rollback is not a
+substitute for a forward fix; see [Rollback strategy](#rollback-strategy) for
+when to reach for it and the rails it requires. PostgreSQL online column rename
+remains the supported staged schema-change workflow. See [Rust
+API](embedding.md) for the public Rust surface.
 
 ## Know the deployment identities
 
@@ -80,10 +89,10 @@ migration's self-declared name. Supply
 
 ### 1. Keep migration code deterministic
 
-Migration `up()` functions should be synchronous, deterministic, and free of
-external side effects. Do not read clocks, random values, files, mutable global
-state, network services, or environment-dependent feature flags while describing
-the migration.
+Migration `schema()`, `data()`, and `inverse()` functions should be synchronous,
+deterministic, and free of external side effects. Do not read clocks, random
+values, files, mutable global state, network services, or environment-dependent
+feature flags while describing the migration.
 
 Validation and planning may evaluate the module more than once. A deterministic
 module produces the same reviewed change every time.
@@ -596,11 +605,18 @@ apply and status work, but that view is not a complete structural-drift check.
 
 ## Rollback strategy
 
-`zero-migrate-cli` exports a `rollback` verb. It unwinds applied migrations by
-reconstructing each `down` from its authored envelope; authoring a TypeScript
-`down()` is refused at build time rather than accepted and ignored, because the
-inverse is synthesised from the recorded ops and an authored body would never
-execute.
+`zero-migrate-cli` exports a `rollback` verb. A DDL module exports only
+`schema()`; eligible structural operations use the reverse produced during
+forward lowering. A DML module exports `data()` and exactly one of a recorded
+`inverse()` or `irreversible: "reason"`. Rollback runs that recorded `inverse()`;
+`up()` and `down()` are gone, with no deprecated spelling or compatibility
+alias.
+
+The inverse is lowered through the same guarded IR authoring path as forward
+operations and may contain only transactional DML. PostgreSQL, MySQL, and SQLite
+execute it as parameterized DML. The inverse and its `rolled_back` journal event
+commit together; status then reports the plan pending, and a later apply replays
+the forward `data()` operations.
 
 Prefer this order anyway:
 
@@ -611,7 +627,7 @@ Prefer this order anyway:
 
 Plan the forward fix and restore path before approving a destructive migration.
 
-### The limit to check FIRST: one journaled step
+### The limits to check first
 
 **A migration is reversible only if it lowers to exactly one journaled step.**
 Anything more is refused, and this rules out most realistic migrations. Measured
@@ -619,41 +635,44 @@ against live PostgreSQL:
 
 | Authored migration | Rollback |
 | --- | --- |
-| one `createTable` | rolls back, table removed |
-| `createTable` + `createIndex` | REFUSED |
-| `createTable` + `insert` | REFUSED |
-| one `createTable` that declares two indexes | REFUSED |
+| one `table(name).create(...)` | rolls back, table removed |
+| two table creates in one `schema()` | REFUSED |
+| one insert with a recorded delete in `inverse()` | runs the inverse |
+| two inserts with recorded inverse deletes | REFUSED |
+| one table create that declares two indexes | REFUSED |
 
 The last row is the one to notice: that is a SINGLE authored operation. Declaring
 indexes inside `create({ indexes: [...] })` lowers to more than one journaled step,
-so the migration is irreversible even though the author wrote one statement. The
-`createTable` plus index shape in the README's own example is not reversible.
+so the migration is irreversible even though the author wrote one statement.
 
 The refusal names the migration you authored, not the derived step identity:
 
 ```
-migration <name> cannot be rolled back: it lowers to more than one journaled step,
-and a plan with several steps has no reverse - its data steps carry no reverse SQL,
-so the engine reduced it to the per-step identity mig_… that no authored envelope
-can supply a `down` for. Only a migration that lowers to exactly ONE step is
-reversible. Roll forward with a compensating migration instead
+migration <name> cannot be rolled back: it lowers to more than one journaled
+step. Only a migration that lowers to exactly ONE journaled step is reversible;
+otherwise an interrupted MySQL unwind could leave a half-reverted shape still
+journaled as applied. Roll forward with a compensating migration instead
 ```
 
-So treat `rollback` as narrow: it is useful for unwinding a small, single-step
-change, and it is not a general undo. Plan the forward fix first, as above.
+For a recorded data reverse, **every operation in `inverse()` must also lower to
+transactional DML**. DDL, vendor operations, online work, and other
+non-transactional inverse shapes are refused before execution. These are the two
+real reversibility limits: one journaled forward step, and a transactional-DML-only
+inverse. Treat `rollback` as narrow and plan the forward fix first.
 
 ### What `rollback` requires, and why each one is there
 
-Every default is refuse-shaped, because a `down` is destructive by construction:
+Every default is refuse-shaped, because reverse execution can be destructive:
 
 - `target` has **no default**. There is no "roll back the last one" convenience,
   because every default is a guess about how much of a schema to remove.
 - `approved` defaults to `false` and the engine refuses without it.
 - `migrations` is the **complete ordered authored set**, not one migration and its
-  priors. A version missing from the set has no reverse SQL, and the unwind refuses
-  rather than skipping it.
-- `force` skips a migration that declares no `down` - honored only together with
-  `backupAcknowledged`.
+  priors. A version missing from the set has no executable reverse, and the
+  unwind refuses rather than skipping it.
+- `force` skips a migration with no executable reverse, including a data
+  migration that declares `irreversible: "reason"`; it is honored only together
+  with `backupAcknowledged`.
 - `backupAcknowledged` defaults to `false`.
 
 The reply names what it unwound (`rolledBack`) and what it declined to
@@ -677,7 +696,7 @@ migration that drops a column has no reverse that could restore its values, and 
 engine says so rather than re-adding an empty column that looks like a restore:
 
 ```
-migration mig_… ('drop_column_acct_secret') is irreversible (down: None);
+the drop_column_acct_secret migration is irreversible;
 rollback refuses by default. Prefer ROLL-FORWARD: author a compensating migration.
 ```
 
@@ -691,8 +710,11 @@ in place.
 after rollback  cols=[id]   -- unchanged; the dropped column did NOT come back
 ```
 
-So a rollback is a schema instrument, not a data one. Dropped values come back from
-a backup or not at all, which is what step 2 above is for.
+For a reversible data migration, rollback instead executes the exact recorded
+`inverse()` as parameterized transactional DML. A declared `irreversible` reason
+is reported in the refusal; zero-migrate does not infer missing pre-images. Data
+that neither an inverse nor a backup preserves does not come back, which is what
+step 2 above is for.
 
 ## Failure playbook
 
