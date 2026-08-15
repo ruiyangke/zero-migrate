@@ -362,7 +362,8 @@ zero-migrate plan --env production
 
 `plan` is a live dry run. It requires a database URL, connects to the target,
 asks the journal-aware status API which migrations are pending, and renders SQL
-only for those migrations using the URL-derived dialect and selected policy.
+only for the migrations `apply` can run using the URL-derived dialect and
+selected policy.
 Human output also surfaces analysis advisories for the lowered plan, naming the
 affected table, statement kind, and lock involved. These advisories are
 informational only: they neither block planning nor change a successful exit
@@ -374,11 +375,25 @@ Human output starts with:
 would apply 2 migration(s)
 ```
 
-It then prints each pending migration and its rendered SQL, with the selected
-policy's table-shape injection already applied, so the previewed `CREATE TABLE`
-is the one apply runs. `--json` emits the same pending set and SQL as structured
-data. The command does not call the apply or resolution APIs and does not
-execute the rendered migration SQL.
+It then prints each runnable pending migration and its rendered SQL, with the
+selected policy's table-shape injection already applied, so the previewed
+`CREATE TABLE` is the one apply runs. A migration that `apply` would refuse —
+for example, one that touches a table with an outstanding online-rename
+contract — is excluded from the count and SQL and listed separately:
+
+```text
+would apply 0 migrations
+blocked: add_note (mig_...): table `people` has an in-flight online rename ...
+```
+
+The blocked line uses the same refusal reason as `apply`; blocked work never
+silently disappears. `--json` carries the same partition as `pending` and
+`blocked` arrays, and `count` is the length of the runnable `pending` array.
+
+`plan` still exits 0 when it reports blocked work: it is a dry run that
+describes the target and does not call the apply or resolution APIs or execute
+rendered migration SQL. Use `status --strict` when blocked or pending state must
+fail a pipeline.
 
 Live planning is available for PostgreSQL, MySQL, and SQLite. Planning uses a
 read-only status path and does not create SQLite journal files on fresh targets.
