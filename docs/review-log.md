@@ -26602,3 +26602,261 @@ SQLite and MySQL round trips were run before the gates, not after: `fold_roundtr
 `vendor_object_drift_pg` all clean. Probe schema `zm_probe_body` dropped and the drop
 verified by count, along with four stray `public` functions an early fixture created
 before it was schema-qualified.
+
+## A retype carried the old type's facets into the new type, and drift believed it
+
+`Op::SetColumnType` is replayed FOUR times over the same op stream, and the four
+disagreed about everything except the type itself.
+
+```text
+  authoring_tables_from_ops    -> env.db.ts
+  fold_to_field_defs           -> schema.runtime.json, AND on SQLite the DESIRED
+                                  snapshot the 12-step rebuild renders CREATE TABLE from
+  fold_ops                     -> the snapshot drift compares
+  validate::declare_logical_column -> the logical-column contract
+```
+
+Two findings were handed over from the rename work: `fold_to_field_defs` leaves
+facet residue after a retype, and `fold_ops` keeps `value_format`. Both are real.
+Measuring them turned up a third thing neither report mentioned, which is worse than
+either.
+
+### `fold_to_field_defs` was wrong in BOTH directions, not just residual
+
+The arm assigned `col_type_to_token(to_type)` and nothing else. The token is not the
+whole type: `ColType::String { length }`, `Char { length }` and `Vector { vector }`
+carry their parameter in a SIBLING descriptor field, so assigning only the token
+loses it going in and keeps the old one coming out. Measured by folding each
+envelope three ways and printing all three:
+
+```text
+                           fold_to_field_defs      env.db.ts        fold_ops
+  string(24) -> int        maxLength: 24  STALE    t.int()          integer
+  string(24) -> string(40) maxLength: 24  WRONG    length: 40       varchar(40)
+  int -> string(40)        maxLength      ABSENT   length: 40       varchar(40)
+  int -> char(8)           charLen        ABSENT   length: 8        character(8)
+  int -> vector(3)         vectorDims     ABSENT   dimensions: 3    vector(3)
+  vector(3) -> vector(5)   vectorDims: 3  WRONG    dimensions: 5    vector(5)
+  char(8) -> int           charLen: 8     STALE    t.int()          integer
+  text(ci) -> int          caseSensitive  STALE    t.int()          case_sensitive STALE
+```
+
+The reported cases (`caseSensitive`, `maxLength`) are the mildest rows. `{"type":
+"char"}` with no `charLen` is not a type, and `{"type":"string","maxLength":24}` for
+a column the database widened to `varchar(40)` is a descriptor that contradicts the
+database rather than merely under-describing it. The type TOKEN does not change in
+that row, so a replay that assigns only the token cannot tell it from a no-op.
+
+THE CONSUMER IS NOT ONLY CODEGEN. `engine.rs` sets `live.sqlite_schemas =
+fold_to_field_defs(...)` on the SQLite path, and that map is the DESIRED snapshot
+`render_create_table_sqlite_rebuild` renders its `CREATE TABLE` from. So the shape
+is DDL on SQLite, not just a generated `.d.ts` - the same reach that made the stale
+generated body undeployable in `3903a98e`.
+
+### `value_format` after a retype: the server was asked, and it answered twice
+
+The previous agent flagged this and guessed the format CHECK might survive the ALTER
+on the server, which would make keeping `value_format` deliberate. Measured on live
+PostgreSQL 18.4, that guess is HALF RIGHT AND WRONG IN EFFECT, because the two
+target classes fail differently.
+
+**Non-text target: the SERVER REFUSES THE MIGRATION.** Run through the real path
+(`MigrationEngine::apply_plan`, on the engine's own emitted SQL, not a hand-written
+imitation):
+
+```text
+  ALTER TABLE ... ALTER COLUMN "v" TYPE integer USING "v"::integer
+      ERROR: function octet_length(integer) does not exist
+  ... TYPE bigint    ERROR: function octet_length(bigint) does not exist
+  ... TYPE uuid      ERROR: function octet_length(uuid) does not exist
+  ... TYPE bytea     ERROR: collations are not supported by type bytea
+```
+
+PostgreSQL re-parses the engine-emitted format CHECK against the new type and
+refuses the whole statement. The plan clears validate AND preview, then dies
+mid-deploy. Nothing the fold says about `value_format` is ever compared, because
+there is no post-state.
+
+**Text-family target: the ALTER SUCCEEDS and the CHECK SURVIVES** - so the guess was
+right about the server. It does not license keeping the facet, because PostgreSQL
+re-parses the body with casts injected and
+`render::value_format::recover_format_check` does not recognise that spelling:
+
+```text
+  authored   CHECK ("v" IS NULL OR (octet_length("v") = 30 AND ...))
+  after ALTER ... TYPE character varying(50), pg_get_constraintdef says
+             CHECK (((v IS NULL) OR ((octet_length((v)::text) = 30) AND
+                    (((v)::text COLLATE "C") ~ '^usr_...$'::text))))
+```
+
+So introspection never projects it back onto `value_format`. Measured end to end
+(author -> lower -> apply -> introspect -> diff), a `typeId(usr) text -> string(50)`
+retype reported THREE differences that do not exist, on a schema that was exactly
+what had been deployed:
+
+```text
+  altered:    column v  field "collation"  expected "pg_catalog.C"  actual ""
+  altered:    column v  field "format"     expected "typeId(usr)"   actual ""
+  unexpected: constraint <table>_v_check
+```
+
+CLEARING `value_format` does not fix that either - the engine-owned CHECK is still
+in the database and still unaccounted for, so the unexpected-constraint half
+survives any spelling of the fold.
+
+**So the verdict is REFUSE, and the precedent was two lines away.** The same arm
+already fails closed on an encryption/mask sentinel, for exactly this reason: "the
+apply path emits ONLY `ALTER COLUMN ... TYPE`, never the `COMMENT ON COLUMN` an
+encrypted column needs, so the LIVE DB also lacks the metadata after such an alter
+... Until the apply path can faithfully re-stamp the sentinel, refuse the change."
+Substitute `DROP CONSTRAINT` for `COMMENT ON COLUMN` and it is the value-format
+case verbatim. Detection is SOURCE-ONLY rather than symmetric, because
+`Op::SetColumnType` carries no `valueFormat` slot so a target can never acquire one
+- asserted with a `debug_assert!` rather than assumed.
+
+### The third thing: `fold_ops` left FOUR drift-compared facets behind, not one
+
+`ColumnSnapshot`'s `PartialEq` compares `value_format`, `id_default`,
+`case_sensitive` and `collation`. The arm copied `data_type` and
+`ddl_type_override` off the freshly-built `new_col` and left the rest of the old
+column intact, so all four survived a base-type change. The brief said the other two
+replays clear those facets; for `case_sensitive` that is MEASURED FALSE - `fold_ops`
+kept it too, and only `authoring_tables_from_ops` and `validate` were right.
+
+```text
+  text(caseSensitive: false) -> int
+      fold_ops   data_type "integer"  case_sensitive Some(false)
+```
+
+On PostgreSQL case-insensitivity IS the `citext` TYPE, so the retype destroys it.
+Measured through the real path, `citext -> character varying(40)` reported
+`case_sensitive expected "false" actual ""` and would have on every run forever.
+
+`inline_checks` is emission-only but it is DDL - the SQLite rebuild joins it into
+the new column declaration. `enum -> int` on SQLite left
+`CHECK ("v" IN ('ok', 'bad'))` sitting on an `integer` column, and the retype did
+not pick up the NEW type's checks either, so it was stale AND incomplete. That one
+is a closed shape rather than a measured live defect: a SQLite CATALOG snapshot
+carries `inline_checks` empty with `stored_create_sql` set, which routes the rebuild
+elsewhere. Said plainly rather than claimed as a fix.
+
+`collation` is BELT-AND-BRACES for the same honesty reason: the one fold-side writer
+of that field is `value_format`'s `bytewise_catalog_collation` (SQLite's `NOCASE`
+rides on `case_sensitive`), so the refusal above already closes the only route a
+stale collation had. The test says that instead of asserting `None == None` on a
+column that never carried one, which would pass against any implementation.
+
+### The verdict is per facet, with a measurement per row
+
+It lives on `render::lower::retype_field_descriptor`, the one function the
+descriptor replay now calls, cross-referenced from `fold_ops`'s arm and from
+`authoring_tables_from_ops`. The KEEP column is where the measuring paid off - it is
+not "these look harmless", it is one live `ALTER TABLE` per row:
+
+```text
+  required     attnotnull still t
+  unique       the unique index is REBUILT and survives
+  comment      survives verbatim across every applied ALTER in the matrix
+  default      PG re-casts it, and REFUSES the whole ALTER when it cannot -
+               for 'x' AND for '7', so text->int never gets a stale default
+  references   PG refuses when the result is FK-incompatible
+               (foreign key constraint "q_v_fkey" cannot be implemented),
+               applies when it is not
+  generated    attgenerated survives (int->bigint keeps 's' and (c0 + 1))
+  identity     attidentity survives (int->bigint keeps 'd'); PG refuses a
+               non-integer target outright
+  fts          PG refuses to alter a column a generated column READS at all
+               (cannot alter type of a column used by a generated column)
+```
+
+Two of those rows are refusals our validator does not yet make and the server does,
+NOT FIXED HERE and recorded so the next pass has the measurement rather than a
+hunch: `setColumnType` on an IDENTITY column to a non-integer type, and
+`setColumnType` on a GENERATED column at all - our lower always emits `USING`, and
+PostgreSQL answers `cannot specify USING when altering type of generated column`
+even for the otherwise-legal `int -> bigint`. Both need a facet
+`LogicalColumnContracts` does not carry, which is a separate change.
+
+### On unifying the replays, since the brief asked
+
+Three replays that must agree by convention will diverge again, and this is the
+second time in two commits that they did. They cannot literally share one
+implementation: they mutate three different types (`ColumnSnapshot`,
+`FieldDescriptor`, `IrColumn`) carrying overlapping but unequal facet sets -
+`FieldDescriptor` alone holds seven facets `IrColumn` cannot round-trip. What IS
+shared here is the DECISION, stated once with its reasons and called by the replay
+that was wrong; the other two are pinned to it by `set_column_type_facets`, which
+asserts all three over the same matrix. That is the same treatment the comparability
+family gets. A real unification would mean giving the three a common facet
+representation, which is a bigger change than this finding justifies.
+
+### RED evidence, per neutering
+
+Fixture first, compiling against the unmodified tree: 10 of 15 failed, 5 passed -
+the 5 being the KEEP assertions, which are the control that the fix must not break.
+Then each part of the fix neutered ALONE, leaving the test compiling:
+
+* `retype_field_descriptor` cut back to `field.ty = retyped.ty` (its pre-fix
+  behaviour): 7 failed, and the diffs are the measured table above -
+  `{"type":"int","maxLength":24}`, `{"type":"string"}` with no bound,
+  `{"type":"vector","vectorDims":3}` against an expected 5.
+* the `value_format` refusal disabled: the two refusal tests plus the collation
+  test failed, and the fold produced
+  `data_type "integer" ... value_format Some(TypeId { prefix: "usr" }), id_default Some(Absent)`
+  - Finding 2, reproduced.
+* the three `new_col` copies in `fold_ops` disabled: the enum-check test failed with
+  `["CHECK (\"v\" IN ('ok', 'bad'))"]` on an integer column, the case-insensitivity
+  test failed with `Some(false)`, and the LIVE false-drift control failed with
+  `altered=[... field: "case_sensitive", expected: "false", actual: "" ]`.
+
+### False-drift control
+
+Apply, change nothing, assert clean - on `varchar(24) -> varchar(40)`,
+`varchar(24) -> integer`, `varchar(24) -> text`. All clean. Plus a control's
+control, `a_column_that_is_never_retyped_stays_clean`, without which a "fix" that
+stopped modelling the facets at all would pass the others just as well.
+
+The two server-oracle tests assert the server's own words for BOTH halves of the
+refusal, including the half where PostgreSQL ACCEPTS - so a future reader cannot
+re-enable the op on the strength of "the server allows it" without tripping the test
+that records why that is not the reason it was refused.
+
+### A wrong call I made, and the test that caught it
+
+The `case_sensitive` leg is the sharpest measurement in this entry and it is NOT
+retained as a live test. The first draft ran it, which needs `citext`, because
+`render::declarative` hardcodes `public.citext` as the PostgreSQL spelling of a
+case-insensitive column. I created the extension `IF NOT EXISTS` and left it
+installed, reasoning that an extension is a database capability rather than schema
+residue.
+
+That is wrong, and `drop_extension_rollback_pg` says so in its own header - an
+extension name is unique PER DATABASE, not per schema, which is exactly why THAT
+file's two tests use `citext` and `pgcrypto` rather than sharing one. The workspace
+gate failed with `rolling_back_a_dropped_extension_restores_it ... extension
+"citext" already exists`. Creating and dropping it in my fixture instead would only
+narrow the window, since cargo runs the two binaries in parallel.
+
+So the live citext legs were removed and the `case_sensitive` verdict is pinned
+OFFLINE instead, in `set_column_type_facets`, against all three replays - which is
+where the fold's behaviour actually lives. Its live measurement (`citext ->
+character varying(40)` reporting `case_sensitive expected "false" actual ""`, and
+the RED run of the live control before the fix) is recorded above rather than
+re-run on every suite. That is a real reduction in what the suite guarantees,
+stated rather than glossed: the drift-comparison half of the `case_sensitive` claim
+now rests on a recorded measurement, not a standing test.
+
+Every probe schema was dropped and the drop verified by re-querying `pg_namespace` -
+the count was 331 before and after - and `citext` was dropped again, so
+`pg_extension` holds only `plpgsql`, as it did at the start.
+
+### The machine, said out loud
+
+The workspace gate first failed with `ld.lld: Bus error (core dumped)` on four
+different test binaries. That is NOT a test result and was not attributed to the
+change: the disk was at 100% (1.2G free of 985G, five agent worktrees holding 186G
+of `target/`) and load average was 24. Every gate outcome recorded for this entry is
+from a run made after space was reclaimed, and the three modified sources plus the
+two new fixtures were re-verified non-empty and re-built clean afterwards - a
+disk-full truncation has already destroyed a source file once this session while the
+edit tool reported success.
