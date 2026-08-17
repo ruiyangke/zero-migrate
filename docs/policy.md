@@ -237,8 +237,54 @@ Current injection support is intentionally narrow:
 - injected column defaults use a closed mapping: timestamps accept `now`, `now()`,
   or `current_timestamp`; integers accept an `i64` literal; and text accepts a
   single-quoted SQL string literal (including doubled-quote escaping);
+- an injected TEXT column may pin `collation = "bytewise"`, and that is the only
+  collation token (see below);
 - injected index columns are applied, but the configured index name is not
   preserved in the resolved migration.
+
+### Pinning a column's comparison order
+
+```toml
+[[inject]]
+scope = "all"
+primary_key = ["id"]
+author_primary_key = "forbid"
+columns = [
+  { name = "id", type = "text", nullable = false, collation = "bytewise" },
+]
+```
+
+`collation = "bytewise"` makes the column compare and sort by its stored BYTES.
+Pin it when the column holds a value whose byte order IS its semantic order — a
+ULID, a TypeID, a base62 UUIDv7 — and you want `ORDER BY id` to be creation
+order.
+
+Without it the column takes the DATABASE's default collation. On a PostgreSQL
+created with `en_US.utf8`, that collation interleaves the upper- and lower-case
+runs of base62, so `ORDER BY id` silently stops being creation order. SQLite's
+default is already bytewise, so this fails only in production and only on a
+deployed PostgreSQL — the reason it is worth pinning explicitly rather than
+relying on the server's configuration.
+
+The charter names the INTENT, not a collation name, because one charter has to be
+sound on all three dialects: `"bytewise"` is PostgreSQL `COLLATE "C"`, SQLite
+`COLLATE BINARY`, and MySQL `utf8mb4_0900_bin`. An unknown token fails to LOAD,
+with the offending TOML line.
+
+Three things follow, and all three are refusals rather than silence:
+
+- pinning a collation on a `timestamptz` or `integer` column is refused at
+  resolution — a collation orders text and means nothing there;
+- an author-declared column occupying an injected slot must match the pinned
+  collation as well as the type, nullability and default, or it is not the
+  injected shape (a column that matched on everything else would otherwise land
+  operator-shaped and author-ordered);
+- the collation is part of the policy's sealed identity, so a charter that adds
+  one does not verify under a seal minted before it.
+
+The facet is carried on `createTable` columns. `addColumn` does not accept it
+yet, so a column added to an existing table cannot pin one; that is a stated
+boundary, not an oversight.
 
 Test the resolved migration, not only whether the TOML parses, before deploying a
 shape policy.
