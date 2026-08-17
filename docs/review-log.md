@@ -27934,3 +27934,253 @@ free, which is above the stop-line and worth watching rather than acting on. Eve
 schema was dropped and the drop verified by re-querying `pg_namespace`: the count was 331
 before the first live run and 331 after the last, with no `injected_collation_*` schema
 left behind. No extension was created; `pg_extension` holds only `plpgsql`.
+
+## The two artifacts of one `genArtifacts` call disagreed about an enum column
+
+`genArtifacts` returns `envDbTs` and `runtimeJson` from ONE fold of ONE op stream. For
+a `t.enum` column they did not agree. `envDbTs` rendered `t.enum("issue_status")`;
+`runtimeJson` described the same column as `{"type":"string"}` and dropped the members.
+`RuntimeSchemaDescriptor` is what a deployed app installs `env.db` from, so the half
+that forgot the closed set is the half that decides what the runtime validates.
+
+Reported by zeroship/appbase on 2026-08-17, observed on the vendored `cb1bcb59` and
+re-checked against `main` (`518de22b`) BY READING. Confirmed here by RUNNING `main`,
+which the reporter could not do.
+
+### The reporter's diagnosis of WHY the fix is wide is wrong; the conclusion is right
+
+The report says the fix "looks wider than a match arm" because `col_type_to_token`
+returns `(String, Option<String>)` and "the `Option` is spoken for by `ColType::Ref`'s
+target, so there is no room in this signature for the values".
+
+That reasoning does not hold. `col_type_to_token` has ONE caller,
+`ir_column_to_field` at `lower.rs:10111`, and it calls it as
+`col_type_to_token(&c.ty)` - the caller already holds the whole `ColType` and the whole
+`IrColumn`, and already sets six sibling facets (`vector_dims`, `char_len`,
+`max_length`, `unbounded_text`, `encrypted`, `mask`) the token has no room for either.
+It could have set `enum_values` without touching that signature at all.
+
+The real reason is one the report never states, and it is stronger:
+
+```text
+  ColType::Enum { name, schema }            // zero-migrate-ir/src/ir.rs:634  NAME ONLY
+  Op::CreateEnum { name, schema, values }   // zero-migrate-ir/src/ir.rs:3380
+```
+
+THE COLUMN DOES NOT CARRY THE MEMBERS. They live in a separate op. So no signature
+whose whole input is one `IrColumn` can populate `enum_values`, however many slots it
+returns. The members have to be resolved from the op STREAM. That is why the fix is not
+a match arm, and it is why it landed in `fold_to_field_defs` rather than in
+`col_type_to_token`.
+
+### Where the members come from, per source shape
+
+Measured, not assumed:
+
+```text
+  envelopes, createEnum in the SAME envelope     reachable  (one op stream)
+  envelopes, createEnum in an EARLIER envelope   reachable  (api.rs:180 concatenates
+                                                             every envelope's ops
+                                                             before folding)
+  envelopes, no createEnum anywhere              UNPROVABLE
+      postgres: the fold SUCCEEDS - a native enum column needs only the type NAME, so
+                `apply_fold_named_type_column_metadata` renders `schema.name` and never
+                asks for the values. `enum_values` is left ABSENT.
+      sqlite/mysql: the fold already FAILS CLOSED - both INLINE the value list into the
+                column's storage, so `enum_def` raises `NamedTypeMissing`.
+  descriptors                                    NEVER LOST - see below
+```
+
+The PostgreSQL row is the one that matters. It is the only case where a fabricated
+membership could ship as fact, and it is why the lift leaves the slot untouched on an
+unresolved name rather than guessing. A wrong closed set is worse than an absent one:
+the runtime would reject rows the database accepts.
+
+### The fix
+
+`fold_to_field_defs` now carries a `NamedTypeRegistry` - the SAME registry the DDL lower
+(`apply_named_type_column_metadata`) and the snapshot fold
+(`apply_fold_named_type_column_metadata`) resolve named types through, reused rather
+than re-spelled, so the three replays cannot disagree about which definition a name
+resolves to after a drop-and-recreate. `Op::CreateEnum` / `Op::DropEnum` came off the
+exhaustive catch-all and into real arms; `lift_named_enum_membership` is applied at the
+three sites where a column acquires a type: `createTable`, `addColumn`, and
+`setColumnType` - where `retype_field_descriptor` clears `enum_values` for the old type
+and the new type re-earns it, so a retype to `T` and a create of `T` still describe the
+same column.
+
+### `ColType::Domain` was lumped into the same match arm, and does not belong in the fix
+
+`ColType::Enum { .. } | ColType::Domain { .. } => ("string".into(), None)` is one arm for
+two different things. A domain carries `as_type`, a `check` that is an ARBITRARY
+predicate, a `default` and a `not_null` - not a closed value set. `enum_values` asserts
+membership in a finite list, and `field_check_constraints` renders it as
+`CHECK (<col> IN (...))`. Putting a domain there would be a lie about the constraint the
+domain actually has. Excluded deliberately, and the exclusion is stated at the lift.
+
+What IS still wrong about that arm, and is NOT fixed here: a domain over `int` gets the
+token `"string"`. That is a real coarseness, it is a different defect with a different
+blast radius (it moves the runtime type of every domain column, and interacts with the
+descriptor producer's `token_to_col_type`, which cannot express a domain at all), and it
+is not what was reported. Recorded rather than bundled.
+
+`ColType::Encrypted { of }` is excluded for a third reason: an encrypted column stores
+ciphertext, so a membership over the plaintext domain is not a contract its stored bytes
+satisfy, and rendering it would emit a CHECK no row could pass. The lift does not
+recurse.
+
+### The descriptor path did NOT lose it - the reporter's open question, answered
+
+The report explicitly did not check `descriptors` as opposed to `envelopes`. It never
+had the defect, and the reason is structural: a `CollectionDescriptor` has no way to
+NAME a native enum type. `enum_values` on a `string` field is the only enum a descriptor
+can express, `descriptors_to_create_ops` turns it into a table-level CHECK in the closed
+OR-chain shape, and `recover_check_facet` lifts it straight back onto the column. The
+membership survived that path all along, by a completely different mechanism, which is
+why the two sources now reach the same `runtimeJson` field by two different routes.
+
+MEASURED and PRE-EXISTING, found while pinning that: the descriptor route is
+PostgreSQL-only. The CHECK the producer emits is table-level, and `createTable
+table-level CHECK is PostgreSQL-only`, so a descriptor declaring ANY membership - or any
+`min`/`max`, which take the same route - is refused outright on SQLite. Untouched by
+this fix, older than it, and now pinned in
+`gen_artifacts_enum_column.rs::the_descriptor_source_keeps_a_membership_it_declares` so
+it is on the record rather than rediscovered.
+
+### Does populating the slot round-trip? The question the report flagged as unverified
+
+`enum_values` has TWO readers. `descriptor_to_sdk_schema` (`declarative.rs:2254`) turns
+it into the wire `FieldDef`'s `enum` key - the intended effect.
+`field_check_constraints` (`declarative.rs:2555`) turns it into `CHECK (<col> IN (...))` -
+and a second CHECK on a SQLite enum column, or ANY CHECK on a PostgreSQL column that
+already has a native enum type, would be a new defect traded for the old one.
+
+It does not happen, and the reason is that the DDL never reads these descriptors. A
+named enum column's storage is resolved from the `NamedTypeRegistry`, not from a
+`FieldDescriptor`. Measured by rendering the real lowered DDL for the reported table:
+
+```text
+  postgres  CREATE TYPE "public"."issue_status" AS ENUM ('UNCONFIRMED', 'CONFIRMED', 'RESOLVED')
+            CREATE TABLE "public"."issues" ("status" "public"."issue_status" NOT NULL,
+                                            "summary" text NOT NULL)
+            CHECK count: 0
+  sqlite    "status" TEXT NOT NULL CHECK ("status" IN ('UNCONFIRMED', 'CONFIRMED', 'RESOLVED'))
+            CHECK count: 1   (the inline check, from the named-type metadata)
+```
+
+There IS one path where this replay's output is load-bearing for DDL, and it was
+measured rather than reasoned about: `engine.rs` seeds `live.sqlite_schemas =
+fold_to_field_defs(...)` on the SQLite leg (at `:395` and `:618`, each gated by
+`dialect == SqlDialect::Sqlite`), and the 12-step rebuild renders the new table from
+that `Value`. Rendering that rebuild with the lift disabled and with it enabled produced
+a BYTE-IDENTICAL `CREATE TABLE`: the membership reaches the rebuilt column as the
+`ColumnSnapshot::inline_checks` entry `fold_ops` already put there, and the descriptor's
+`enum_values` adds nothing on top of it. One CHECK before, one CHECK after.
+
+On PostgreSQL the question does not arise at all - neither seeding site runs, so
+`fold_to_field_defs`' output reaches `runtimeJson` and nothing else.
+
+### A third defect the measurement exposed, and did not fix
+
+Rendering that rebuild printed:
+
+```text
+  CREATE TABLE "issues__zero_migrate_rebuild" (
+    "state" TEXT NOT NULL CHECK ("status" IN ('UNCONFIRMED', 'CONFIRMED', 'RESOLVED')),
+    "summary" TEXT NOT NULL)
+```
+
+The inline CHECK's body names the PRE-rename column. `sqlite_rename_rebuild` renames
+`ColumnSnapshot::name` and - since `3903a98e` - the generated expressions, but not
+`inline_checks`. It is byte-identical with and without this fix, so it is not something
+this change introduced, and it is bounded: it is reachable only on the fold-seeded path,
+because a catalog-read live snapshot carries `stored_create_sql`, which makes the
+rebuild preserve the stored body and let SQLite's own `RENAME COLUMN` rewrite the
+predicate. Pinned as CURRENT behaviour in
+`enum_membership_reaches_no_second_check.rs::a_sqlite_rebuild_carries_the_membership_exactly_once`
+so a later fix to it is a deliberate change rather than a surprise.
+
+### What pins it
+
+```text
+  crates/zero-migrate-node/tests/gen_artifacts_enum_column.rs             4 arms
+      both artifacts, sqlite + postgres + mysql, members in DECLARATION order;
+      control A (t.text) no longer indistinguishable from the subject;
+      control B (t.int) keeps "int";
+      the createEnum in an EARLIER envelope still reaches the later file's column;
+      an unprovable membership is OMITTED (pg ok, sqlite/mysql fail closed);
+      the descriptor source keeps what it declares, and still refuses on sqlite.
+  crates/zero-migrate/tests/enum_membership_reaches_no_second_check.rs    3 arms
+      the real lowered DDL on both dialects, and the SQLite rebuild.
+  packages/zero-migrate-cli/tests/host/gen-artifacts-enum-column.test.ts  2 arms
+      the reported reproduction through the recorder and the REAL addon.
+```
+
+Every assertion is on CONTENT. `ok=true` is a trap here and the reporter said so: a
+silently dropped enum also returns `ok=true`, which is exactly how this shipped.
+
+### Neuter
+
+With `lift_named_enum_membership` returning early, and nothing else changed:
+
+```text
+  gen_artifacts_enum_column.rs
+      both_artifacts_keep_the_enum_membership_on_every_dialect          FAILED
+      an_enum_declared_in_an_earlier_migration_still_reaches_the_...    FAILED
+          both:  left: None   right: Some(["UNCONFIRMED","CONFIRMED","RESOLVED"])
+      an_unprovable_membership_is_omitted_not_invented                  ok
+      the_descriptor_source_keeps_a_membership_it_declares              ok
+```
+
+The two arms that fail are the two that depend on the lift, and they fail with the
+members ABSENT - the reported symptom, not a compile error and not a harness typo. The
+two that still pass are the two that must: the unprovable arm asserts absence, and the
+descriptor arm reaches the slot through the CHECK-recovery route the lift does not
+touch. The host arm was neuter-verified separately, with the addon REBUILT from the
+neutered tree.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (326 pass, 0 fail)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (455 tests, 0 fail)
+```
+
+The addon was rebuilt from this tree before the host suite. This defect is reported
+THROUGH the addon, so a prebuilt artifact would have measured the vendored engine rather
+than the fix.
+
+`f664_scaling::validate_ir_does_not_scale_quadratically_in_any_envelope_shape` flaked
+TWICE mid-session, at load averages of 47 and 32, and the `0` above is a run at load
+average 5. Recorded rather than quietly re-run, because a scaling test that fails is
+exactly the kind of thing that should not be waved away:
+
+```text
+  run 1 (load ~14)   pass
+  run 2 (load ~47)   FAIL  alterPrimaryKey 3.3x (0.081s -> 0.267s)
+  run 3 (load ~32)   FAIL  perRowGen       3.5x (0.111s -> 0.387s)
+  standalone         pass
+  run 4 (load  ~5)   pass
+```
+
+A DIFFERENT shape each time is the signature of a wall-clock flake, not a regression -
+a pass that had gone quadratic would fail on the same shape every run. The test's own
+message says to re-run on an idle machine before believing it. And it cannot be this
+change: it measures `validate_ir`, and `crates/zero-migrate/src/model/validate.rs`
+contains no reference to `fold_to_field_defs`, so the code that changed is not on that
+path at all.
+
+Disk was checked before each gate run. It fell from 198G free to 27G across the cargo
+and release builds; `target/debug` (40G) was removed before the host suite, which
+returned it to 170G. It never approached the 10G floor.
