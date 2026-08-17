@@ -26269,3 +26269,186 @@ else. Said out loud because a regenerated golden is an edited assertion.
 SQLite and MySQL round trips were run before the gates, not after: `fold_roundtrip_sqlite`,
 `fold_roundtrip_pg`, `sqlite_drift`, `drift_id_facets_pg` and `declarative_sqlite` all
 clean. Probe schemas dropped and the drop verified by count.
+
+## The two folds disagreed about a renamed column, and the stale one was the one that emits DDL
+
+### The lead, and whether it held
+
+Secondhand claim: `fold_to_field_defs` rewrites a generated expression on `renameColumn`
+and `fold_ops` does not. Folded one op stream (`createTable line_items(qty_on_hand int,
+total_cents int generated as (qty_on_hand + 1)); renameColumn qty_on_hand -> quantity`)
+through both, on all three dialects, and printed each:
+
+```text
+fold_ops    pg     total_cents generated="(\"qty_on_hand\" + 1)"
+fold_fields pg     total_cents generated={"colRef":{"name":"quantity"}}
+fold_ops    sqlite total_cents generated="(\"qty_on_hand\" + 1)"
+fold_ops    mysql  total_cents generated="(`qty_on_hand` + 1)"
+```
+
+Real, and on every dialect. Not a subtlety of one leg.
+
+### Which side is wrong: the server
+
+```text
+CREATE TABLE probe_gen.line_items (qty_on_hand int, ..., total_cents int
+  GENERATED ALWAYS AS ((qty_on_hand + 1)) STORED);
+-- pg_get_expr -> (qty_on_hand + 1)
+ALTER TABLE probe_gen.line_items RENAME COLUMN qty_on_hand TO quantity;
+-- pg_get_expr -> (quantity + 1)     attgenerated = 's'
+```
+
+PostgreSQL 18.4 holds the expression as a parse tree over attribute NUMBERS, so it
+deparses the NEW name the instant the rename commits. `fold_to_field_defs` agrees with the
+server; `fold_ops` did not. The snapshot fold was the wrong one.
+
+### What the stale side feeds, and why it was not cosmetic
+
+The existing exclusion said the staleness costs nothing because "no reader exists: the
+expression is emission-only, and the emitter that would consume it is never handed a
+folded snapshot on the applied path." That because-clause is a testable claim and it is
+FALSE on SQLite.
+
+A SQLite rename has no native ALTER: it is the 12-step table REBUILD.
+`render_create_table_sqlite_rebuild` renders the new-table CREATE from
+`desired.snapshot` - the TABLE SNAPSHOT, not the SDK descriptor - whenever
+`has_generated_or_identity(snapshot)`, i.e. for exactly the tables this defect touches.
+And `engine::refresh_historical_live` builds the SQLite live schema from BOTH folds at
+once: table snapshots from `fold_ops`, `sqlite_schemas` from `fold_to_field_defs`. So one
+`LiveSchema` carried both answers and the emitter reached for the wrong one. Measured
+through the real lowering:
+
+```sql
+CREATE TABLE "line_items__zero_migrate_rebuild" (
+  ..., "quantity" INTEGER,
+  "total_cents" INTEGER GENERATED ALWAYS AS (("qty_on_hand" + 1)) STORED, ...)
+```
+
+A CREATE naming a column the new table does not have. SQLite refuses it inside the rebuild
+transaction, so the migration cannot apply at all. Not drift, not cosmetics: a rename that
+cannot be deployed.
+
+Drift is NOT affected and that has not changed. `ColumnSnapshot`'s hand-written `PartialEq`
+excludes `generated`, and `comparable_generated_column` compares only `generated_kind`.
+That exclusion is still right - live reports a DEPARSED spelling the fold cannot reproduce
+- and it is precisely why the EMITTED body has to be correct on its own.
+
+The same walk turned up a second defect on the same statement. The rebuild's copy phase is
+`INSERT INTO tmp (...) SELECT (...)`, SQLite refuses a write to a generated column, and the
+non-stored-shape branch of `build_sqlite_rebuild` put generated columns in the copy list
+(`("total_cents", "total_cents")`). The stored-shape branch already excluded them; this one
+did not.
+
+### The fix, at the level the divergence is actually at
+
+The snapshot could not follow the rename because it rendered the expression to a `String`
+at construction and threw the AST away - the same reason an index predicate stays stale,
+and text substitution is refused throughout this crate (`note <> 'qty'` would become
+`note <> 'quantity'`). So the fix is the one `comparable_generated_column` already
+prescribed in its own docstring: keep the closed AST beside the rendering.
+
+- `GeneratedColumnSnapshot` gains `source: Option<Expr>`. There is exactly ONE producer
+  (`generated_column_snapshot`) and it always has the `GeneratedCol`; catalog introspection
+  sets `generated: None` outright, so `None` is currently unreachable and exists so a
+  future catalog reader that recovers only deparsed text stays honest. `Eq` is dropped
+  (`Expr` is `PartialEq` only); nothing needed it.
+- ONE shared implementation, called from both replays that own a `TableSnapshot`:
+  `rename_column_in_generated_columns` / `rename_table_in_generated_columns` in
+  `render::declarative`, used by `fold_ops`'s `RenameColumn` / `RenameTable` arms AND by
+  `sqlite_rename_rebuild`, which derives its post-rename table by changing column NAMES and
+  left the bodies behind for the same reason.
+- `is_engine_computed_column` excludes a generated column from the rebuild copy list.
+
+### Other divergences between the two folds, with a verdict each
+
+Measured by folding a battery of op streams through `fold_ops` AND `render_artifacts`
+(which runs `fold_to_field_defs` for `schema.runtime.json` and a THIRD replay,
+`authoring_tables_from_ops`, for `env.db.ts`) and diffing what each produced.
+
+1. `renameColumn` + generated expression. `fold_ops` stale, other two correct, server
+   agrees with the other two. FIXED, above.
+2. `renameTable` + a TABLE-QUALIFIED reference inside a generated expression. THREE
+   answers: `env.db.ts` said `order_lines` (correct - `gen_types` calls `rename_expr_table`),
+   `schema.runtime.json` said `line_items`, `fold_ops` said `line_items`. Two artifacts
+   shipped side by side out of ONE `renderArtifacts` call describing the same column under
+   different collection names. FIXED on both stale sides.
+3. `setColumnType` facet residue in `fold_to_field_defs`. NOT FIXED, reported.
+   `text(caseSensitive:false) -> int` leaves `{"type":"int","caseSensitive":false}` in the
+   runtime descriptor; `string(24) -> int` leaves `{"type":"int","maxLength":24}`. The
+   `SetColumnType` arm assigns `field.ty` and nothing else, while `fold_ops` re-derives the
+   whole column through `add_column_snapshot` and the authoring replay explicitly clears
+   `value_format`/`vector_metric`/`case_sensitive`. A separate defect with its own blast
+   radius (which facets a retype should clear is a design call per facet, not a rename
+   question) - left for a dedicated pass rather than folded into this one.
+4. `setColumnType` off a typeid-formatted column: `fold_ops` KEEPS
+   `value_format: TypeId{prefix}` on the retyped column while both descriptor lanes clear
+   it. `value_format` IS drift-compared. Flagged, NOT investigated - it may be deliberate
+   (the format CHECK constraint survives an `ALTER COLUMN TYPE`), and settling it needs its
+   own live measurement rather than a guess appended here.
+5. `dropTable` with an incoming `ref` column: both folds keep `refTarget` pointing at the
+   dropped table. They AGREE, so not a divergence; noted only so the next reader does not
+   re-measure it.
+
+The structural finding behind the list: there are THREE replays of the same op stream
+(`authoring_tables_from_ops`, `fold_to_field_defs`, `fold_ops`), plus
+`runtime_metadata_from_ops`, and every divergence above is a rule one of them learned and
+the others did not. Items 1-3 are each a different pair disagreeing. That is a design
+problem, not three bugs; this change makes the two snapshot-owning replays share one
+implementation for renames, which is the part that was emitting bad DDL, and does not
+attempt the larger unification.
+
+### Tests
+
+`rename_column_generated_expr_snapshot` - SQLite, real temp-file database, through the
+real lowering and `apply_plan`: the create applies, a row is seeded, the generated value is
+asserted BEFORE the rename (the control), the rename lowers against the fold-derived live
+schema `refresh_historical_live` builds, and the rebuild applies for real. Asserts the
+emitted CREATE, the copy list, the surviving row, the recomputed generated value and the
+stored `sqlite_schema` text.
+
+`fold_rename_column_generated_expr_pg` - live PostgreSQL: applies the create through the
+engine, renames with native DDL, reads `pg_get_expr`, folds the same ops through BOTH
+replays, and asserts all three name the same column. Each side asserted separately, so a
+measurement that read one value twice would fail.
+
+`fold_rename_column_generated_expr_runtime` - a fourth test for divergence 2 through
+`render_artifacts`, so it fails if EITHER artifact regresses.
+
+REVERSED TEST, said out loud:
+`the_snapshot_lane_keeps_a_stale_generated_body_and_no_reader_reports_it` asserted
+`generated.expr.contains("qty")` - it pinned the stale body as acceptable on the
+"no reader exists" grounds refuted above. It is now
+`the_snapshot_lane_follows_the_rename_and_the_differ_still_ignores_the_body` and asserts the
+opposite. Its SECOND half is unchanged and still passes: the differ does not compare the
+body. That was never the defect.
+
+RED evidence, per fixture, with the fix neutered and every test still COMPILING:
+- `rename_column_in_generated_columns` body replaced by `Ok(())`: the SQLite fixture fails
+  on the emitted CREATE (`GENERATED ALWAYS AS (("qty_on_hand" + 1))`), the PG fixture fails
+  on `("qty_on_hand" + 1)` against a server saying `(amount_on_hand + 1)`, and the reversed
+  runtime test fails on `("qty" * "unit_cents")`. All exit 101.
+- the `rename_expr_table` call in `fold_to_field_defs` disabled: divergence-2 test fails on
+  `{"name":"qty","table":"line_items"}`. Exit 101.
+- `is_engine_computed_column` guard disabled: the SQLite fixture fails on
+  `("total_cents", "total_cents")` in the copy list. Exit 101.
+
+### Gates
+
+All by EXIT CODE. fmt 0, clippy `--workspace --all-targets -D warnings` 0.
+`cargo test --workspace --exclude zero-migrate-node` 0 with both live DSNs and
+`ZERO_MIGRATE_REQUIRE_LIVE_DB=1`; `f664_scaling` ran and passed rather than tripping its
+wall-clock guard. `cargo test -p zero-migrate-node --no-default-features` 0.
+`pnpm install --frozen-lockfile` 0, `pnpm -w build` 0, `zero-migrate` check 0 / test 0,
+`zero-migrate-cli` typecheck 0 / test:docs 0, node addon rebuilt from THIS tree then
+`test:host` 0 (453 passed).
+
+NO GOLDEN CHANGED. `git status` after the whole change lists four sources, one edited test
+and two new tests - no golden file, regenerated or otherwise. Worth stating, because the
+`GeneratedColumnSnapshot` change is exactly the shape that moved the
+`build_table_snapshot_is_byte_stable_*` Debug goldens last time. It did not here: those
+goldens carry no generated column, so the new field never reaches their printed output.
+
+SQLite and MySQL round trips run inside the workspace gate above, which is where the
+`generated`-bearing round-trip oracles live; exit 0 covers them. Probe schema `probe_gen`
+dropped and the drop verified by re-querying `pg_namespace`; the per-test schemas clean
+themselves through `SchemaGuard` and none matching `zm_gen_expr%` remain.
