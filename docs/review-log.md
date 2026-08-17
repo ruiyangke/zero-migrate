@@ -26133,3 +26133,139 @@ could only hold while nothing compared an ordinary default, and it cannot distin
 "the parens drifted" from "the stored value drifted". Split into the two questions it was
 conflating: redundant grouping stays clean, the changed value is now reported. Said loudly
 here because editing an existing assertion to pass is the move that needs justifying.
+
+## Structural drift: the generated column, and the two things a normaliser cannot reach
+
+Two gaps were assigned, both left open by the ordinary-default change, and both were
+answered by driving fold -> apply -> mutate out of band -> introspect -> diff against live
+PostgreSQL 18.4 rather than by reading. Reading is what produced the wrong answer twice
+here, so every claim below names the measurement that settles it.
+
+### Gap 1 - the GENERATED column. Half reducible, and the half that is not is not the half the pin predicted.
+
+The pin in `drift_plain_column_default_pg` said the obstacle was the deparse:
+`pg_get_expr` returns `(gen_src + 1)` where the renderer emits `(("gen_src" + 1))`. That
+is true and it is not the obstacle. Measured against the shared expression fingerprint,
+the catalog's injected cast and added parentheses ALREADY normalise away -
+`("note" <> 'a')` and `(note <> 'a'::text)` land on keys that differ only in whether the
+identifier is quoted, which is a rule away from closing. `expression_fingerprint_already_absorbs_what_the_catalog_injects`
+pins that measurement so nobody re-derives it.
+
+The real obstacle is the column RENAME, and it is fatal:
+
+```text
+ALTER TABLE t RENAME COLUMN qty_on_hand TO amount_on_hand;
+fold ->  ("qty_on_hand" + 1)
+live ->  (amount_on_hand + 1)
+```
+
+Two different column NAMES, not two spellings of one thing. Normalisation reduces
+spellings. The fold cannot repair its own side either: `GeneratedColumnSnapshot::expr` is
+rendered TEXT, and `fold_ops`'s `Op::RenameColumn` arm rewrites structured name lists
+only. Substituting the name inside the text would corrupt a real generated column -
+`(note || 'qty_on_hand'::text)` is one, measured on the same server - which is the exact
+false positive `IndexSnapshot::expr_cascade_columns` exists to avoid.
+
+I had this backwards after reading. `render/fold.rs` DOES rewrite a generated expression
+on rename, soundly, over the closed `Expr`... in `fold_to_field_defs`, the gen-types
+descriptor fold. `fold_ops`, which builds the `SchemaSnapshot` the differ compares, is a
+different function and does not. One `eprintln` of both folded snapshots settled it.
+
+So the EXPRESSION stays declined, verdict (b), and the boundary is now stated in the
+predicate with that measurement rather than the deparse one.
+
+What IS reducible is the fact the expression was hiding: whether the column is generated
+at all. `pg_attribute.attgenerated` is ONE CHAR - `''` / `'s'` / `'v'` - stored
+structurally, so no renderer is involved on either side and there is nothing for
+`pg_get_expr` to rewrite. It is the same property that makes an
+`IndexElementSnapshot::Column` comparable where an `Expr` key is not, and the same
+property `comparable_vendor_objects` relies on for a `polcmd` code.
+
+`ColumnSnapshot::generated_kind` now carries it, `comparable_generated_column` is the
+FIFTH member of the family, and `ALTER COLUMN derived DROP EXPRESSION` - which turns a
+column the application cannot write into an ordinary writable one while leaving its name,
+type and nullability untouched - reports `generated: stored -> ""`. RED before GREEN:
+with the differ unchanged the new assertion failed on `altered_objects: []`.
+
+`None` means THIS PRODUCER DID NOT LOOK, which is why the enum spells `NotGenerated`
+rather than reusing `Option<bool>`; the whole subject of the comparison is a column that
+stopped being generated, and that has to be a value a producer can assert. MySQL and
+SQLite introspection leave it `None` and decline. Both engines DO record the facet
+(`EXTRA` / `PRAGMA table_xinfo.hidden`), so that is a closable gap rather than a wall, and
+the cost of leaving it - a MySQL/SQLite `DROP EXPRESSION` equivalent stays invisible - is
+written at both sites.
+
+The compiler's exhaustive-initializer error found the one site that would have
+false-drifted every FTS-enabled collection: `fts_objects_pg` builds a real
+`GENERATED ALWAYS AS (...) STORED` column but rides its expression on `default` behind a
+`GENERATED:` prefix, so it never passes through `column_snapshot_for_field`. It asserts
+`Stored` explicitly. The regenerated Debug goldens show exactly 24 `NotGenerated` and 1
+`Stored`, which is the independent confirmation that it took.
+
+### Gap 2 - index expression keys and partial-index predicates. Verdict (b), and it stays a boundary.
+
+Same measurement, same conclusion, and it is the SAME defect wearing different clothes:
+`IndexSnapshot::predicate` and the `Expr` element are rendered text over which a rename
+cannot be replayed, so comparing them would make every column rename permanent drift no
+apply can clear. `fold_rename_column_stale_index_body_pg` already pins both sides of that
+divergence separately. The verdict is now recorded IN
+`index_expression_bodies_are_comparable`, including the part that is only ALMOST closable,
+so the next reader does not have to rediscover that the cast is not the problem.
+
+The two assertions that file weakened to index SURVIVAL were already restored by the
+change that introduced the predicate - both read `drift.is_clean()` today. Nothing to
+restore; recorded so it is not looked for again.
+
+### What the gap-2 measurement turned up on the way: a live false drift
+
+`WHERE TRUE` on a partial index reported drift on the FIRST introspection after a clean
+apply, forever, with nothing in the history but the `createIndex` that built it:
+
+```text
+index noop_predicate_true  predicate  expected "TRUE"  actual ""
+```
+
+PostgreSQL discards a bare constant-`TRUE` predicate at CREATE INDEX time - `indpred` is
+NULL and the index is total - while the fold has no server to ask and projects what it was
+authored with. The presence comparison then read `Some` against `None`.
+
+This half IS reducible, and by exactly the technique the brief asked about: reduce both
+sides through one key rather than declining, sound because the SERVER defines the
+reduction. `effective_index_predicate` is that key. The rule is as narrow as the
+measurement - on 18.4 only the bare constant is dropped, and `FALSE`, `(1 = 1)` and
+`(TRUE AND TRUE)` all survive verbatim, so widening it to "anything tautological" would
+invent the divergence it removes. `drift_noop_index_predicate_pg` pins the false-drift
+control, pins the `(qty > 0)` predicate PostgreSQL keeps, and pins that an index which
+genuinely loses its predicate out of band still reports - without that last arm a differ
+that simply stopped looking at predicates would pass. RED before GREEN on the real path.
+
+### On making the server the normaliser
+
+Evaluated and rejected. Having the fold render its expression and asking PostgreSQL to
+deparse it - a throwaway relation, or a parse/deparse round trip - would put both sides in
+server spelling and genuinely close the cast and quoting divergence. It does not close the
+rename, which is what actually blocks both gaps, so it buys the half already free. And it
+costs the property the fold exists for: `fold_ops` is a pure offline function that every
+`gen-types` and planning path calls without a database. Requiring a live connection to
+compute the EXPECTED side would make the expected snapshot unavailable exactly where it is
+most needed - authoring, CI without a database, and the offline round-trip oracles. Not
+taken. What that costs is stated above: an expression rewritten in place, on a generated
+column or an index, stays unreported.
+
+### Gates
+
+fmt 0, clippy 0. `cargo test --workspace --exclude zero-migrate-node` exit 0 (186 test
+binaries, 3058 passed), at load average 26 falling to 10; `f664_scaling` ran and passed
+under that load rather than tripping its wall-clock guard. `cargo test -p zero-migrate-node
+--no-default-features` 0. `pnpm -w build` 0 (after a `pnpm install --frozen-lockfile` the
+fresh worktree needed), `zero-migrate` check 0 / test 0, `zero-migrate-cli` typecheck 0 /
+test:docs 0, node addon rebuilt from THIS tree then `test:host` 0 (453 passed).
+
+The first workspace run exited 101 on the two `build_table_snapshot_is_byte_stable_*`
+Debug goldens, which is the new field appearing in the print. Regenerated through the
+`UPDATE_SNAPSHOT_GOLDENS=1` path the file provides; the diff is 75 added lines and nothing
+else. Said out loud because a regenerated golden is an edited assertion.
+
+SQLite and MySQL round trips were run before the gates, not after: `fold_roundtrip_sqlite`,
+`fold_roundtrip_pg`, `sqlite_drift`, `drift_id_facets_pg` and `declarative_sqlite` all
+clean. Probe schemas dropped and the drop verified by count.
