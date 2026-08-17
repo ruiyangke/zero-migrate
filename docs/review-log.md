@@ -26011,3 +26011,125 @@ and editing only the site that surfaced would have left the tree stating both ve
 
 fmt 0, clippy 0, doc 0; 84 targets / 2335 passed / 0 failed / 0 ignored, unchanged from the previous
 commit, which is what a comment-only change should produce.
+
+## F876 - a column DEFAULT that both sides recorded and nothing compared
+
+Closes the drift half of #876. `crates/zero-migrate/src/apply/drift.rs`,
+`crates/zero-migrate/tests/drift_plain_column_default_pg.rs`,
+`crates/zero-migrate/tests/sqlite_drift.rs`.
+
+### The lead, and what reading could not settle
+
+The per-column diff inside `diff_snapshots_with_index_aliases` compared a default only
+when the EXPECTED column carried a semantic `id_default`, and otherwise fell through to
+what the code called a "backward-compatible parsed-nextval seam". Reading suggests that
+seam returns `None` on both sides for a plain literal, so nothing is pushed - but reading
+cannot tell "not reached" from "reached and declined", and every other field on the
+column has some path that quietly re-establishes it.
+
+### The measurement
+
+Live PostgreSQL 18.4, through the real path rather than a hand-built snapshot: fold the
+IR, apply the lowered DDL, mutate out of band with raw SQL inside a transaction,
+introspect, `diff_snapshots`, roll back. Five mutations, and the drift report for every
+one of them:
+
+    ALTER COLUMN qty        SET DEFAULT 7            (was 42)      -> clean, altered: []
+    ALTER COLUMN no_default SET DEFAULT 99           (had none)    -> clean, altered: []
+    ALTER COLUMN label      DROP DEFAULT             (was 'active')-> clean, altered: []
+    ALTER COLUMN label      SET DEFAULT 'inactive'                 -> clean, altered: []
+    ALTER COLUMN gen_col    SET EXPRESSION AS (gen_src + 2)        -> clean, altered: []
+
+The same probe printed what each side actually held, which is what separates a real blind
+spot from a boundary:
+
+    EXPECTED qty   default=Some("42")        LIVE qty   default=Some("7")
+    EXPECTED label default=Some("'active'")  LIVE label default=Some("'active'::text")
+    EXPECTED gen_col generated=true          LIVE gen_col generated=false
+
+So four of the five are REAL blind spots with both ingredients present, and the fifth is a
+different animal: live introspection never collects a generated expression at all.
+
+### Why a byte compare would have been worse than the gap
+
+`label` is the trap in one line. PostgreSQL deparses from the parse tree, so the authored
+`'active'` reads back as `'active'::text`. Measured on the same server:
+
+    DEFAULT 'active'      -> 'active'::text
+    DEFAULT '{}'          -> '{}'::jsonb
+    DEFAULT current_user  -> CURRENT_USER
+    DEFAULT 1.50          -> 1.50
+    GENERATED ALWAYS AS (("gen_src" + 1)) STORED -> (gen_src + 1)
+
+Comparing authored text against catalog text reports permanent drift on every text and
+JSON default in the tree, on migrations nobody has touched.
+
+### What was done
+
+`comparable_column_default` is the fourth member of the family
+`constraint_definition_is_comparable`, `index_expression_bodies_are_comparable` and
+`comparable_vendor_objects` belong to. It reduces the raw text on BOTH sides through
+`catalog_id_default` - the semantic key the ID-default surface already uses - so
+`'active'` and `'active'::text` land on one fingerprint. That is sound precisely because
+`pg_get_expr` is idempotent: normalising the catalog read a second time is a no-op, so the
+same normaliser can be applied to the authored render.
+
+It declines in two places, both documented at the function:
+
+* `Expression` on either side. That arm fingerprints DEPARSED text, and the two sides do
+  not produce text the same way - the offline renderer quotes every identifier and knows
+  no column types. Same refusal, same reason, as the CHECK body and the index expression
+  key.
+* No introspected-dialect evidence on the actual snapshot. The literal fingerprint is
+  dialect-sensitive; MySQL's `COLUMN_DEFAULT` arrives with its quotes already stripped. A
+  `nextval` still compares there, because its key is a sequence identity, not a spelling.
+
+The seam it replaces is gone rather than kept alongside. `nextval` is now one arm of the
+new key, so the case the seam existed for is covered by the thing that replaced it.
+
+### The other nine fields `ColumnSnapshot::PartialEq` excludes
+
+The exclusion list was the lead, not the finding - `diff_snapshots` compares explicitly,
+so being outside `PartialEq` says nothing on its own. Per field:
+
+* `default` - REAL, fixed above.
+* `generated` - a REAL gap, and left open deliberately. Live PostgreSQL reads
+  `attgenerated` only to keep a generated expression out of the default surface and stores
+  nothing, so neither the expression nor the generated-ness is compared:
+  `SET EXPRESSION AS (source + 2)` and `DROP EXPRESSION` both measured completely clean.
+  Closing it needs introspection that COLLECTS the expression AND a sound way to compare
+  it, and the measurement above shows the second half is the `constraint_definition_is_comparable`
+  problem again - `(gen_src + 1)` against the renderer's `(("gen_src" + 1))`. Pinned in the
+  fixture with a failure message that says to replace the pin when it closes.
+* `inline_checks` - a coherent BOUNDARY. On PostgreSQL its only content is the
+  TypeID/ULID/UUID format CHECK, and that projects into `value_format`, which IS compared
+  as the `format` field - `drift_id_facets_pg` proves it by dropping and by rewriting the
+  CHECK and getting a `format` line for each. Live introspection stores the field empty on
+  all three dialects, so comparing it directly would report every authored format CHECK as
+  drift.
+* `catalog_uuid_format_check`, `mysql_text_storage`, `mysql_physical_type`,
+  `mysql_default_generated` - introspection-only metadata with no authored counterpart.
+  Two of them are already CONSUMED rather than compared: `mysql_physical_type` by
+  `column_data_types_eq`, and `mysql_default_generated` by the new predicate.
+* `ddl_type_override`, `encryption_sentinel`, `comment_sentinel` - assessed by reading, not
+  measured, and flagged as such. `ddl_type_override` holds PostgreSQL's `format_type`
+  spelling on the live side against an authored spelling on the other, with `data_type` as
+  the deliberate comparison key.
+
+### Gates
+
+fmt 0, clippy 0. `cargo test --workspace --exclude zero-migrate-node` 0 on the first run;
+on a repeat at load average 13-20 it exited 101 with `f664_scaling` alone failing its
+wall-clock ratio guard (3.3x and 3.2x against a 3.0x ceiling), which is the false failure
+that guard's own message warns about. Standalone at load average 11, all four passed,
+exit 0. Both outcomes recorded rather than one re-run until green. Node crate 0. `pnpm -w
+build` 0, `zero-migrate` check 0 / test 0 (326 passed, 1 skipped), `zero-migrate-cli`
+typecheck 0 / test:docs 0, node addon build 0, `test:host` 0 (453 passed).
+
+The SQLite and MySQL round trips were run first and caught exactly the shape the brief
+warned about: `sqlite_drift`'s `ordinary_default_cosmetic` case changed the SPELLING and
+the VALUE at once - `'draft'` against `('published')` - and asserted the pair clean. It
+could only hold while nothing compared an ordinary default, and it cannot distinguish
+"the parens drifted" from "the stored value drifted". Split into the two questions it was
+conflating: redundant grouping stays clean, the changed value is now reported. Said loudly
+here because editing an existing assertion to pass is the move that needs justifying.
