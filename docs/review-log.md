@@ -27739,3 +27739,198 @@ schema was dropped and the drop VERIFIED by re-querying `pg_namespace`: the coun
 start and 331 at the end, and a `LIKE 'f883%'` sweep returns zero rows. The probe publication was
 dropped by name and `pg_publication` is empty; `pg_extension` holds only `plpgsql`, as it did at
 the start.
+
+---
+
+## An injected system column could not carry a collation, and `ORDER BY id` paid for it
+
+A downstream consumer reported that `InjectColumn` has four fields - name, type, nullable,
+default - and no collation slot, so a charter that injects `id` / `created_by` /
+`updated_by` cannot pin one and the columns land on the DATABASE's default collation. Their
+ids are a prefix plus base62 of a UUIDv7, so byte order IS creation order; under
+`en_US.utf8` the upper- and lower-case runs of base62 interleave and `ORDER BY id` stops
+being creation order. Dev is SQLite, whose default is already bytewise, so it reproduces
+only against a deployed PostgreSQL and it fails SILENTLY.
+
+The report left one question open and said so: whether an AUTHORED column can express a
+collation today, and therefore whether the fix is a new `InjectColumn` field or reuse of
+something that already exists. That question is the whole entry.
+
+### What the two paths actually emit
+
+Measured by running the real lowering path, not by reading it.
+
+```text
+  authored, valueFormat: {typeId: {prefix: "note"}}
+    PG      "id" text COLLATE "C" PRIMARY KEY NOT NULL CHECK (...)
+    SQLite  "id" TEXT COLLATE BINARY ... CHECK (...)
+    MySQL   `id` VARCHAR(191) CHARACTER SET ascii COLLATE ascii_bin ... CHECK (...)
+
+  charter-injected { name = "id", type = "text", nullable = false }
+    PG      "id" character varying(255) PRIMARY KEY NOT NULL
+    SQLite  "id" TEXT
+    MySQL   `id` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_as_cs
+```
+
+So the gap is real, and it is WIDER than reported. MySQL's `utf8mb4_0900_as_cs` is
+case-SENSITIVE but linguistic, not bytewise, so MySQL has the same silent defect PostgreSQL
+does. The report named PostgreSQL because that is what the consumer deploys.
+
+### The answer to the open question: NEITHER, and the reason matters
+
+The first reading of the evidence was that the engine already solves this and the injected
+path simply cannot reach the solution - `value_format.rs` emits `text COLLATE "C"` for
+TypeID and ULID columns, so teach `InjectColumn` to carry a value format. That reading is
+WRONG, and measurement is what refutes it:
+
+  * the engine's TypeID alphabet is Crockford base32 LOWERCASE
+    (`0123456789abcdefghjkmnpqrstvwxyz`). The consumer's ids are base62, MIXED CASE - that
+    is precisely why their upper and lower runs interleave. Attaching `ValueFormat::TypeId`
+    would emit a CHECK every existing and future row FAILS. It does not merely fail to fit;
+    it would break the table.
+  * `created_by` / `updated_by` are actor stamps. They have no value format at all, and the
+    consumer pins `COLLATE "C"` on them too.
+  * a value format also carries a length, an alphabet, an `id_default` classification and a
+    CHECK, because its subject is what a column may HOLD. The subject here is only how a
+    column COMPARES.
+
+And the answer to the literal question the reporter asked - can an authored column express
+a collation today? - is NO. `IrColumn` had no collation field. The ONLY route to
+`COLLATE "C"` was as a side effect of declaring a TypeID or ULID value format; `fold.rs`
+said so in as many words ("the ONE fold-side writer of this field is `value_format`'s
+`bytewise_catalog_collation`"). So this was never an inject-only hole.
+
+The sharpest evidence sits in `IrColumn::id_prefix`'s own doc, which describes the legacy
+platform-ID format as `<prefix>_<22 base62 UUIDv7>` - VERBATIM the consumer's format. An
+author who declares that prefix today gets `character varying(255)` with no collation,
+measured. The engine already knew this column holds base62 ids and still ordered it by the
+server's locale.
+
+So the fix is a NEW facet, but not the inject-only one the report proposed: a per-column
+collation INTENT on `IrColumn`, which the charter's new `InjectColumn::collation` maps onto.
+It rides the seam the value formats already use - `ddl_type_override` plus
+`ColumnSnapshot::collation` - so it inherits their drift comparison and their live
+introspection for free.
+
+### Why an intent and not a collation name
+
+A charter is ONE document that has to be sound on PostgreSQL, MySQL and SQLite. `C` means
+nothing to the other two. So the wire token is `collation = "bytewise"`, a closed enum on
+both the charter and the IR, and each dialect spells it:
+
+```text
+  PG      COLLATE "C"                                (catalog identity pg_catalog."C")
+  SQLite  COLLATE BINARY                             (already the default; snapshot None)
+  MySQL   CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin
+```
+
+Two of those spellings were argued rather than assumed. MySQL is `utf8mb4_0900_bin`, not the
+legacy `utf8mb4_bin`, because the legacy one is PAD SPACE - `'x' = 'x '` - which is a real
+hazard on a primary key; and it keeps `utf8mb4` rather than copying the value formats'
+`CHARACTER SET ascii`, because those earn ascii from a CHECK proving the content is ascii
+and this facet has no such proof. Narrowing the charset would turn a silent ordering bug
+into a loud rejected INSERT on a `created_by` holding a non-ascii name. SQLite's snapshot
+collation stays `None` because introspection canonicalizes BINARY to `None`; writing `Some`
+there would make every such table drift on its first read.
+
+A closed enum also keeps an author-supplied string out of emitted DDL, and moves the
+rejection to charter LOAD, with the TOML line, where an operator can still fix it.
+
+### The test measures ROW ORDER, because the defect is row order
+
+A test that greps the emitted statement for `COLLATE "C"` measures how the engine spells
+itself. `injected_column_collation.rs` inserts four ids whose byte order is known, reads
+them back with `ORDER BY id`, and compares sequences against a live PostgreSQL 18.4 whose
+`datcollate` is `en_US.utf8` - the reporter's own production shape, confirmed by querying
+`pg_database` before trusting any ordering result.
+
+RED, before the fix, failed for the right reason and not a setup error:
+
+```text
+  ORDER BY id must be creation order under a pinned bytewise collation on a
+  en_US.utf8 database; got ["...aaa", "...AAA", "...zzz", "...Zzz"]
+```
+
+That is the interleave itself, produced by engine-emitted DDL against a real server.
+
+The neuter check is PERMANENT rather than a one-off.
+`injected_id_without_a_pinned_collation_loses_creation_order` pins that the SAME fixture
+with the collation removed still comes back WRONG, and both legs refuse to run at all on a
+`C` or `POSIX` database. Without that, a differently configured test database would let the
+fixed test pass while proving nothing - which is the exact failure this defect is made of.
+
+The live leg also diffs the folded snapshot against a fresh introspection of the created
+schema. A fix that emits the right DDL and then reports the schema as drifted is not a fix,
+and the two writers of `ColumnSnapshot::collation` had to be shown to agree.
+
+### Conformance: the check had to change, and the reason is the defect itself
+
+`InjectColumn`'s doc says it drives the II.2.6b conformance check. The collation JOINS that
+comparison. An author column matching an injected slot on name, type, nullability and
+default but NOT on collation would otherwise be judged conforming and left verbatim -
+operator-shaped on paper, author-ordered in the database. That is the silent divergence this
+facet exists to end, and reproducing it inside the check would have been the worst possible
+place for it.
+
+Nothing currently admitted starts being denied: no charter in existence carries the key, so
+both sides resolve to `None` until an operator EDITS the charter, which is the same edit
+that would start denying. A control pins that direction too.
+
+Worth stating plainly because it is easy to assume otherwise: this tightens the STRUCTURED
+resolver only. The guard's raw-create admit compares column NAMES and the pinned key order
+and never looked at type, nullability or default either, so a raw `CREATE TABLE` without the
+collation is admitted exactly as it was. That gap predates this work and is not closed here.
+
+### What this does not cover
+
+  * `addColumn` does not accept the facet. A column added to an existing table cannot pin a
+    collation; only `createTable` columns can. Stated in `docs/policy.md` as a boundary.
+  * The descriptor path (`FieldDescriptor`) and the TypeScript authoring lexicon have no
+    verb for it either. The charter is the authoring surface today.
+  * A `setColumnType` AWAY from a collated column drops the collation, which is what
+    PostgreSQL itself does. Drift reports it rather than staying silent; the column has to
+    re-declare it. The `SetColumnType` comment in `fold.rs` was updated to say there are now
+    two writers of that snapshot field, that both write the same bytewise identity, and that
+    the re-derive-from-target-type rule still holds.
+
+### A second opinion, and where it went
+
+The design was put to a second model before any code was written, because a policy/charter
+surface is expensive to walk back. Codex was the intended reviewer and was unavailable
+(usage limit), so the review ran on a different model instead; that substitution is recorded
+rather than hidden.
+
+It AGREED on the shape - closed intent over raw name, facet on `IrColumn` rather than
+inject-only, collation inside the conformance check - and CORRECTED two things this entry
+now reflects: `utf8mb4_0900_bin` over `utf8mb4_bin` for the PAD SPACE reason, and a
+conflation of `system_columns_match` with the guard's name-only raw-create admit. It also
+found the `id_prefix` connection independently. Where it and this branch differ: it
+suggested the descriptor and DSL authoring verbs could be deferred, and they were.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0
+```
+
+The Rust workspace ran with `ZERO_MIGRATE_TEST_PG_URL` set, so the live legs executed rather
+than skipping (198 `test result: ok` lines, none FAILED). The addon was rebuilt from this
+tree before the host suite, which reported 453 tests, 377 passed, 0 failed, 76 skipped.
+
+Disk was checked before each gate run; it went from 80% used with 198G free to 94% with 65G
+free, which is above the stop-line and worth watching rather than acting on. Every probe
+schema was dropped and the drop verified by re-querying `pg_namespace`: the count was 331
+before the first live run and 331 after the last, with no `injected_collation_*` schema
+left behind. No extension was created; `pg_extension` holds only `plpgsql`.
