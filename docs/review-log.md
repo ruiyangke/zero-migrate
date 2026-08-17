@@ -27081,3 +27081,372 @@ Disk was checked before each gate run (79% used, 201G free at the last one) and 
 probe schema was dropped and the drop verified by re-querying `pg_namespace` - the
 count was 331 before and after. No extension was created; `pg_extension` holds only
 `plpgsql`, as it did at the start.
+
+## F877 - the ops whose emitted SQL no live database ever runs, and three retypes that die mid-apply
+
+Two of the week's worst defects (`3903a98e`, `59a0b238`) shared one signature: both were
+in SQL the engine EMITS, both cleared `validate` and `preview`, and both died partway
+through `apply` against a real server. While fixing the second, `59a0b238` recorded
+something larger than its own bug: "no golden in the tree pins an `ALTER COLUMN ... TYPE`
+statement at all". An entire emitting path had no coverage, and when someone finally
+looked at it, it held two half-migration bugs.
+
+This entry is the inventory that question deserves: for every op the IR can express, is
+the SQL it emits ever EXECUTED against a live PostgreSQL / MySQL / SQLite by any test?
+Lowered and string-compared does not count. Pinned in a golden does not count. Validated
+or previewed does not count. Only execution would have caught either defect.
+
+### How coverage was determined
+
+Not by grep. Grep cannot answer this: the live suites author their IR as JSON strings and
+fixture helpers, so the `Op::` variant name mostly does not appear in the test that
+applies it. A grep for `Op::` over the 54 live-PG test files finds ten distinct variant
+names; the measurement below finds 67 PG tokens actually executing. Grep would have
+understated PG coverage nearly sevenfold, and it cannot distinguish an op that is
+MENTIONED in a fixture from one that reaches a server.
+
+Coverage was MEASURED, by instrumenting the engine and running the suites:
+
+  * a temporary recorder in `lower_one_op` remembers `rendered statement -> op kind/variant`
+    for every op that lowers, keyed on the statement TEXT (text survives the plan-relative
+    version restamping an `Op::RenameColumn` step undergoes, so it is a sounder join key
+    than the migration version);
+  * a matching hook at every backend execution seam (`apply_one` in `executor.rs`, and
+    `rebuild_one` / `alter_primary_key` / `synchronize_identity` / `run_backfill_step` /
+    `run_dml_step` / the PG expand leg in `engine.rs`) appends `dialect, op, test binary`
+    to a trace file the moment the statement comes back from the server;
+  * both suites were run under it: `cargo test -p zero-migrate --tests` (exit 0) and, after
+    rebuilding the addon from this tree, `pnpm --filter zero-migrate-cli test:host`.
+
+The instrumentation is NOT part of this branch. It was reverted before the gates ran; it
+is described here so the measurement can be repeated.
+
+TWO SUITES, NOT ONE. The first pass instrumented only the Rust suite and produced a
+confident, WRONG headline: "the MySQL emitter is never executed against a live server".
+It is executed - by `packages/zero-migrate-cli/tests/host/`, which the Rust trace cannot
+see. Any coverage claim from this method is a claim about the SUITES THAT WERE TRACED.
+
+### What the method cannot see (the false-negative risk, stated plainly)
+
+  * **Unattributed executions.** Statements the DECLARATIVE differ produces never pass
+    through `lower_one_op`, so they carry no op identity and land as `?unattributed`.
+    They are a real fraction of the trace. An op marked NO below is therefore an UPPER
+    BOUND on the gap: it means "no execution was observed carrying this op's identity",
+    never "this SQL shape never ran". Where it mattered, the claim was checked a second
+    way (see the SQLite section, where the second check overturned the first reading).
+  * **Down/rollback SQL is not traced.** Only `up` is recorded. The `*_rollback_pg` tests
+    do execute `down` SQL against a live server; this table says nothing about it.
+  * **Statement-text collisions.** Two ops emitting a byte-identical statement in one
+    process would be attributed to whichever lowered first. Not observed, but possible.
+  * **A test that calls a BACKEND METHOD directly is invisible.** The hooks sit at the
+    engine's step loop and at `execute_pending`, so a test that reaches past
+    `apply_plan` into `SqliteBackend::rebuild_one` executes real DDL against a real
+    database and contributes NOTHING to the trace. `sqlite_rebuild_apply.rs` is exactly
+    that shape and produced zero rows. This one was caught by asking which binaries the
+    unattributed rows came from; there may be others.
+  * **A cell says the SQL RAN, not that anything CHECKED it.** Execution is the floor
+    this inventory measures, not an assertion about correctness.
+
+### The inventory
+
+Rows are the `(op kind, payload variant)` tokens of the generated dialect table
+(`crates/zero-migrate/src/model/dialect_table.rs`), which is the engine's own authority on
+what is supported where. `-` is the engine's declared Unsupported (nothing to cover);
+`yes` is OBSERVED EXECUTING against a live server; `NO` is not observed.
+
+| op kind / variant | PG | SQLite | MySQL |
+| --- | --- | --- | --- |
+| addColumn/base                           | yes | yes | yes |
+| addColumn/identity                       | NO  | -   | -   |
+| addColumn/nextvalDefault                 | NO  | -   | -   |
+| addConstraint/check                      | yes | -   | -   |
+| addConstraint/exclusion                  | yes | -   | -   |
+| addConstraint/fkComposite                | yes | NO  | NO  |
+| addConstraint/fkNoLocalColumn            | -   | -   | -   |
+| addConstraint/fkNonId                    | yes | NO  | NO  |
+| addConstraint/fkNotValid                 | yes | -   | -   |
+| addConstraint/fkSimple                   | yes | NO  | NO  |
+| addConstraint/unique                     | yes | NO  | yes |
+| alterPrimaryKey/base                     | yes | yes | yes |
+| alterRole/base                           | NO  | -   | -   |
+| alterSequence/base                       | yes | -   | -   |
+| attachPartition/base                     | yes | -   | -   |
+| backfill/base                            | NO  | NO  | NO  |
+| comment/base                             | yes | -   | -   |
+| createDomain/base                        | yes | NO  | NO  |
+| createDomain/nextvalDefault              | NO  | -   | -   |
+| createEnum/base                          | yes | NO  | NO  |
+| createExtension/base                     | yes | -   | -   |
+| createFunction/base                      | yes | -   | -   |
+| createIndex/base                         | yes | yes | yes |
+| createIndex/exprElement                  | yes | yes | -   |
+| createIndex/partialWhere                 | yes | yes | -   |
+| createIndex/pgOnlyMethodOrFeature        | yes | -   | -   |
+| createPartition/base                     | yes | yes | NO  |
+| createPolicy/base                        | yes | -   | -   |
+| createRole/base                          | yes | -   | -   |
+| createRole/superuserIfNotExists          | -   | -   | -   |
+| createSchema/base                        | yes | -   | -   |
+| createSequence/base                      | yes | -   | -   |
+| createTable/base                         | yes | yes | yes |
+| createTable/identityAlways               | NO  | -   | -   |
+| createTable/nextvalDefault               | yes | -   | -   |
+| createTable/nonportableByDefaultIdentity | yes | -   | -   |
+| createTable/partitioned                  | yes | -   | -   |
+| createTable/partitionedCollapse          | yes | yes | yes |
+| createTable/pgOnlyIndexFeature           | yes | -   | -   |
+| createTrigger/bodyInsteadOf              | -   | NO  | -   |
+| createTrigger/bodyMultipleEvents         | -   | NO  | -   |
+| createTrigger/bodyRaiseIgnore            | -   | yes | -   |
+| createTrigger/bodySimple                 | -   | NO  | yes |
+| createTrigger/bodyStatementLevel         | -   | -   | -   |
+| createTrigger/bodyTruncateEvent          | -   | -   | -   |
+| createTrigger/bodyWhen                   | -   | yes | -   |
+| createTrigger/executeFunction            | yes | -   | -   |
+| createView/base                          | yes | yes | yes |
+| createView/materialized                  | yes | -   | -   |
+| createView/materializedReplace           | -   | -   | -   |
+| delete/base                              | yes | yes | yes |
+| detachPartition/base                     | yes | -   | -   |
+| dialectal/base                           | NO  | NO  | NO  |
+| dropColumn/base                          | yes | yes | NO  |
+| dropColumnDefault/base                   | yes | -   | NO  |
+| dropColumnNotNull/base                   | yes | -   | -   |
+| dropConstraint/base                      | yes | NO  | yes |
+| dropDomain/base                          | yes | NO  | NO  |
+| dropEnum/base                            | yes | NO  | NO  |
+| dropExtension/base                       | yes | -   | -   |
+| dropFunction/base                        | yes | -   | -   |
+| dropIndex/base                           | yes | yes | NO  |
+| dropOwnedBy/base                         | yes | -   | -   |
+| dropPartition/base                       | yes | yes | NO  |
+| dropPolicy/base                          | yes | -   | -   |
+| dropRole/base                            | yes | -   | -   |
+| dropSchema/base                          | yes | -   | -   |
+| dropSequence/base                        | yes | -   | -   |
+| dropTable/base                           | yes | yes | yes |
+| dropTrigger/base                         | yes | NO  | NO  |
+| dropView/base                            | yes | yes | yes |
+| dropView/materialized                    | NO  | -   | -   |
+| grant/base                               | yes | -   | -   |
+| insert/base                              | yes | yes | yes |
+| insert/onConflictDoNothing               | NO  | yes | -   |
+| insert/onConflictDoUpdate                | yes | yes | yes |
+| pgRaw/base                               | NO  | -   | -   |
+| renameColumn/base                        | yes | yes | -   |
+| renameColumn/existenceGuard              | -   | -   | -   |
+| renameTable/base                         | yes | yes | NO  |
+| revoke/base                              | yes | -   | -   |
+| setColumnDefault/base                    | yes | NO  | NO  |
+| setColumnDefault/containerOrJson         | NO  | NO  | NO  |
+| setColumnDefault/nextval                 | NO  | -   | -   |
+| setColumnNotNull/base                    | yes | -   | -   |
+| setColumnType/base                       | yes | NO  | NO  |
+| setColumnType/using                      | -   | -   | -   |
+| setRls/base                              | yes | -   | -   |
+| setTableOptions/base                     | NO  | NO  | NO  |
+| synchronizeIdentity/base                 | yes | NO  | yes |
+| update/base                              | yes | yes | yes |
+| validateConstraint/base                  | yes | -   | -   |
+
+Trace volume: 654 executions from the Rust suite (222 unattributed) and 1025 from the host
+suite (43 unattributed), over 92 dialect-table tokens. Observed executing: 67 of 80
+supported PG tokens, 23 of 43 SQLite, 16 of 36 MySQL.
+
+Every `yes` in that table is OBSERVED: a statement that came back from a live server
+carrying that op's identity. Every `NO` is an INFERENCE from absence, bounded by the
+caveats above. Every `-` is the engine's own declaration, read from the generated table,
+not measured.
+
+### Reading the table
+
+**`dialectal` and `pgRaw` are EXPECTED absences, not gaps.** `dialectal` is a container
+that expands into per-dialect legs before lowering, and `pgRaw` is a verbatim passthrough.
+Neither can ever execute under its own name; the legs a `dialectal` selects DO appear, and
+`dialectal_ops.rs` executes them live. Recording them as "NO" would be an artefact of the
+instrument, not a finding.
+
+**`setTableOptions` emits no SQL by construction** (a metadata-only runtime-option change
+that participates in the fold and lowers to nothing). "NO" is correct and uninteresting.
+
+**Genuinely never observed, on a dialect where the engine declares support:**
+
+```text
+  addColumn/identity            PG    an ADD COLUMN carrying an identity facet
+  addColumn/nextvalDefault      PG    an ADD COLUMN defaulting to nextval()
+  createTable/identityAlways    PG    GENERATED ALWAYS AS IDENTITY at create time
+  createDomain/nextvalDefault   PG    a domain whose default is nextval()
+  setColumnDefault/nextval      PG    SET DEFAULT nextval()
+  setColumnDefault/containerOrJson  all three
+  dropView/materialized         PG    DROP MATERIALIZED VIEW
+  alterRole/base                PG    ALTER ROLE
+  backfill/base                 all three
+  synchronizeIdentity           SQLite
+  insert/onConflictDoNothing    PG
+  createTrigger/bodySimple      SQLite   (bodyWhen and bodyRaiseIgnore DO execute)
+  createTrigger/bodyInsteadOf, bodyMultipleEvents   SQLite
+  the SQLite and MySQL columns of addConstraint/*, dropConstraint, createEnum,
+    dropEnum, createDomain, dropDomain, dropTrigger, setColumnDefault, setColumnType
+  the MySQL columns of dropColumn, dropIndex, dropPartition, renameTable,
+    createPartition, dropColumnDefault
+```
+
+`backfill/base` deserves a caveat rather than a place on that list: the host suite has
+`backfill-selective-cohort.test.ts`, and a `Backfill` step is journalled by its version
+rather than by a rendered statement, so the hook's join key is weakest exactly there. Treat
+it as unresolved by this method, not as proven uncovered.
+
+### Phase 2 - what the server said about the top of that list
+
+The ranking heuristic came from what actually broke: an op that emits a clause
+CONDITIONALLY, that interacts with a column facet, and that is rarely authored.
+`setColumnType` sits at the top of all three - it is the renderer `59a0b238` found two
+half-migration bugs in, its `USING` clause is now conditional on a facet, and no golden
+pins it. It is marked `yes` for PG above, so it is now covered in the sense this inventory
+measures. That coverage is one shape.
+
+Four probes were run against live PostgreSQL through the REAL path (author -> lower ->
+`MigrationEngine::apply_plan`, engine-emitted SQL, never hand-written DDL). THREE MORE
+HALF-MIGRATIONS, each of which cleared the authoring gate - `load_and_lower_guarded`
+returned a plan, so `validate`, the guard and the lower all passed, and `preview` renders
+that same plan - and then died against the server:
+
+```text
+  a column a VIEW reads
+    emitted  ALTER TABLE "s"."t" ALTER COLUMN "v" TYPE bigint USING "v"::bigint
+    server   cannot alter type of a column used by a view or rule
+
+  a column with a DEFAULT that cannot cast to the new type
+    emitted  ALTER TABLE "s"."t" ALTER COLUMN "v" TYPE integer USING "v"::integer
+    server   default for column "v" cannot be cast automatically to type integer
+
+  a column another GENERATED column reads
+    emitted  ALTER TABLE "s"."t" ALTER COLUMN "v" TYPE bigint USING "v"::bigint
+    server   cannot alter type of a column used by a generated column
+```
+
+The third is worth singling out. `lower.rs` already carries a comment asserting that
+PostgreSQL "refuses to alter a column a generated column reads at all", and calls that case
+"Unreachable through this replay today". It is reachable: an ordinary two-op envelope gets
+there, and the doc comment is the only thing standing between the operator and the failure.
+
+**It is a HALF migration, not merely a failed one.** Measured, not assumed. One envelope
+carrying `addColumn` then the failing `setColumnType`:
+
+```text
+  emitted  ALTER TABLE "s"."t" ADD COLUMN "survivor" text
+           ALTER TABLE "s"."t" ALTER COLUMN "v" TYPE bigint USING "v"::bigint
+  server   cannot alter type of a column used by a view or rule
+  pg_attribute afterwards:  id, v, survivor
+```
+
+The `ADD COLUMN` committed in its own transaction and stayed. The operator is left with a
+table that is neither the old shape nor the new one.
+
+### The obvious fix is wrong, and the server said so
+
+`Op::DropColumn` already stamps a `Precondition::ColumnHasNoBlockingDependents` on its
+lowered unit, evaluated under the project lock by a measured `pg_depend` predicate
+(`PostgresBackend::blocking_column_dependents`). Reusing it verbatim on `setColumnType`
+looks like a one-line root-cause fix. It is not. The oracle was run against live
+PostgreSQL beside the server's own verdict, one table per companion object:
+
+```text
+  companion            drop-column oracle    ALTER COLUMN ... TYPE
+  view                 blocks                REFUSED
+  generated reader     blocks                REFUSED
+  CHECK constraint     allows                accepted
+  UNIQUE (composite)   allows                accepted
+  plain index          allows                accepted
+  column DEFAULT       allows                accepted
+  no companion         allows                accepted
+  FK TARGET COLUMN     BLOCKS                ACCEPTED     <- disagreement
+```
+
+Seven of eight agree. The eighth does not: a column another table's FOREIGN KEY points at
+is a blocker for a DROP and is NOT a blocker for a RETYPE. Wiring the existing precondition
+straight in would refuse a migration PostgreSQL honours - the exact trap `59a0b238` named
+when it chose to fix the renderer rather than refuse the op.
+
+The fix this calls for is a retype-specific predicate: the same `pg_depend` walk with
+`classid <> 'pg_constraint'::regclass`, which reproduces the server's verdict on all eight
+measured companions (view via `pg_rewrite`, generated reader via `pg_attrdef`, every
+constraint-shaped companion allowed). That needs a new `Precondition` variant, and
+`Precondition` is a WIRE type: adding a variant touches `zero-migrate-ir`, the evaluator,
+the lower, `ir-envelope.schema.json` and `ir_envelope_schema.rs`. That is a deliberate
+authorable-surface change, and it is not one to land in the tail of a measurement session.
+
+### What is NOT fixed
+
+All three. They are recorded here measured, with the server's exact words, the emitted
+statement, the proof that the schema half-applies, and the measured boundary any fix has to
+respect - which is the part that took the work. `3f2873e6` recorded two defects the same
+way and `59a0b238` fixed them from that record. The uncastable-DEFAULT case is a third
+mechanism again: no dependency walk sees it, because the blocker is the value, and only the
+server can say whether a default casts.
+
+### SQLite: the lead that did not survive contact
+
+The reading that several column ops meaningful on SQLite are never applied live is TRUE of
+the trace and MISLEADING as a finding. Measured through the real path against a real
+temp-file SQLite:
+
+```text
+  setColumnType, setColumnDefault, addConstraint, dropConstraint
+      AUTHORING REFUSED - "needs the 12-step table rebuild, which this path cannot
+      emit ... Refusing rather than emitting a partial rebuild"
+  dropColumnDefault, setColumnNotNull, dropColumnNotNull, comment
+      AUTHORING REFUSED at the dialect gate
+  createEnum, dropEnum, createDomain, dropDomain, synchronizeIdentity, setTableOptions
+      apply cleanly
+```
+
+For every column-shaped op measured, the IR-op lane on SQLite FAILS CLOSED before any SQL
+reaches the database. That is a refusal, not a half-migration, and it is the opposite of
+the defect class this session was hunting. The last line is the residue that IS a real
+coverage gap rather than a refusal: `createEnum`, `dropEnum`, `createDomain`, `dropDomain`,
+`synchronizeIdentity` and `setTableOptions` reach live SQLite and apply cleanly, and until
+this probe ran, nothing had ever executed them there. They are still uncovered by the
+suites; they are now known to work. The 12-step rebuild itself IS exercised
+against live SQLite - by the DECLARATIVE lane, in `sqlite_rebuild_apply.rs` (type change,
+nullability tighten, rename, mask survival, FK-check abort), which drives
+`SqliteBackend::rebuild_one` directly and so contributes no rows to the trace at all.
+That file is the reason the "the SQLite rebuild is uncovered" reading is wrong, and the
+reason had to be found by reading rather than by the instrument. A measured non-defect.
+
+One asymmetry is worth recording even though it is not a bug: the dialect table declares
+`setColumnType/base` and `setColumnDefault/base` PORTABLE on SQLite, so `validate` accepts
+them, and the lower then refuses. The operator gets a clear message and an untouched
+database, so nothing is at risk; the two gates simply disagree about what "supported" means
+on that dialect, and the table is describing the declarative lane.
+
+### Gates
+
+This branch changes no code. The instrumentation that produced the table was reverted
+before the gates ran (`git status` clean but for this file), so the gates re-verify the
+tree as `59a0b238` left it, and the exit codes below are read as exit codes rather than
+inferred from suite counts:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (453 passed, 0 failed)
+```
+
+The addon was rebuilt from this tree before the host suite ran, both for the gate and for
+the trace; the staleness guard in `tests/host/addon.ts` caught a first attempt where it had
+not been, which is the only reason that trace is trustworthy. `f664_scaling` passed inside
+the workspace run at load average 14 to 42 and was not re-run.
+
+Disk was checked before each gate run (86% used, 142G free at the last one). Every probe
+schema was dropped and the drop verified by re-querying `pg_namespace`: the count was 331
+at the start and 331 at the end. No extension was created; `pg_extension` holds only
+`plpgsql`, as it did at the start.
