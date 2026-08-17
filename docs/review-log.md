@@ -26452,3 +26452,153 @@ SQLite and MySQL round trips run inside the workspace gate above, which is where
 `generated`-bearing round-trip oracles live; exit 0 covers them. Probe schema `probe_gen`
 dropped and the drop verified by re-querying `pg_namespace`; the per-test schemas clean
 themselves through `SchemaGuard` and none matching `zm_gen_expr%` remain.
+## A changed function BODY was invisible to structural drift
+
+`comparable_vendor_objects` compares a function by IDENTITY ONLY - schema, name, and
+the canonicalised argument vector. The live catalog read never fetched a body:
+`drift.rs` contained no reference to `prosrc`, `prosqlbody` or `pg_get_functiondef`.
+So `CREATE OR REPLACE FUNCTION` run out of band with the SAME signature and a
+DIFFERENT body reported the schema CLEAN. Replacing the body without touching the
+signature is the ordinary way a function is modified, so this was the common case,
+not an edge case.
+
+### The premise that had to be re-measured, and how it split
+
+The vendor-object work excluded function bodies, policy `USING`/`WITH CHECK` and
+trigger `WHEN` together, on the grounds that PostgreSQL does not store SQL as
+written. Re-measured on live PostgreSQL 18.4, that single claim is two claims and
+only one of them holds:
+
+```text
+  CREATE FUNCTION f1(x int) ... LANGUAGE sql AS $$ SELECT x+1 $$
+      prosrc = [ SELECT x+1 ]            VERBATIM, incl. the delimiter spaces
+  CREATE FUNCTION f3() ... LANGUAGE plpgsql AS $$BEGIN
+     RETURN   42;
+  END$$
+      prosrc = [BEGIN\n   RETURN   42;\nEND]   VERBATIM, odd whitespace kept
+  CREATE FUNCTION f4() ... AS $outer$ ... $tag$he said $$hi$$ to me$tag$ ... $outer$
+      prosrc keeps the nested $tag$ and the literal $$ untouched
+  CREATE FUNCTION f5(x int) ... AS ' SELECT x*2 '
+      prosrc = [ SELECT x*2 ]            a plain quoted body is verbatim too
+  CREATE POLICY p1 ON t USING (note <> 'a' AND owner = current_user)
+      pg_get_expr -> ((note <> 'a'::text) AND (owner = CURRENT_USER))
+                                         DEPARSED: cast injected, keyword
+                                         uppercased, parens added
+```
+
+PostgreSQL keeps a `LANGUAGE sql`/`plpgsql` body as an OPAQUE STRING and hands it to
+the language handler at call time; a policy predicate is a parse tree `pg_get_expr`
+re-prints. So the body needs no normaliser and the predicates cannot have one.
+Policies and triggers stay where they are - they are genuinely in the irreducible
+class, and the fingerprint-reduction technique does NOT trivially close them: the
+authored side holds a closed `Expr` with no deparser to meet the catalog text with,
+which is the same parse-the-catalog-text-back-to-the-AST work foreign keys already
+get. Not attempted here.
+
+### The exception, and it is a real one
+
+```text
+  CREATE FUNCTION f2(x int) RETURNS int LANGUAGE sql BEGIN ATOMIC SELECT x+1; END
+      prosrc = []   prosqlbody IS NOT NULL
+```
+
+A SQL-standard-body function keeps its body as a PARSE TREE in `prosqlbody` and
+leaves `prosrc` EMPTY. Comparing an authored body against `""` would report every
+such function as drifted on every run. `FunctionIdentity::from_catalog` declines
+DETECTABLY - empty `prosrc` WITH a non-null `prosqlbody`, never empty `prosrc` alone,
+because a genuinely empty body and a body that lives elsewhere are different claims.
+`comparable_function_body` in `drift.rs` is the sixth named member of the
+comparability family, and the five siblings now cross-reference it.
+
+### The trim is forced by OUR renderer, not by PostgreSQL
+
+The brief's guess was that an exact compare should already agree because PostgreSQL
+preserves whitespace exactly. Measured on the real path, it does not, and the cause
+is on our side. `render/vendor.rs` emits `AS $zsfn$\n{body}\n$zsfn$`, so what the
+catalog stores is never the authored string:
+
+```text
+  authored body   SELECT x + 1
+  prosrc          [\nSELECT x + 1\n]
+```
+
+Proved load-bearing rather than argued: with the trim removed and nothing else
+changed, the false-drift control fails on ALL FOUR functions of an untouched schema,
+each differing only by that leading and trailing newline. Trimming both sides is the
+smallest reduction that survives; asserting `prosrc == format!("\n{body}\n")` is
+tighter but pins drift to one renderer's padding, and a function created by
+`Op::PgRaw` or by hand chooses its own delimiter spacing. What the trim gives up is
+a rewrite that changes ONLY outer whitespace, which cannot change what the function
+computes. Whitespace INSIDE the body is untouched and compared.
+
+### Both sides, and the last body
+
+`SchemaSnapshot::functions` already held the authored body: `FunctionSnapshot.body`
+is the raw authored string, kept as rollback history. So the expected side needed no
+new plumbing, only projection. `VendorObjectIdentities::functions` became a
+`BTreeMap<FunctionKey, FunctionIdentity>` - the shape `policies` and `triggers`
+already had, where the key asks "does this overload exist" and the value asks "is it
+still the same function". BOTH sides are populated in the same change and neither
+alone; SQLite and MySQL leave `vendor_objects` at `None` and are untouched.
+
+On `CREATE OR REPLACE` in the authored history: the fold's `Op::CreateFunction` arm
+ends in an unconditional `functions.insert`, so a replace overwrites and the expected
+side holds the LAST body. Measured rather than read - the fixture authors
+`replaced_body` twice, and PostgreSQL's `prosrc` for it is `SELECT 2`, matching. An
+assertion pins the last body specifically, so a fold that kept the first would fail.
+
+### RED evidence, per assertion
+
+Fixture first, on the real path (fold -> lower -> apply -> mutate out of band with
+raw SQL -> introspect -> diff), and it compiled and ran against the unmodified tree:
+
+* Against `bcaaf013`, `CREATE OR REPLACE ... SELECT x + 999` produced
+  `StructuralDrift { missing: [], unexpected: [], altered: [] }` - the defect,
+  reproduced.
+* Neuter the trim: the clean control fails on all four functions with
+  `expected "SELECT x + 1"` against `actual "\nSELECT x + 1\n"`.
+* Neuter the `BEGIN ATOMIC` decline (compare `unwrap_or("")`): the atomic leg fails
+  with `body: "SELECT x + 1" -> ""`, plus the unit test in both directions.
+* Neuter the body comparison itself: the four replace legs fail and the two new unit
+  tests split correctly - `a_replaced_function_body_is_reported_as_drift` FAILED,
+  `a_begin_atomic_body_declines_rather_than_reporting_false_drift` ok.
+
+`drift_function_body_pg` also asserts, at every leg, that the function did not fall
+out of the IDENTITY pairing. Without that, a mutation that made the two sides key
+differently would make every decline assertion pass VACUOUSLY.
+
+### False-drift control
+
+Apply, change nothing, assert clean - with the dollar-quoted body (`$tag$he said
+$$hi$$ to me$tag$`, which would corrupt first if anything tried to unwrap the
+renderer's own `$zsfn$` tag), the odd-internal-whitespace plpgsql body, the plain
+`LANGUAGE sql` body, and the twice-authored replaced body. Clean. `BEGIN ATOMIC`
+cannot be in that control because the IR cannot express one - the renderer always
+emits `AS $zsfn$ … $zsfn$` - so it is reached the only way a real project reaches it,
+a hand-run `CREATE OR REPLACE` converting an authored function into one, and the
+assertion is that nothing is reported and the pairing survives.
+`fold_roundtrip_pg::trigger_and_function_lifecycle`, the pre-existing control that
+already folds a real function against a live catalog, stayed green throughout.
+
+### An edited test, said out loud
+
+`vendor_object_drift.rs` had to change: its module doc asserted **IDENTITY, NEVER
+BODIES**, which this measurement contradicts for functions. The doc now states the
+split and why the predicates keep the old answer. The `.functions` inserts changed
+shape because the field did. No existing ASSERTION was weakened - two were added.
+
+### Gates, exit codes
+
+fmt 0, clippy 0. `cargo test --workspace --exclude zero-migrate-node` exit 0 (191
+suites ok, 0 failed); `f664_scaling` ran and passed rather than tripping its
+wall-clock guard. `cargo test -p zero-migrate-node --no-default-features` 0.
+`pnpm -w build` 0, `zero-migrate` check 0 / test 0 (326 pass, 1 skipped),
+`zero-migrate-cli` typecheck 0 / test:docs 0, node addon rebuilt from THIS tree then
+`test:host` 0 (453 pass). NO GOLDEN CHANGED - the working tree holds only the three
+source files, the two test files, and the new fixture.
+
+SQLite and MySQL round trips were run before the gates, not after: `fold_roundtrip_sqlite`,
+`fold_roundtrip_pg` (21), `sqlite_drift` (16), `vendor_object_drift` and
+`vendor_object_drift_pg` all clean. Probe schema `zm_probe_body` dropped and the drop
+verified by count, along with four stray `public` functions an early fixture created
+before it was schema-qualified.
