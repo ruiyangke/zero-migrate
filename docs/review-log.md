@@ -28184,3 +28184,208 @@ path at all.
 Disk was checked before each gate run. It fell from 198G free to 27G across the cargo
 and release builds; `target/debug` (40G) was removed before the host suite, which
 returned it to 170G. It never approached the 10G floor.
+
+## A rename moved the column and left its CHECK naming the old name
+
+### The lead, and whether it held
+
+Secondhand claim: `sqlite_rename_rebuild` follows a rename into `ColumnSnapshot::
+generated` and not into `ColumnSnapshot::inline_checks`, one field over in the same
+function. Confirmed by MEASUREMENT rather than by reading, through the real lowering of a
+real `renameColumn` against the live schema shape `engine::refresh_historical_live`
+builds:
+
+```sql
+CREATE TABLE "issues__zero_migrate_rebuild" (
+  ..., "state" TEXT NOT NULL CHECK ("status" IN ('UNCONFIRMED','CONFIRMED','status')),
+  "status_id" TEXT, ...)
+```
+
+The column is `state`. Its CHECK still says `status`.
+
+### What SQLite does when handed it, measured rather than argued
+
+Applied for real through `SqliteBackend`, with the pre-apply assertions removed so the
+statement actually reached the engine:
+
+```text
+sqlite rebuild of 'issues' failed: sqlite migration statement failed:
+  no such column: "status" - should this be a string literal in single-quotes?
+  in CREATE TABLE "issues__zero_migrate_rebuild" (...) at offset 172
+```
+
+A FAILED MIGRATION, not a corrupted schema, and the distinction is bought by one
+setting. The hardened open sequence turns off `SQLITE_DBCONFIG_DQS_DDL`, so the unknown
+quoted token is an error naming the column instead of being demoted to the string
+literal `'status'` - which in THIS fixture would have made the predicate
+`'status' IN ('UNCONFIRMED','CONFIRMED','status')`, a constant TRUE, and shipped a table
+whose membership constraint silently enforces nothing. `sqlite_dqs_hardening.rs` already
+names `inline_checks` as one of the two carriers whose severity it holds down; this is
+that claim coming true. The `CREATE TABLE` leads the rebuild's statement spec, so the
+failure lands inside the transaction before any value is copied.
+
+### The recorded boundary, tested rather than inherited
+
+The claim handed over was "reachable only on the fold-seeded path, because a catalog-read
+live snapshot carries `stored_create_sql`". It holds, and it holds for a STRONGER reason
+than the one recorded. A SQLite catalog read sets `inline_checks: Vec::new()` outright
+(`apply::backend::sqlite::drift_sql`), so the field the rewrite acts on is EMPTY on that
+leg before `stored_create_sql` is consulted at all. Both halves are pinned:
+`a_catalog_sourced_rename_still_replays_the_stored_body` asserts the emptiness AND that
+the replay arm still reproduces the stored body naming the PRE-rename column, then
+applies it and shows SQLite's own `RENAME COLUMN` rewriting the predicate afterwards.
+That test passes identically with the fix on and off, which is what makes it a boundary
+pin rather than a second copy of the fix's own test.
+
+One correction to the record: the boundary is not only the rebuild's. The FOLD's
+`Op::RenameColumn` arm produces the stale body too - it renames `ColumnSnapshot::name`
+and leaves `inline_checks` alone - and `fold_ops` over the cumulative history is what
+`refresh_historical_live` hands to the NEXT migration's rebuild. So a history containing
+two renames is broken in a way the rebuild's own rewrite cannot repair: it only knows the
+rename it is lowering, and by then the body already says `status` while the rebuild is
+looking for `state`. Both sites are fixed, and each was neutered separately to prove each
+is load-bearing.
+
+### The fix, and why it is the one thing this crate refuses everywhere else
+
+`rename_column_in_generated_columns` walks the closed `Expr` the snapshot keeps beside
+its rendering. That machinery does NOT fit here and cannot be made to: `inline_checks` is
+a `Vec<String>` of already-rendered SQL whose four producers (the SQLite enum membership,
+the domain check, the UUID writer, the TypeID/ULID writer) keep no AST, and two of them
+overwrite `data_type` / `ddl_type_override` in the same breath, discarding the type name
+that produced the check. There is nothing to walk and nothing complete to re-render from.
+`ColumnSnapshot::inline_checks`' own docstring says so, and it is right.
+
+So this is TEXT SURGERY on SQL, which is refused everywhere else in this crate, and the
+refusal's reason is exactly the trap this fixture is built around: a SQLite enum
+membership is `CHECK ("status" IN ('UNCONFIRMED','CONFIRMED','status'))`, where the same
+word is both a column reference and a member literal. `rename_quoted_column_in_sql` walks
+the fragment as QUOTED RUNS, so a `'…'` literal is copied through whole and can never be
+seen as an identifier; the decoded identifier is matched EXACTLY, so `"status_id"` is not
+a `"status"`; a BARE `status` is not rewritten at all, because every producer quotes and
+an unquoted word could be a keyword. It carries the same ROUND-TRIP GUARD the fold's
+constraint-definition rewrite carries - re-quoting the decoded name must reproduce the
+original run byte for byte, and an unterminated run abandons the fragment - so a body the
+walk misreads is left STALE rather than CORRUPT. Seven unit tests pin those
+discriminations one at a time.
+
+It is safe to rewrite this field IN PLACE for a reason worth stating, because it is not
+true of the field next door: `inline_checks` is excluded from `ColumnSnapshot`'s
+hand-written `PartialEq`, so the rewrite cannot change what `pure_sqlite_column_rename`
+sees and cannot flip `preserve_stored_shape` off on the catalog leg.
+
+### The audit: every other rendered body a rename could have left behind
+
+The brief asked for a third instance, on the grounds that a third would move the fix to a
+different altitude. There is one, and it is measured, not suspected.
+
+```text
+CONSTRAINT "issues_owner_id_fkey" FOREIGN KEY (owner_id) REFERENCES owners(id) ...
+```
+
+emitted by the same rebuild for a table whose column is now `holder_id`. It needs a
+co-resident inline CHECK (or generated, or case-insensitive) column to select the snapshot
+renderer, and then it is the same defect one field further over. The fold's
+`Op::RenameColumn` arm already rewrites that definition through
+`rename_constraint_definition_column`; the rebuild does not.
+
+It is NOT fixed here, and the reason is the altitude finding rather than a shrug.
+`ConstraintSnapshot`'s `PartialEq` COMPARES `definition`. Rewriting it in
+`sqlite_rename_rebuild` changes what `pure_sqlite_column_rename` compares, turns
+`preserve_stored_shape` off, and stops the CATALOG path - the one that actually deploys -
+from replaying its stored body. The rename-follow has to run AFTER that decision, which is
+a restructuring of the seam, not an addition to it. Recorded in the code at the exact line
+where the call would otherwise go.
+
+Three carriers audited and found NOT exposed, so the list is closed rather than merely
+unfinished:
+
+```text
+  table-level CHECK    fold refuses it on SQLite:  "createTable table-level CHECK is
+                       PostgreSQL-only"
+  table-level UNIQUE   fold refuses it on SQLite:  "...a table-level UNIQUE is not
+                       threaded into the emitter"
+  default              cannot reference a column on SQLite; measured intact as
+                       "summary" TEXT NOT NULL DEFAULT 'status' beside a renamed
+                       `status` column
+```
+
+`TableSnapshot::indexes` is not exposed through this seam either - the fold-seeded
+rebuild spec comes back with `recreate_objects: []` - and the fold arm rewrites index
+keys already. The mask and encryption sentinels carry no column name at all
+(`kind=…,classification=…` and `mode:keyId:wraps`).
+
+### The pin that encoded the bug
+
+`enum_membership_reaches_no_second_check.rs` asserted
+`create.contains(r#""state" TEXT NOT NULL CHECK ("status" IN ("#)` as CURRENT BEHAVIOUR.
+That assertion is REVERSED, not deleted: it now requires the post-rename name and adds
+the negative. The file's subject is the membership lift, not the rename, and it keeps the
+assertion because the lift must not reintroduce the stale spelling by another route. Its
+docstring says which way it was flipped and why, so a reader hitting it in `git log`
+sees a deliberate reversal rather than a mystery.
+
+### Neuter
+
+With `rename_column_in_inline_checks` returning early, and nothing else changed:
+
+```text
+  rename_column_inline_check_sqlite.rs
+      a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_...     FAILED
+          CHECK ("status" IN (...)) on a column named "state"
+      a_second_rename_starts_from_a_folded_body_the_first_...         FAILED
+          no such column: "status" ... at offset 172   (the real apply)
+      a_catalog_sourced_rename_still_replays_the_stored_body          ok
+  enum_membership_reaches_no_second_check.rs
+      a_sqlite_rebuild_carries_the_membership_exactly_once            FAILED
+          CHECK ("status" IN ('UNCONFIRMED','CONFIRMED','RESOLVED'))
+```
+
+Each failure names the stale column, which is the reported symptom - not a compile error
+and not a fixture typo. The catalog-leg pin still passes, which is the point of it: a
+test that failed here would be measuring the fix rather than the boundary.
+
+Neutered the FOLD call site alone, leaving the rebuild's:
+
+```text
+      a_sqlite_rename_rebuild_emits_a_check_body_over_the_new_...     ok
+      a_second_rename_starts_from_a_folded_body_the_first_...         FAILED
+          the FOLD followed the rename into the CHECK body:
+            ["CHECK (\"status\" IN ('UNCONFIRMED', 'CONFIRMED', 'status'))"]
+```
+
+Both sites are independently load-bearing, so neither call is decoration.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (326 pass, 0 fail, 1 skip)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0   (6 pass, 0 fail)
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (455 pass, 0 fail, 0 skip)
+```
+
+The addon was REBUILT from this tree before the host suite. Both live DSNs were exported
+for the workspace run and for the host suite, so the PostgreSQL and MySQL legs EXECUTED -
+`pg_scenarios` alone ran 61, and the host suite reports 0 skipped, against 153 skipped on
+a first run with the DSNs unset. That first run is not counted above; a suite that skips
+a third of itself proves nothing about the dialects it skipped.
+
+PostgreSQL and MySQL cannot reach the changed rebuild at all - it is the SQLite arm - and
+their emitters build a desired snapshot from descriptors rather than from a renamed clone
+of live, so the fold-side call cannot reach their DDL either. `f664_scaling` did not
+flake.
+
+Disk was checked before each gate run. It fell to 8.5G during the second cargo test gate,
+which is BELOW the 10G floor; `target/debug` (41G) was removed the moment that gate
+returned, which took it back to 50G, and the tree was verified intact afterwards. The
+pnpm gates ran from there and it never fell below 49G again.
