@@ -26860,3 +26860,224 @@ from a run made after space was reclaimed, and the three modified sources plus t
 two new fixtures were re-verified non-empty and re-built clean afterwards - a
 disk-full truncation has already destroyed a source file once this session while the
 edit tool reported success.
+
+## A retype of an identity or a generated column cleared validate, cleared preview, and died mid-apply
+
+The previous entry recorded two refusals PostgreSQL makes that this engine did not,
+measured and deliberately not fixed. Both are the same defect class and the worst
+one this codebase can produce: the plan passes every offline gate, the operator
+approves it, and the server rejects a statement partway through applying, leaving a
+half-migrated schema behind. Reproduced first, through the real path
+(`MigrationEngine::apply_plan` over the engine's own emitted SQL, not hand-written
+DDL), on live PostgreSQL 18.4:
+
+```text
+  op                                   validate  preview  apply
+  identity int  -> text                PASS      PASS     DIED: identity column type
+                                                                must be smallint,
+                                                                integer, or bigint
+  generated int -> bigint              PASS      PASS     DIED: cannot specify USING
+                                                                when altering type of
+                                                                generated column
+  generated int -> text                PASS      PASS     DIED: (same)
+  identity int  -> bigint  (control)   PASS      PASS     applied
+  ordinary int  -> bigint  (control)   PASS      PASS     applied
+```
+
+Both gaps were real. Neither is closed by the same treatment.
+
+### The two are NOT the same refusal, and measuring the difference decided the fix
+
+The brief asked which of two candidate fixes gap 2 wants - refuse the op, or stop
+emitting `USING` - and said to settle it against the server rather than reason about
+it. The server settled it, both ways, and the answers are opposites:
+
+```text
+  ALTER TABLE t ALTER COLUMN g TYPE bigint USING g::bigint   -- g GENERATED AS (c0)
+    ERROR:  cannot specify USING when altering type of generated column
+    DETAIL:  Column "g" is a generated column.
+  ALTER TABLE t ALTER COLUMN g TYPE bigint                   -- no USING
+    ALTER TABLE                        -- and attgenerated is still 's'
+  ALTER TABLE t ALTER COLUMN g TYPE text                     -- no USING
+    ALTER TABLE                        -- attgenerated still 's'
+
+  ALTER TABLE t ALTER COLUMN i TYPE text USING i::text       -- i GENERATED AS IDENTITY
+    ERROR:  identity column type must be smallint, integer, or bigint
+  ALTER TABLE t ALTER COLUMN i TYPE text                     -- no USING
+    ERROR:  identity column type must be smallint, integer, or bigint
+```
+
+So gap 2 is OURS: PostgreSQL honours the change and refuses only the clause this
+engine attached unconditionally. It recomputes the generated expression under the
+new type, which is precisely why it will not take a cast of the old stored value.
+Refusing the op would have denied a migration the database accepts and honours,
+which this codebase does not do. Fix (b), the renderer, is correct.
+
+Gap 1 is the SERVER's: dropping the clause changes nothing, so no spelling of the
+statement is deployable and the op has to be refused at authoring time.
+
+The permitted identity set is exactly PostgreSQL's three, measured rather than
+inferred. `numeric(10,0)` is refused, and so is a DOMAIN over `integer` - the server
+checks the type itself, not what it is built on - while `int -> bigint` AND
+`int -> smallint` both apply with `attidentity` intact. A refusal any broader would
+be worse than the gap.
+
+### The facet the previous entry called for does not need to exist
+
+Both gaps were recorded as needing "a facet `LogicalColumnContracts` does not
+carry". Measured, that is wrong in the direction that matters: the two facts are
+ALREADY carried, on `ColumnSnapshot`, by the producers that matter here.
+`apply::drift`'s PostgreSQL catalog read fills `identity` from
+`pg_attribute.attidentity` and `generated_kind` from `attgenerated`, and the offline
+fold sets both alongside. `LogicalColumnContracts` would in fact have been the WRONG
+carrier: `engine.rs` resets `logical_columns` from the catalog snapshot after every
+envelope and only re-seeds it on SQLite, so on PostgreSQL - the only dialect where
+either rule bites - it is empty across artifacts, exactly where the ordinary case
+lives. Nothing was threaded through `authoring_tables_from_ops`, `fold_to_field_defs`
+or `fold_ops`; none of the three replays is involved.
+
+What the lower did lack is a way to ask the question. `LiveSchema::column_generation`
+is that ask, and it answers over BOTH routes a contract can arrive by:
+
+```text
+  route                 carrier                                 covers
+  declared-in-envelope  LiveSchema::declared_column_generation   createTable / addColumn
+                        (advanced as each op lowers)             earlier in THIS op list
+  live                  LiveSchema::table_snapshots              a column an EARLIER
+                        (identity / generated_kind)              migration created
+```
+
+Neither subsumes the other and both are pinned by their own fixture leg, because a
+fix reading only one closes half the gap. Cost: one `Copy` two-bit struct, one map
+on `LiveSchema`, one advance call at the top of `lower_one_op`, one in the preview's
+per-op loop. The preview call is not decoration - `render_ir_ops` lowers each op in
+ISOLATION, so without it the preview would print an ordinary-column retype for a
+shape apply lowers differently, which is the divergence that function's per-op
+tolerance is otherwise careful to avoid.
+
+### What the neuter measured that the design did not predict
+
+Neutering `declared_column_generation` alone left EVERY create-then-retype test
+passing. The lower's `createTable` arm already publishes the whole desired
+`TableSnapshot` into `table_snapshots` as it lowers, so that shape was answered by
+the live map even with no live database. `addColumn` publishes nothing, and neither
+do `dropColumn` / `renameColumn` / `renameTable` / `dropTable`. So the map's real
+job is narrower than it first looked, and the fixture now names it: an identity
+column ADDED and then retyped in one envelope is the leg that fails without it. The
+`createTable` redundancy is kept deliberately and said out loud on the field, so
+`column_generation` can state one rule ("declared, else live") instead of a per-op
+rule about which map happens to know.
+
+That is also a caution for the next reader: this map is NOT the lower's model of the
+envelope. `table_snapshots` is, partially, and the two overlap by design.
+
+### The differ lane was broken the same way, and it is not the same code path
+
+`render_alter_column_type` serves two lanes. The authored `setColumnType` is one;
+the declarative differ, which emits the same statement when a declared column's type
+stops matching the live one, is the other. Measured rather than assumed: the differ
+lane emitted `ALTER TABLE "public"."a" ALTER COLUMN "v" TYPE bigint USING "v"::bigint`
+for a descriptor-declared generated column, and `... TYPE text USING "v"::text` for a
+declared identity column. Both die at the server identically. The `USING` fix lands
+in the shared renderer and covers both; the identity refusal needed a second,
+separate one (`DeclarativeError::IdentityColumnTypeUnsupported`) beside the existing
+MySQL alter-column refusal in the same loop. It keys on the LIVE identity property,
+not the desired one, because the statement runs against the column as it is now.
+
+### The other dialects, said rather than generalised from PostgreSQL
+
+Neither reaches this renderer, and each refuses for its own pre-existing reason, so
+the two verdicts above are PostgreSQL's alone:
+
+  * MySQL - `refuse_mysql_alter_column`: `setColumnType is not supported on MySQL`
+    (the engine renders alter-column DDL in PostgreSQL syntax and `MODIFY COLUMN`
+    needs the whole definition restated).
+  * SQLite - no native `ALTER COLUMN` at all; the op is refused at
+    `require_capability_for(NativeAlterColumn)` and a type change is reconciled by
+    the 12-step rebuild instead. The rebuild already keeps a generated column out of
+    its value-copy list via `is_engine_computed_column` - the SAME predicate this fix
+    reuses for the `USING` decision - so no cast question arises there.
+
+Asserted for all three column shapes, so a future dialect gaining `ALTER COLUMN`
+trips the test rather than inheriting a rule nobody measured for it.
+
+### RED evidence, per neuter
+
+Fixtures first. The offline file was 2 failed / 4 passed against the unmodified
+tree, the 4 being the controls. Then each part of the fix neutered ALONE, left
+compiling, and the failure KIND read rather than the count:
+
+* `is_engine_computed_column` disabled in `render_alter_column_type`: offline, the
+  emitted `ALTER ... TYPE bigint USING "v"::bigint`; LIVE, both generated legs
+  `APPLY DIED: cannot specify USING when altering type of generated column` - the
+  server's words, through `apply_plan`.
+* the identity refusal disabled: offline, the same statement for a `text` target;
+  LIVE, `the refusal must land BEFORE anything applies ... Got: APPLY DIED:
+  identity column type must be smallint, integer, or bigint`.
+* the LIVE route disabled (the `table_snapshots` lookup): both across-envelope legs
+  died at the server, and the offline `live` route failed while
+  `declared-in-envelope` still passed - the two routes separated cleanly.
+* the DECLARED route disabled: everything still passed, which is the measurement
+  written up above; the added-column leg exists because of it and fails with
+  `ALTER TABLE ... ALTER COLUMN "v" TYPE text USING "v"::text` on an identity column.
+* the differ's identity refusal disabled:
+  `the differ must not plan an ALTER the server refuses: ["ALTER TABLE \"public\".\"a\"
+  ALTER COLUMN \"v\" TYPE text USING \"v\"::text"]`.
+
+### Over-refusal and over-suppression controls
+
+A refusal too broad is worse than the gap, and a suppression too broad breaks the
+retype the cast exists for. Both are pinned, offline and live:
+
+```text
+  identity int -> bigInt / smallInt / int    applies, attidentity still 'd', USING kept
+  ordinary column beside an identity column  retypes freely
+  ordinary int -> bigInt                     applies, USING kept
+  ordinary text -> int                       applies - and NEEDS the cast; PostgreSQL
+                                             has no implicit text -> integer coercion
+  differ: identity int -> bigInt             plans, USING kept
+```
+
+Every live leg additionally folds the applied ops and diffs them against the
+introspected catalog: apply, change nothing, assert clean. All clean, including the
+generated legs where `attgenerated` and the retyped `data_type` are read back from
+`pg_attribute` rather than trusted from the fold.
+
+### Two fixture defects that were findings, not workarounds
+
+The live fixture's first run failed twice for reasons that were real gates doing
+their job, and both are recorded on the code rather than papered over. A SECOND
+artifact touching a table the FIRST created is refused by the ownership gate unless
+the cross-artifact registry is handed to `load_and_lower_guarded` - which is what the
+deploy loop does with each artifact's created tables. And two different bodies
+deployed under one artifact name is checksum drift, refused on sight; the
+within-envelope legs now carry distinct names.
+
+### Goldens, and a test edited
+
+NO golden changed, and the reason is worth stating rather than reporting a clean
+diff: no golden in the tree pins an `ALTER COLUMN ... TYPE` statement at all, so the
+golden corpus never covered this renderer in either lane and could not have caught
+either gap.
+
+One existing test was edited and it is a construction change, not a premise change:
+`ir_rename_sqlite_basic.rs` builds a `LiveSchema` with an exhaustive struct literal,
+so the new field had to be named there. Nothing that fixture asserts moved; no op in
+it declares an identity or generated column.
+
+### Gates
+
+`cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+`cargo test --workspace --exclude zero-migrate-node` (3100 passed, 0 failed),
+`cargo test -p zero-migrate-node --no-default-features`, `pnpm -w build`,
+`pnpm --filter zero-migrate check` / `test`, `pnpm --filter zero-migrate-cli typecheck`
+/ `test:docs`, `pnpm --filter zero-migrate-node build` then
+`pnpm --filter zero-migrate-cli test:host` (453 passed) - every one exit 0, exit codes
+read rather than suite counts. The addon was rebuilt before the host suite ran, so
+that suite measured this tree. `f664_scaling` passed inside the workspace run at load
+average 3.0-8.5; it was not re-run.
+
+Disk was checked before each gate run (79% used, 201G free at the last one) and every
+probe schema was dropped and the drop verified by re-querying `pg_namespace` - the
+count was 331 before and after. No extension was created; `pg_extension` holds only
+`plpgsql`, as it did at the start.
