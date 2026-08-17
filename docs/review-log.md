@@ -27450,3 +27450,292 @@ Disk was checked before each gate run (86% used, 142G free at the last one). Eve
 schema was dropped and the drop verified by re-querying `pg_namespace`: the count was 331
 at the start and 331 at the end. No extension was created; `pg_extension` holds only
 `plpgsql`, as it did at the start.
+
+## F883 - a retype that died mid-apply now refuses before the plan starts, and the predicate that does it is not the one that was specified
+
+Lands the fix `518de22b` deferred. F877 measured three `Op::SetColumnType` cases that clear
+`validate`, the guard, the lower and `preview` and then die PART WAY THROUGH `apply` against a
+live PostgreSQL, leaving an earlier op in the same envelope committed. Two of the three are
+fixed and can no longer half-apply, along with two more nobody had looked for. The third cannot
+be fixed by any catalog predicate, and the measurement that shows why is the most useful thing
+here.
+
+Two things in the brief I was given were WRONG, and measuring is what caught both. They come
+first, because a fix built on either would have shipped a new defect.
+
+### The prescribed predicate OVER-REFUSES three shapes
+
+The brief specified the fix as "the same `pg_depend` walk with `classid <> 'pg_constraint'::regclass`",
+justified by an eight-row oracle. I re-ran that eight-row oracle first, and it reproduces
+exactly - including the FK-target row where the drop assertion and the server disagree:
+
+```text
+  companion            drop oracle   prescribed candidate   server ALTER COLUMN ... TYPE
+  view                 blocks        blocks                 REFUSED
+  generated reader     blocks        blocks                 REFUSED
+  CHECK constraint     allows        allows                 accepted
+  UNIQUE (composite)   allows        allows                 accepted
+  plain index          allows        allows                 accepted
+  column DEFAULT       allows        allows                 accepted
+  no companion         allows        allows                 accepted
+  FK TARGET COLUMN     BLOCKS        allows                 ACCEPTED
+```
+
+Eight for eight. The candidate looked right because none of those eight companions is an EXCLUDE
+constraint. Re-run it over the SIXTEEN shapes the DROP oracle already builds, and the prescribed
+predicate refuses three retypes PostgreSQL accepts:
+
+```text
+  column       prescribed predicate   server
+  excl_expr    BLOCKS                 accepted
+  excl_pred    BLOCKS                 accepted
+  excl_sep     BLOCKS                 accepted
+```
+
+The reason is structural, not a tuning error. `classid <> 'pg_constraint'` filters the drop
+predicate's FIRST leg and leaves its SECOND leg untouched, because that leg's blocker is an
+INDEX (`classid = 'pg_class'`) which a constraint internally owns. That leg is the entire reason
+the drop predicate is shaped the way it is - an EXCLUDE whose expression reads a column blocks a
+DROP - and PostgreSQL rebuilds that index for a retype and accepts it.
+
+So the second leg has no subject here and is ABSENT from what shipped. With constraints
+excluded, the drop predicate's "does this dependent also hold an AUTO edge" qualifier has no
+subject either: it was a rule ABOUT constraints, recording PostgreSQL's own intent to auto-drop
+the constraint rather than block on it. What shipped is one dependency leg - a NORMAL
+`pg_depend` edge from a non-`pg_constraint` dependent - plus two terms that are not dependencies
+at all.
+
+### The dependency walk also UNDER-refuses, and the brief does not mention it
+
+A `pg_depend` walk is the wrong SHAPE for two blockers. PostgreSQL refuses these in
+`ATPrepAlterColumnType` before any dependency is consulted:
+
+```text
+  ERROR:  cannot alter column "k" because it is part of the partition key of relation "plain_key"
+  ERROR:  cannot alter inherited column "b"
+```
+
+Neither leaves a blocking edge. A PARTITION KEY column has no dependency trace at all when the
+key is a plain column; when the key is an EXPRESSION the only trace is an INTERNAL SELF-dependency
+of the relation on its own column (`refobjid = objid`, `refobjsubid = 0`, `objsubid = attnum`,
+`deptype = 'i'`), measured on RANGE, LIST and expression keys alike. An INHERITED column is
+`attinhcount > 0` and nothing else, and it covers both a partition child and a plain `INHERITS`
+child. `has_partition_attrs` in the server reads exactly the two sources the shipped term reads.
+
+Both are reachable rather than theoretical: `createTable/partitioned` and `createPartition` are
+marked executing-against-a-live-server in F877's own inventory, three rows above the retype it
+went on to find bugs in.
+
+### The predicate, measured over 42 shapes
+
+Forty-two columns, each one the SHIPPED `PostgresBackend::column_type_change_blockers` run
+against the live server beside the server's own verdict for that same column. Forty-two
+agreements, 15 refused and 27 accepted. The accepted population carries as much weight as the
+refused one: a predicate that refused everything would agree with the server on all 15 refusals
+and be catastrophic, and only having both makes the agreement mean the predicate discriminates.
+
+```text
+  REFUSED, and the predicate names the blocker in the server's own wording
+    a generated column reads it       default value for column ... of table ...
+    a VIRTUAL generated column        default value for column ... of table ...
+    a view reads it                   rule _RETURN on view ...
+    a view of a view reads it         rule _RETURN on view ...
+    a materialized view reads it      rule _RETURN on materialized view ...
+    an RLS policy reads it            policy ... on table ...
+    a trigger's UPDATE OF names it    trigger ... on table ...
+    a non-view RULE reads it          rule ... on table ...
+    a publication column list         publication of table ... in publication ...
+    partition key, plain column       partition key of ...
+    partition key, LIST               partition key of ...
+    partition key, EXPRESSION         partition key of ...
+    inherited, partition child        inherited column of ...
+    inherited, plain INHERITS         inherited column of ...
+
+  ACCEPTED, and the predicate stays quiet
+    FK TARGET column, FK SOURCE column, composite FK target, CHECK (column form),
+    CHECK (table form, multi-column, both of its columns), UNIQUE (single),
+    UNIQUE (composite), plain index key, index EXPRESSION key, partial index predicate,
+    EXCLUDE expression, EXCLUDE predicate, EXCLUDE predicate key, EXCLUDE mixed,
+    two separate EXCLUDEs on one column, castable DEFAULT, extended statistics,
+    OWNED BY sequence, non-default-collation index, replica-identity index column,
+    a partitioned parent's NON-key column, an INHERITS child's own local column,
+    an INHERITS parent's column, the generated column ITSELF, nothing at all
+```
+
+`tests/pg_column_retype_dependency_oracle.rs` commits 25 of those as a permanent oracle - 9
+refused, 16 accepted - built on one fixture and calling the SHIPPED function rather than a
+second copy of its SQL, the correction the drop oracle already had to make. The remaining
+seventeen were measured by hand and are recorded here rather than committed, either because they
+duplicate a leg already covered (the publication and the plain RULE block through the same
+NORMAL non-constraint edge as the view) or because they need a cluster-scoped object a test
+schema cannot own.
+
+The generated column ITSELF deserves its line. A hand-written probe carrying `USING` gets
+`cannot specify USING when altering type of generated column`; the ENGINE emits no `USING` for
+it (`59a0b238`), and against the engine's own statement the server accepts it. Measuring the
+predicate against a statement the engine does not emit would have manufactured a disagreement
+that does not exist.
+
+### The Precondition alone does NOT fix it, and that is the second thing the brief got wrong
+
+The brief specified the fix as a new `Precondition` variant. I built it -
+`ColumnTypeChangeHasNoBlockers`, wired through `zero-migrate-ir`, the evaluator, the backend
+seam, the lower, `ir-envelope.schema.json` and `ir_envelope_schema.rs`. Then I neutered ONLY the
+plan-level preflight, left the precondition live, and the envelope still half-applied:
+
+```text
+  the envelope's FIRST op committed and stayed, so the schema is neither the old shape nor the
+  new one: migration mig_7n42DGM5QA0TK6gQiNDAIb precondition not met / not evaluable:
+  ColumnTypeChangeHasNoBlockers { table: "vw_src", column: "v" } is unmet (OnUnmet::Halt):
+  blocking dependents ["rule _RETURN on view zm_retype_2002893_0.vw_reader"]
+```
+
+A correct refusal, naming the right blocker, arriving too late to matter. Preconditions are
+evaluated PER MIGRATION and every lowered unit commits in its own transaction, so by the time
+the retype's own assertion runs, the `addColumn` before it has committed. `OnUnmet::Halt` says
+so in its own doc: it stops the batch going forward and does not undo what already committed.
+
+So the assertion the lower stamps is ALSO asked for the whole plan, in `apply_plan_locked`,
+under the project lock, before the first step runs - beside the online-rename preflight that
+already sits there for the same reason and states it in the same words. The preflight reads the
+STAMP rather than re-deriving which steps are retypes, so the two seams cannot come to different
+conclusions about the same step. Scoped to this one variant deliberately:
+`ColumnHasNoBlockingDependents` is a shipped gate whose firing point would move, and
+`OnUnmet::Skip` is a per-migration verdict with no whole-plan reading.
+
+`validate` was not the seam, and not by preference. Validate has no database. The blockers are
+LIVE objects another app can create between plan and apply, so the only sound place to ask is
+under the lock the apply already holds.
+
+### The RED, and the neuter that proves it
+
+Both directions run through `MigrationEngine::apply_plan` with engine-emitted SQL; no
+hand-written DDL carries the operation under test. With the lower's stamp disabled, three arms
+fail with the server's exact words and the half migration named first:
+
+```text
+  the envelope's FIRST op committed and stayed ...: migration mig_... failed to apply:
+    cannot alter type of a column used by a view or rule
+    cannot alter type of a column used by a generated column
+    cannot alter column "v" because it is part of the partition key of relation "pk_src"
+```
+
+The three CONTROL arms pass with the fix disabled AND with it enabled, which is what makes them
+controls rather than decoration: the FK-target retype and the constraint-shaped-companion retype
+each commit BOTH ops in both worlds, so the fix is not demonstrated by breaking a population
+that already worked. With the fix restored, all six pass.
+
+The outcome is read out of `information_schema`, never out of the engine's return value. An
+error report is not evidence that nothing applied - that is precisely the claim under test, and
+the defect is an error report sitting on top of a committed `ADD COLUMN`.
+
+### Preview needed no change, and this is the proof rather than the assertion
+
+`59a0b238` fixed apply and preview together, so the question was live. A precondition GATES a
+statement, it is not a statement, so the SQL preview renders is byte-identical. The real risk was
+the other half: preview lowers each op IN ISOLATION against an EMPTY `LiveSchema`, so a stamp
+made conditional on live state would land in one path and not the other. The stamp is
+unconditional for PostgreSQL, and
+`a_retype_previews_the_statement_apply_runs_and_nothing_more` asserts both halves - the preview
+text holds the engine's `up` verbatim, and the single-op lower PREVIEW uses stamps the SAME
+assertion as the whole-envelope lower APPLY uses.
+
+That test also supplies what F877 recorded as missing outright: no golden in the tree pinned an
+`ALTER COLUMN ... TYPE` statement at all. One is pinned now, written out rather than derived
+from the step, so a change to the emitted spelling has to be typed in deliberately.
+
+### What is NOT fixed: the uncastable DEFAULT, and why no predicate can decide it
+
+F877 called this "a third mechanism ... the blocker is the value, and only the server can say
+whether a default casts". The first clause is right; the second is wrong, and the difference is
+the whole reason this one stops here. It is not the value.
+
+```text
+  CREATE TABLE a (w text DEFAULT 42);     stored default: 42
+    ALTER TABLE a ALTER COLUMN w TYPE integer USING w::integer   -> ACCEPTED
+
+  CREATE TABLE b (w text DEFAULT '42');   stored default: '42'::text
+    ALTER TABLE b ALTER COLUMN w TYPE integer USING w::integer
+    ERROR:  default for column "w" cannot be cast automatically to type integer
+
+  SELECT castcontext FROM pg_cast
+   WHERE castsource='text'::regtype AND casttarget='integer'::regtype;   -> 0 rows
+```
+
+Same column type, same target type, same value, same `pg_cast` answer - OPPOSITE verdicts. The
+deciding input is the type of the stored default EXPRESSION after `strip_implicit_coercions`,
+which differs between an unlabelled `int4` Const and a labelled `text` Const purely because of
+how the author spelled the default, and `pg_attrdef` exposes it only as deparsed text, never as
+a type oid. No predicate over `(column type, target type)` can be correct here. That is a
+measured impossibility, not a difficulty - the same shape as the drop oracle's
+"two columns the catalog describes identically that PostgreSQL treats differently" check, which
+is why that check exists.
+
+Three alternatives were weighed and each is a defect of its own. Refusing every retype of a
+defaulted column over-refuses `int DEFAULT 0 -> bigint`, measured accepted. Dropping and
+re-applying the default around the retype cannot work: `Op::SetColumnType` carries no new
+default, the old one may not cast either, and silently dropping a default is a semantic change
+nobody authored - and nothing in the codebase drops a default around a type change today, on
+either the IR lane or the declarative one. Probing the coercion read-only is not reachable: the
+server's question is `coerce_to_target_type` at COERCION_ASSIGNMENT, and assignment context is
+reachable from SQL only through INSERT/UPDATE targets, which the precondition shape gate
+statically forbids for exactly the reasons its module doc gives.
+
+So case 3 is PINNED rather than dropped. `an_uncastable_default_is_still_a_half_migration`
+asserts the CURRENT, wrong behaviour - the server's error reached mid-apply, and the earlier op
+committed and stayed - so whoever closes it has to come here and change this file deliberately,
+and the gap cannot quietly vanish from the record.
+
+### Noted, not widened into
+
+`Op::DropColumn`'s `ColumnHasNoBlockingDependents` has the identical exposure: it is evaluated
+per migration, so an envelope carrying any op before a blocked drop half-applies exactly the
+way the retype did. Not measured here, and deliberately not hoisted into the new preflight -
+moving when a shipped refusal fires is a decision, not a side effect of this one.
+
+`packages/zero-migrate/src/generated/ir.ts` calls itself a faithful transcription of
+`ir-envelope.schema.json`, and its `Precondition` union is missing `ColumnHasNoBlockingDependents`
+already, because `tests/ir-types-drift.test.ts` pins every `Op` variant tag and every `Expr` node
+tag and does NOT pin `Precondition` at all. Pre-existing, found while enumerating surfaces, left
+alone: the new variant is engine-stamped and never authored, so following the existing precedent
+keeps the two consistent rather than half-consistent. Recorded so it is a known gap.
+
+### Gates
+
+Read as exit codes, not inferred from suite counts.
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0   (199 targets / 3109 passed / 0 failed)
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (327 tests, 326 pass, 1 skipped)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0   (6 passed)
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (453 passed, 0 failed)
+```
+
+The addon was REBUILT from this tree before the host suite; a prebuilt artifact measures itself
+rather than the tree. The Rust suite ran with `ZERO_MIGRATE_TEST_PG_URL`,
+`ZERO_MIGRATE_MYSQL_URL` and `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` set, and the log carries ZERO
+`LIVE-DATABASE COVERAGE SKIPPED` banners - checked over the WHOLE log, which matters: an earlier
+attempt piped the run through `tail -40` and the banner check then read forty lines and reported
+a clean zero it had not earned.
+
+`f664_scaling::validate_ir_does_not_scale_quadratically_in_any_op_kind` FAILED on one run
+(`createIndex 3.5x` against a 3.0x ceiling) and passed on the run recorded above. It is a
+wall-clock ratio test whose own failure message says to re-run on an idle machine before
+believing it; the failing run was concurrent with a `pnpm` build at load average 22, the passing
+run had the machine to itself. Worth recording rather than hiding, because that failure ABORTED
+the run before any of this branch's new targets executed - a green exit code from a run that
+stopped early would have certified nothing, and the first pass at this gate did exactly that.
+
+Disk was checked before every gate run: 251G free at the start, 60G free (94% used) at the last
+one, never near the point where a full disk starts corrupting artifacts silently. Every probe
+schema was dropped and the drop VERIFIED by re-querying `pg_namespace`: the count was 331 at the
+start and 331 at the end, and a `LIKE 'f883%'` sweep returns zero rows. The probe publication was
+dropped by name and `pg_publication` is empty; `pg_extension` holds only `plpgsql`, as it did at
+the start.
