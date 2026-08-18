@@ -31716,3 +31716,252 @@ itself.
 `target` after the full gate: **7.1G** with
 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`, matching
 the 7.1G the previous entry measured.
+
+## Four rename carriers closed at once, and the sixth one no test in the tree could see
+
+`docs/proposals/single-fold-and-effects.md` section H asks for a RENAME CARRIER SWEEP:
+"For every carrier that can spell a column name ... a rename must follow it. Section B
+shows four found one at a time and four still open." The brief for this run named a
+fifth as still open and asked for the enumeration to be PROVED rather than listed,
+because the one-at-a-time pattern is the actual defect - `F113` in this log says editing
+a site is not surveying its class, and that having fixed one instance actively
+suppresses the search for the others.
+
+### The enumeration, and why it is a proof
+
+`crates/zero-migrate/tests/support/carriers.rs` walks a `TableSnapshot` by EXHAUSTIVE
+DESTRUCTURING - no `..` rest pattern on `TableSnapshot`, `ColumnSnapshot`,
+`GeneratedColumnSnapshot`, `IndexSnapshot`, `IndexElementSnapshot` or
+`ConstraintSnapshot`, and no `_ =>` arm on the element enum. Adding a field to any of
+them is a COMPILE ERROR until it is routed through one of three classifiers, each of
+which demands a reason from the author:
+
+    CarrierSet::field      a rename must follow it
+    never_a_column_name    the field cannot hold one, and here is why
+    must_not_follow        it CAN hold one and following it would invent state
+                           live does not have, and here is the measurement
+
+Sixteen carrier paths came out. Two fields landed in `must_not_follow` on measured
+grounds rather than asserted ones: an index or constraint NAME commonly spells its
+column and PostgreSQL 18.4 does NOT rename it with the column, so following it would
+invent an object live does not have.
+
+A compile-time gate alone would still allow a carrier that no fixture exercises, so both
+sweeps assert coverage against a NEVER-RENAMED baseline fold and demand that each swept
+carrier HELD a to-be-renamed column - not merely that it was non-empty. The weaker check
+was tried first and is not sufficient: a primary key over `id` alone satisfies "not
+empty" and "no stale name" without a rename having touched it.
+
+### What the sweep found, measured against a live server
+
+The RED, with the CREATE half applied through the real engine to PostgreSQL 18.4, the
+rename run as the server's own `ALTER TABLE ... RENAME COLUMN`, the catalog introspected,
+and the same history folded offline:
+
+    TableSnapshot::constraints[].definition (CHECK)  CHECK ((("qty_on_hand" > 0) AND ...))
+    TableSnapshot::indexes[].elements[].Expr         ("qty_on_hand" + 1)
+    TableSnapshot::indexes[].predicate               ("qty_on_hand" > 0)
+    TableSnapshot::partition_by.columns              qty_on_hand
+
+The live oracle passed on the same run, which is what makes the four lines a defect
+rather than a fixture artifact. PostgreSQL follows the rename into EVERY carrier,
+because it holds each one as attribute NUMBERS and deparses on read - `conkey`,
+`indkey` / `indpred` / `indexprs`, `partattrs`, and the generated column's parse tree.
+
+The first three were the recorded ones: the CHECK body is the fifth carrier the
+differential corpus itself found, and the predicate and expression key are two of the
+four this log recorded as still open at `docs/review-log.md:6837-6847`.
+
+### The reason they were open outlived the tool that invalidated it
+
+All three rendered-SQL carriers were left stale DELIBERATELY, and the recorded reason
+was sound when it was written: substituting a column name inside rendered SQL corrupts a
+string literal that merely spells it, so `WHERE (note <> 'a')` becomes
+`WHERE (note <> 'b')`. The arm's own comment said so, and so did both tests that pinned
+the staleness.
+
+`render::declarative::rename_quoted_column_in_sql` had already made that objection
+unreachable. It is not a substitution - it walks a fragment as QUOTED RUNS, so a `'…'`
+literal is copied through WHOLE and can never be matched as an identifier. It was
+written for `ColumnSnapshot::inline_checks`, and nobody went back to the three siblings
+it also solved. That is `F113`'s rule again, with the TOOL rather than the fix as the
+thing not carried across its class.
+
+Two facts make the reuse exact rather than merely plausible, and both were checked in
+the tree before the fix: the fold renders every one of these bodies through
+`render::dml::render_expr_inline`, which spells a `ColRef` via `quote_ident_for_dialect`
+-- the SAME function the walk's round-trip guard re-quotes with -- over an identifier
+charset restricted to `[A-Za-z_][A-Za-z0-9_]*`; and string literals come from
+`sql_string_literal`, which is the quote-doubling grammar the walk assumes. So for a
+fold-produced body the guard cannot spuriously decline and a literal cannot spuriously
+match.
+
+What is still left stale, stated so it is not read as completeness: a CATALOG-derived
+body. `pg_get_indexdef` deparses identifiers BARE, the walk matches only QUOTED ones,
+and introspection recovers no AST to re-render from - so a snapshot projected onto a
+live base keeps the old spelling. Matching a bare token would mean matching a function
+name, a type name after `::`, or a qualifier, which is the corrupt-rather-than-stale
+direction this crate refuses everywhere. The differ already declines to compare those
+bodies, so nothing reports.
+
+### The fourth was on nobody's list
+
+`TableSnapshot::partition_by` holds `PartitionSpec::{Range,List,Hash}.columns`, a plain
+column list, and the fold never followed a rename into it. It is not on section H's
+list, not on `6837-6847`'s list, and not probed by any differential-corpus case. It is
+also the WORST of the four: `TableSnapshot`'s `PartialEq` COMPARES `partition_by`, so a
+stale partition key is drift the differ REPORTS, on every introspection, forever, with
+no apply able to clear it. The other three fail quietly.
+
+Measured on PostgreSQL 18.4 before the fix was written:
+
+    RANGE (created_at)   ->   RANGE (event_day)
+
+and live introspection expands the same `partattrs` through `pg_attribute`, so both
+sides move and only the fold stayed behind. The fix is a structured name compare beside
+the existing `columns` / `include` rewrites - no text surgery - through a new
+`PartitionSpec::columns_mut`, rewritten in place and never re-sorted because a partition
+key is POSITIONAL.
+
+How invisible it was, measured rather than claimed: with ONLY the partition rewrite
+disabled and the other three fixes in place, the ENTIRE workspace suite - 217 targets,
+live PostgreSQL and live MySQL both connected, `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` - passes
+except the one new sweep test. Nothing else in the tree can see this carrier.
+
+### Neuter verification, one carrier at a time
+
+A single combined neuter cannot say which test covers which fix, so each was disabled
+separately and the whole set re-run each time.
+
+    neuter                       what failed                                   what stayed green
+    ----------------------------------------------------------------------------------------------
+    CHECK definition             corpus (CHECK row -> DIVERGENT), check-body   index-body test,
+                                 test, PG sweep naming ONLY the CHECK carrier  SQLite sweep
+    index predicate              corpus (both dialects), index-body test,      check-body test
+                                 PG + SQLite sweeps naming ONLY predicate
+    index Expr key               corpus (both dialects), index-body test,      check-body test
+                                 PG + SQLite sweeps naming ONLY the Expr
+    partition key                PG sweep only                                 EVERYTHING ELSE,
+                                                                               whole workspace
+
+Every neuter failed on the carrier it disabled and no other, which is what the
+per-carrier field paths in the failure message are for.
+
+### The differential corpus agreed independently, and its defect count reached zero
+
+The five corpus rows recording these three carriers re-measured from
+`DIVERGENT FO=yes FFD=no ATO=no RMO=no` to `AGREED no` without being touched, which is a
+second measurement of the same fix by a walker set that knows nothing about the sweep.
+`the_corpus_has_the_shape_it_claims` moved 71 -> 76 AGREED, 40 -> 35 DIVERGENT, 5 -> 0
+defects.
+
+ZERO IS NOT A CLAIM THAT THE WALKERS ARE CORRECT, and the assertion message says so: it
+means every disagreement THIS corpus can see is now agreed or recorded as by-design, and
+its sight is bounded by `CASES`. The partition carrier is the proof of that bound - the
+corpus stayed clean through the neuter that broke it. `Status::Defect` is kept and
+`#[expect(dead_code)]`-ed rather than deleted: dropping the vocabulary the moment the
+count reaches zero is how a corpus stops being able to record bad news.
+
+### Two tests were INVERTED, not relaxed, and both keep their real subject
+
+`fold_rename_column_stale_check_body_has_no_reader_pg.rs` and
+`fold_rename_column_stale_index_body_pg.rs` each PINNED the staleness. A file named
+`..._stale_..._` that asserts the body is not stale is a lie in the file listing, so both
+were renamed (`fold_rename_column_check_body_pg.rs`,
+`fold_rename_column_index_body_pg.rs`) and their leading assertions turned around.
+
+Everything downstream survived unchanged, and the reason is worth stating because it is
+what makes the inversion safe: the two sides STILL DIVERGE. The fold QUOTES every
+identifier and PostgreSQL's deparser does not, so `CHECK (("amount_on_hand" > 0))` meets
+`CHECK ((amount_on_hand > 0))`. The differ-exemption arms, the two kept-coverage
+witnesses, and the existence-guard assertions that the refusal quotes LIVE and never the
+fold all still compare two distinct strings. Had the fix made the two sides identical,
+those arms would have become vacuous and this would have been a weakening.
+
+### The anti-corruption witness
+
+A rewrite that corrupts a literal is strictly worse than the staleness it repairs, so
+both sweeps plant a string literal spelling the OLD column name inside a rendered body
+and demand it survive. On PostgreSQL the CHECK is
+`CHECK ((("qty_on_hand" > 0) AND ("note" <> 'qty_on_hand')))` and after the rename the
+reference must read `amount_on_hand` while the literal still reads `qty_on_hand` - which
+is exactly what the server does with its own copy. The SQLite leg goes further and
+compares the renamed inline CHECK BYTE FOR BYTE against the body the same history
+produces with the column named `article_code` from the start, which also catches a
+rewrite that re-quoted or dropped anything else.
+
+The sweep's own haystack strips `'…'` literals before searching, because a literal is
+not a column reference on either side; leaving it in would have made the fixture's
+witness read as a missed carrier.
+
+### The SQLite leg, and an exclusion list that is a testable claim
+
+SQLite's rename is the 12-step REBUILD, which renders its new table FROM A SNAPSHOT, so
+a stale carrier there is a failed migration at the `CREATE TABLE` rather than a quiet
+inconsistency. Six of the sixteen carriers are unreachable on SQLite, each behind an
+engine refusal the code states out loud (table-level CHECK is PG-only, `INCLUDE` is
+unsupported, partitioning is PG-only, a stand-alone `addConstraint` is
+`SqliteRebuildOnly`).
+
+That list is asserted in BOTH directions - a carrier that BECOMES reachable fails the
+test until it is swept - and it earned that immediately: `definition (PRIMARY KEY)` was
+on the exclusion list on the first run and the reachability direction threw it straight
+back off. Without the second direction an exclusion list is a way to make a sweep pass
+by shrinking it.
+
+Two engine facts were measured on the way and are recorded in the fixture: two renames
+of the same table cannot share a document (`SqliteRepeatRenameTarget` - each rename is a
+whole-table rebuild), and a SQLite `renameColumn` needs the live COLUMNS plus
+`sqlite_schemas`, not just table names (`RenameNeedsLiveColumn`).
+
+### One premise in the brief was wrong, and one doc claim in the tree is
+
+The brief said the fifth carrier was "still open" and asked for it to be confirmed
+before fixing. It was open, and it is confirmed - but the framing that it reported
+nothing needs a correction. `ConstraintSnapshot`'s `PartialEq` DOES compare `definition`
+for every kind including CHECK; what exempts it is the DIFFER
+(`constraint_definition_is_comparable`), not the type. So the field was invisible to
+drift and visible to any consumer using `==` directly, which is a narrower claim than
+"no reader".
+
+Separately, `render::fold`'s EXCLUDE arm comments say PG "canonicalizes exclusion
+definitions differently", and the fold writes an EMPTY `definition` for one. That is
+still the right call, but the neighbouring reading that an exclusion body is not
+recoverable is wrong: PostgreSQL 18.4 deparses one perfectly well and follows a rename
+into it -
+`EXCLUDE USING gist (ex WITH =, a WITH =) WHERE ((a > 5))` becomes
+`... (ex WITH =, renamed_a WITH =) WHERE ((renamed_a > 5))`. The fold's emptiness is a
+choice about what to COMPARE, not a limit of the catalog, and the sweep asserts the
+emptiness directly so the choice stays a testable claim rather than an assumption.
+
+### Gates
+
+```
+gate                                                exit  counts
+cargo fmt --all -- --check                             0
+cargo clippy --workspace --all-targets -- -D warnings  0
+cargo test --workspace --exclude zero-migrate-node     0  217 targets / 3207 pass / 0 fail / 11 ignored / 0 skip banners
+cargo test -p zero-migrate-node --no-default-features  0  10 targets / 90 pass / 0 fail
+pnpm -w build                                          0
+pnpm --filter zero-migrate check                       0
+pnpm --filter zero-migrate test                        0  327 tests / 326 pass / 0 fail / 1 skipped
+pnpm --filter zero-migrate-cli typecheck               0
+pnpm --filter zero-migrate-cli test:docs               0  6 pass / 0 fail
+pnpm --filter zero-migrate-node build                  0  (rebuilt BEFORE test:host)
+pnpm --filter zero-migrate-cli test:host               0  458 pass / 0 fail / 0 skipped
+```
+
+Every exit code read directly from the command, never through a pipe. Both DSNs were
+exported with `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` on the workspace run and the skip-banner
+count is 0, so the live legs measured the databases rather than skipping past them.
+`pnpm install --frozen-lockfile` was run once first; the worktree had no `node_modules`.
+
+PostgreSQL was left as found: 331 `pg_namespace` rows before and 331 after, with no
+schema matching `%carrier%` / `zm_probe%` / `project_carrier%` surviving. The mid-run
+count of 339 was other sessions, not this one, which is why the check is by PREFIX and
+not by total - a global count is not a usable invariant on a shared server.
+
+One fixture decision came out of that rule. The EXCLUDE constraint uses `USING btree`
+rather than `gist` specifically to avoid `CREATE EXTENSION btree_gist`: an early probe
+created it inside the probe schema and `DROP SCHEMA ... CASCADE` took it away again,
+which happened to be correct only because the extension had not existed beforehand.
