@@ -31316,6 +31316,7 @@ that counts a server the suite was not allowed to touch cannot tell its own leak
 someone else's**, which is the same shape as the racing leak check `63447006` had to
 move inside its sweep. Recorded, not fixed: it is the CLI package's gate, not this
 branch's.
+
 ## The MySQL physical contract is now derived from the column the fold finished with
 
 Closes the retype half of `30463-30481`. The brief for this work was to fix the
@@ -31560,3 +31561,158 @@ taking free space from 6.6G to 100G; the release tree and the addon are untouche
 that and the debug tree rebuilds on the next `cargo test`. Every gate reported above ran
 at 34G free or better, and the final full sequence at 78G.
 
+## The eight-backend cap was really a three-backend cap, and the capability matrix it fed had a three-predicate hole
+
+Branch: `step2/dialect-id-backend-descriptor`, five commits, rebased onto `main` at
+`a1d0bb26` (branched from `2e764660`; `main` advanced three commits during the run and
+the rebase touched only this file's tail). Scope: the first half of step 2 of `docs/proposals/pluggable-backends.md` -
+`DialectId`, a public `BackendDescriptor`, and the removal of `DialectSet(u8)`'s cap.
+`SqlDialect` (`ir/dialect.rs`) and `Dialect` (`ir/validate.rs`) were deliberately left
+in place; the proposal's removal order puts them later and the tree stays green with
+them.
+
+### The cap was smaller than the proposal says, and the RED test says so out loud
+
+The proposal records the blocker as "`DialectSet(u8)` - hard cap of eight backends,
+three bits used". The bits were never the binding constraint. `DialectSet` was keyed
+by `contains(dialect: Dialect)`, a CLOSED three-variant enum, so a fourth id had no
+variant to be looked up by and the five spare bits had nothing that could ever set
+them. The real cap was **three**, not eight, and the five spare bits were unreachable
+by construction.
+
+That distinction is what made an honest RED possible. A test that registers nine
+backends and asserts nine can only be a compile error against a three-variant key -
+so the id-shaped surface (`DialectSet::from_ids` / `contains_id` / `len`, and
+`BackendRegistry`) was written FIRST, over the untouched `u8` representation, in
+commit `cf1944a3`. The registry accepted all nine registrants; the SET reported three:
+
+```text
+---- a_registry_holds_more_than_eight_backends stdout ----
+assertion `left == right` failed: the id SET must represent all nine;
+it reported ["mysql", "postgres", "sqlite"]
+  left: 3
+ right: 9
+
+---- every_distinct_well_formed_id_still_registers stdout ----
+  left: 1
+ right: 4
+```
+
+`registry.len() == 9` passed in the same test before that line, which is what makes
+the failure a REPRESENTATION failure and not a registration one: the nine were kept,
+the set could not say so. `postgres`, `postgres_xl`, `postgres2` and `p` collapsing to
+one is the same defect stated without the number nine in it.
+
+Neuter-verified in both directions. Restoring only the `u8` body of `DialectSet`
+(green tree, everything else intact) reproduces both failures with the identical
+messages and identical counts; restoring the id-keyed body returns 7/7 green. The cap
+test therefore measures the representation and nothing else.
+
+### The capability matrix's own completeness check was circular, and had drifted
+
+Promoting `Capability` from `pub(crate)` turned up a defect in the test that was meant
+to protect it. `render/renderer.rs`'s `dialect_capability_matrix_is_explicit` pinned
+22 predicates per dialect and then asserted completeness by comparing that table's
+length against `ALL_CAPABILITIES` - a SECOND hand-written list in the same test
+module, also 22 long. The enum had 25. `MaterializedEnumType`, `MaterializedDomainType`
+and `SchemaWideIndexNames` were in the enum, answered in the dispatch matrix, and read
+by real render paths, but were in neither list, so **nine of the 75 cells were unpinned
+and the assertion that was supposed to notice was comparing one copy of the mistake
+against another**. A check whose reference is a duplicate of the thing it checks cannot
+fail for the reason it exists. It now iterates `Capability::ALL`, the vocabulary list
+that lives beside the enum, and asserts every variant is pinned.
+
+The 66 cells the old test DID pin were written independently of the dispatch match, so
+they served as the cross-check on the transcription into `POSTGRES_CAPABILITIES` /
+`SQLITE_CAPABILITIES` / `MYSQL_CAPABILITIES`: the constants were generated
+mechanically from the pre-change match, and the pre-existing pins passed against them
+unchanged. The nine newly-pinned cells were taken from the same mechanical extraction.
+
+### The wire format did not move, proven over 92 ops rather than three
+
+`tests/ir_checksum.rs` pins ONE `Checksum::of_ir` golden over three hand-picked ops.
+That is a spot check on a format whose object KEY NAMES are inside every deployed
+migration's identity. `tests/checksum_corpus_stability.rs` (commit `2dc2978c`, landed
+before any behaviour change) computes `of_ir` for every `(op-kind, variant)` row of the
+shared dialect corpus - the same corpus `dialect_table_faithfulness.rs` and
+`dialect_conformance_live.rs` drive - and pins the aggregate digest over all of them.
+
+```text
+92 rows before  sha256 65504d0ea9159e5a912f1d61888441e6377faebef87ae4fbc1cc8034d9de61d2
+92 rows after   sha256 65504d0ea9159e5a912f1d61888441e6377faebef87ae4fbc1cc8034d9de61d2
+diff before after -> empty, exit 0
+```
+
+Byte-identical, per row and in aggregate — and the constant captured on `2e764660`
+still holds after the rebase onto `a1d0bb26`, so the format is unchanged across both
+bases, not only across this branch. That is expected rather than lucky:
+`of_ir` takes no dialect parameter, and nothing in this branch touched a serde name, a
+field order, or an `Op` variant. The corpus test is the guard that keeps it that way
+for steps 3 and 4, where the same claim will be much less obvious.
+
+### What `DialectScope::PgOnly` turned out to be
+
+`render/step.rs`'s `DialectScope` is named in the proposal as one of the four closed
+dialect enums. Its `PgOnly` variant is **constructed nowhere in the tree** - all five
+construction sites pass `Both`, and the variant survives only in prose. It is now
+`Portable` / `Only(DialectId)`, which is a generalization with no behaviour to change:
+a MySQL-only or DuckDB-only artifact previously had no way to describe itself, because
+the only pinned reach the type could express was Postgres.
+
+`ApplyDialect` kept its two variants and gained `id()`. Turning it into a newtype would
+have converted `bridge.rs`'s exhaustive per-backend dispatch into a runtime chain with
+an unreachable arm - worse, not better, until the backend crates exist to be dispatched
+to. What changed is that `parse` resolves a wire spelling against REGISTERED backend
+ids instead of string literals, so `"sqlite"` (registered, no host-driver path) and
+`"duckdb"` (not registered) now produce different refusals instead of one catch-all.
+
+### Two deviations from the brief, both deliberate
+
+**`BackendDescriptor` lives in `zero-migrate-ir`, not a new `zero-migrate-backend`
+crate.** Until the backend crates are extracted, a contract crate would have exactly
+one consumer and one implementor. `zero-migrate-ir` is already the bottom of the graph
+and already the crate the engine, the guard and the N-API addon all name. Moving these
+items later is a `pub use`.
+
+**The `Backend` trait itself is NOT here.** `introspect` / `render` / `execute` name
+`SchemaModel`, `ChangeSet` and `ExecutionPlan`, which are engine types; declaring them
+in the leaf crate would invert the crate graph. Step 2's first half promotes IDENTITY
+and CAPABILITY and stops there.
+
+`Limits` carries `IdentifierLimit::{Unbounded, Bytes(n), Characters(n)}` rather than a
+bare number, because the two shipping caps differ in UNIT and the engine already
+depends on that: PostgreSQL truncates at 63 BYTES with only a NOTICE, MySQL caps at 64
+CHARACTERS, SQLite has no cap, and that is exactly why the drop-side identifier bound
+is PostgreSQL's alone. `plan/author.rs`'s `PG_MAX_IDENT_BYTES` is now read off the
+PostgreSQL descriptor at compile time rather than restated, so the number the author
+truncates to and the number the backend declares cannot drift.
+
+### Gate exit codes, each read directly
+
+```text
+cargo fmt --all -- --check                                    0
+cargo clippy --workspace --all-targets -- -D warnings         0
+cargo test --workspace --exclude zero-migrate-node            0   3216 passed, 0 failed, 11 ignored
+  (run with the live PG + MySQL DSNs; dialect_conformance_live ran both the
+   PostgreSQL and the SQLite rows against real servers. 3213 pre-rebase, 3216
+   after: the three are main's, not this branch's.)
+cargo test -p zero-migrate-node --no-default-features         0   91 passed, 0 failed
+pnpm -w build                                                 0
+pnpm --filter zero-migrate check                              0
+pnpm --filter zero-migrate test                               0   327 tests, 326 pass, 1 skip
+pnpm --filter zero-migrate-cli typecheck                      0
+pnpm --filter zero-migrate-cli test:docs                      0   6 tests, 6 pass
+pnpm --filter zero-migrate-node build                         0   rebuilt BEFORE test:host
+pnpm --filter zero-migrate-cli test:host                      0   458 tests, 458 pass, 0 skip
+```
+
+`pnpm install -r --frozen-lockfile` was needed first: a plain `pnpm -w install` in a
+fresh worktree leaves the package `node_modules` empty and `tsup` is then not found.
+
+PostgreSQL was left as found: `pg_namespace` 331 before, 331 after. No probe schema of
+this branch's survived, and none was dropped by hand - the host suite cleaned up after
+itself.
+
+`target` after the full gate: **7.1G** with
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`, matching
+the 7.1G the previous entry measured.
