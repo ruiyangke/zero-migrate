@@ -29761,3 +29761,307 @@ A parallel agent owns `apply/backend/sqlite/rebuild_sql.rs`. This change needed 
 there: the rebuild is seeded from the folded snapshot's own `encryption_sentinel`, which
 is fixed at its source, so the rebuild inherits the corrected value without the emitter
 changing.
+
+## MySQL had never been asked what it did, and it had two answers nobody had heard
+
+The measurement that started this, re-run and confirmed at `3b5bdfda`:
+
+```text
+  git grep -ln ZERO_MIGRATE_MYSQL_URL -- crates/    ->  1 file
+  git grep -ln ZERO_MIGRATE_MYSQL_URL -- packages/  -> 52 files
+```
+
+The one file under `crates/` is `src/apply/backend/mysql/mod.rs`. It is SOURCE, not a
+test. So the MySQL backend was exercised at RENDER level (unit tests over emitted SQL
+text) and at CLI/HOST level (TypeScript over `mysql2`), and nowhere in between, and
+the CI `rust` job was given a PostgreSQL service only. No Rust test had ever asked a
+live MySQL server what the engine actually did.
+
+There was a structural reason, not just an oversight. The workspace had no MySQL
+client crate at all - `grep '^name = "mysql' Cargo.lock` returned nothing - because
+the engine's MySQL path is the dialect-neutral `driver::SqlSession` seam, fed in
+production by the napi host over `mysql2`. There was no way to reach a live MySQL from
+Rust until one was added, which is exactly why the gap had persisted.
+
+### What a live server said
+
+Three disagreements, all found by the first oracle that put the fold and the catalog
+side by side, in the order the corpus hit them.
+
+**1. A case-insensitive column drifted the moment it was created.**
+
+```text
+  AlteredObject { table: "tags", object: "column email",
+                  field: "case_sensitive", expected: "", actual: "false" }
+```
+
+`column_snapshot_for_field` carried `&& !matches!(dialect, SqlDialect::Mysql)`, so the
+folded snapshot said `None`. `mysql/drift_sql.rs` recovers the same intent from
+`information_schema.COLUMNS.COLLATION_NAME` and said `Some(false)`. `diff_snapshots`
+compares the field with no dialect test at all, and `ColumnSnapshot::case_sensitive`
+is DOCUMENTED as drift-comparable on "Postgres `citext`, SQLite `COLLATE NOCASE`, and
+MySQL `information_schema.COLUMNS.COLLATION_NAME`" - all three.
+
+The suppression was correct when written and stopped being correct later. `git log -L`
+on those lines puts them in the tree before MySQL had any live introspection; nothing
+could disagree with the folded `None` because nothing read the catalog. The recovery
+arrived afterwards and the two halves have disagreed by construction ever since. Every
+MySQL table with a `caseSensitive: false` text column reported drift from creation
+until it was dropped.
+
+Not double-counted by the fix: `mysql_text_storage` carries the exact character set
+and collation name, and `ColumnSnapshot` deliberately excludes it from `PartialEq` and
+from structural drift, because a server-default collation name is not part of the
+portable schema surface. The portable intent has exactly one comparable home.
+
+**2. A table rename left the primary key behind, four ways at once.**
+
+```text
+  missing:    labels constraint tags_pkey    labels index tags_pkey
+  unexpected: labels constraint labels_pkey  labels index labels_pkey
+```
+
+MySQL never stored a primary-key name. `information_schema` reports every primary key
+under the fixed catalog name `PRIMARY`, and `drift_sql.rs:411-413` synthesizes
+`<table>_pkey` from the CURRENT table name. So after `RENAME TO labels` the catalog can
+report nothing except `labels_pkey`, while the fold moved the `TableSnapshot` wholesale
+and carried `tags_pkey` forward. Any MySQL deploy that renamed a table with a primary
+key drifted permanently from that moment.
+
+The fold's behaviour is CORRECT on PostgreSQL, which is why the fix is dialect-scoped
+rather than general: PostgreSQL stores the constraint name independently of the table,
+`ALTER TABLE tags RENAME TO labels` genuinely leaves `tags_pkey` named `tags_pkey`, and
+`fold_roundtrip_pg.rs` pins exactly that. Applying MySQL's re-derivation there would
+invent a rename the server does not perform.
+
+**3. The bare-TEXT key gate holds inside one envelope and not across two.**
+
+```text
+  apply IR plan: migration mig_7n42... failed to apply:
+  BLOB/TEXT column 'tag' used in key specification without a key length
+```
+
+`model/validate.rs` carries a dialect-scoped rule refusing a key over a column whose
+rendered MySQL storage is a bare TEXT (MySQL error 1170), and
+`mysql_storage_shapes.rs::mysql_refuses_an_index_over_a_bare_text_column` pins it and
+passes. It pins it in ONE shape: `createTable` and `createIndex` in the same
+`MigrationIr`. `validate_ir` takes one envelope and no live schema, so when the column
+was declared by an earlier deploy the rule has nothing to key on, and the index passes
+the gate, passes lowering, and reaches the server. A second deploy adding an index to
+an existing table gets a failed apply where a same-envelope author would have been
+told before anything ran.
+
+RECORDED, NOT FIXED, with the boundary measured. `validate_ir`'s signature carries no
+column-level live schema, and `LiveSchema` carries table NAMES only -
+`LiveSchema::from_tables` takes a `BTreeSet<String>`. The gate cannot learn the
+rendered storage of `notes.body` without a live-schema type that does not exist yet,
+which is a design change rather than a patch.
+`mysql_text_column_key_gate.rs` pins all three facts (the same-envelope refusal, the
+index-only envelope carrying nothing to key on, and the live server's 1170) and is
+deliberately shaped to go RED when the hole is closed, with a message saying so.
+
+### The asymmetry the brief named, closed as ROW ORDER
+
+`injected_column_collation.rs` opens by saying a test that greps the emitted statement
+for a collation "measures how the engine spells itself". Its PostgreSQL leg obeyed
+that and its MySQL leg did not: the MySQL claim was a `contains("utf8mb4_0900_bin")`
+over the DDL text and nothing more. The MySQL half of the original defect was pinned
+by exactly the kind of check the file argues against.
+
+Both claims now hold as row order on a live MySQL 8.4.11:
+
+```text
+  pinned    utf8mb4_0900_bin     AAA, Zzz, aaa, zzz   creation order
+  unpinned  utf8mb4_0900_as_cs   aaa, AAA, zzz, Zzz   NOT creation order
+```
+
+The neuter check is sharper on MySQL than on PostgreSQL, and worth stating because it
+is easy to assume the reverse. An unpinned charter on PostgreSQL falls back to the
+database's default collation, so a `C`-collated test database would neuter the whole
+test - hence the instrument check. On MySQL the unpinned charter emits an EXPLICIT
+`utf8mb4_0900_as_cs`, which is case-SENSITIVE and still not bytewise, because the 0900
+family weights case as a UCA tertiary difference rather than comparing encoded bytes.
+Both legs still refuse to run on a server whose default collation is binary.
+
+### Neuter
+
+Replacing `utf8mb4_0900_bin` with `utf8mb4_0900_as_cs` in `render/value_format.rs`,
+nothing else changed:
+
+```text
+  injected_column_collation.rs
+      injected_id_with_a_pinned_..._keeps_creation_order_on_mysql   FAILED
+          got ["...aaa", "...AAA", "...zzz", "...Zzz"]
+      a_pinned_bytewise_collation_is_spelled_per_dialect            FAILED
+      injected_id_without_a_pinned_..._loses_creation_order_on_...  ok
+      the seven other tests                                         ok
+```
+
+The new live test fails on the SEQUENCE READ BACK FROM THE SERVER, not on the DDL text
+- the DDL-text test failing beside it is the old check doing its separate job. The
+neuter check staying green is required: the unpinned fixture is still wrong.
+
+The three fold-oracle stages needed no synthetic neuter. Each one went RED on a real
+defect before it went green, and the transcripts are quoted above; the corpus is
+compared after EVERY stage precisely so a create and a drop cannot cancel and hide one.
+
+The two defects were also verified to be independent: with the `case_sensitive` fix in
+place the rename stage still failed, and each fix landed in its own commit.
+
+### The flake, and the fix that measurement rejected
+
+`docs/proposals/backend-conformance.md` already prescribes both halves of this work as
+its first and third implementation steps - "Move `f664_scaling` and `f665_scaling` off
+the shared runner ... Do it first, because every later step raises the load that flakes
+them" and "Give the `rust` job a MySQL service and write `fold_roundtrip_mysql.rs`".
+This is those two steps, in that order, and nothing beyond them: no conformance crate,
+no corpus extraction, no `DialectId`.
+
+
+`f664_scaling` and `f665_scaling` assert a complexity RATIO, but a ratio of two timings
+is still a timing. They produced false failures repeatedly on a loaded machine -
+3.6x/3.6x/3.8x at load average 26, 3.5x/3.6x/3.9x at load average 30, a DIFFERENT arm
+each time, all green on an idle re-run. This matters now because a conformance matrix
+multiplies live-database load on the same runners, and a known flake beside a new suite
+gets the new suite blamed.
+
+Both files are now `#[ignore]`d and run in a dedicated serviceless `scaling` CI job via
+`cargo test -- --ignored`. `#[ignore]` rather than a cargo feature deliberately: an
+ignored test is still COMPILED by `cargo test --workspace` and still linted by
+`cargo clippy --all-targets`, so it cannot rot into something that no longer builds,
+while `required-features` would hide it from both. The default suite loses 60s and no
+coverage. The job carries no `services:` block on purpose - a database container it
+never queries would still be initializing its data directory while the first ratio is
+measured - and it asserts that the `--ignored` filter actually ran something, because
+a filter matching nothing exits 0.
+
+THE 3.0x CEILING IS NOT RELAXED. The guards caught a 5x, a 4.5x and a 4.53x; all three
+sit above any "relaxed" ceiling too, so raising it would discard the signal and keep
+the flake.
+
+CPU time instead of wall clock was the brief's suggested alternative, and MEASURED it
+is not an improvement. The same fixtures were timed simultaneously with `Instant` and
+with per-thread CPU nanoseconds (`/proc/thread-self/schedstat` field 1) on a 16-core
+machine at load average 20-35:
+
+```text
+                  wall    cpu      wall    cpu      wall    cpu
+  dropColumn      2.232 / 2.230    2.203 / 2.197    2.175 / 2.182
+  renameTable     2.111 / 2.111    2.121 / 2.114    2.120 / 2.123
+  renameColumn    2.079 / 2.089    2.048 / 2.062    2.030 / 2.037
+  dropTable       1.744 / 1.748    2.094 / 2.095    2.187 / 2.191
+```
+
+They agree within about 1% on every arm. `best_of` already takes the MINIMUM of five
+runs, and a single CPU-bound thread on a 16-core box gets a whole core in at least one
+of five attempts even with a run queue of 30 - so preemption is not what inflates these
+ratios. What inflates them is that the work itself costs more under memory and I/O
+pressure (page faults, allocator behaviour, cache pressure), and a CPU clock counts
+that extra work just as faithfully as a wall clock does. A CLOCK_THREAD_CPUTIME_ID
+instrument would have added a platform-specific dependency and moved no number.
+
+One free precision gain was taken. `f665_scaling` took a SINGLE timing of each shape
+while `f664_scaling` took the best of five. Eight rounds of the same fixture, side by
+side:
+
+```text
+  single shot   1.920 1.601 1.743 1.871 1.973 1.747 1.855 1.917   spread 0.372
+  best of five  1.855 1.890 1.890 1.899 1.879 1.849 1.847 1.883   spread 0.052
+```
+
+Seven times tighter for four extra seconds on a job that has the machine to itself.
+That is not a relaxed threshold - it is the same measurement taken properly, and it
+cuts BOTH failure modes: a false red, and a real sub-threshold regression hiding in a
+noise floor a third as wide as the margin being defended.
+
+### The CI file itself is UNVERIFIED BY EXECUTION
+
+GitHub Actions cannot be run here, so this must be read as unproven. What WAS run
+locally, against the same `mysql:8` image and with the same commands the workflow
+issues:
+
+* the DSN form `mysql://user:password@host:port/database`, which is what
+  `Opts::from_url` parses and what the workflow now exports;
+* every suite the new service feeds, with `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` set;
+* the `--ignored` split, both halves: the default run reports the guards as
+  `ignored, wall-clock complexity guard: ...` and the `--ignored` run reports
+  `4 passed` and `1 passed`;
+* the zero-tests-ran tripwire, driven with a filter that matches nothing, which
+  produced `0 passed; ... 4 filtered out` and tripped the grep as intended.
+
+The image, credentials and health-check options in the new `rust` service block are
+COPIED from the `host` job rather than authored, so the CI-only facts they encode
+(that `mysql:8` comes up under those options within the retry budget) are already
+proven by the `host` job on every run.
+
+### Two errors in the brief, both found by measuring
+
+The brief said the flake could be addressed by measuring CPU time rather than wall
+clock. Measured, wall and CPU ratios are indistinguishable on every arm; the premise
+that the flake is a scheduling artefact does not hold. The dedicated idle job, which
+the brief also proposed, is the fix.
+
+The brief also said this agent's work was in "CI config and `crates/zero-migrate/tests/`".
+It could not be. Reaching a live MySQL from Rust required a client crate the workspace
+did not have (`crates/zero-migrate/Cargo.toml`, `Cargo.lock`), and the first oracle
+found two engine defects whose fixes are in `src/render/declarative.rs` and
+`src/render/fold.rs`. Leaving them unfixed would have meant landing a new oracle that
+was permanently red.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0   (3160 pass, 0 fail, 11 ignored)
+  cargo test -p zero-migrate-node --no-default-features   0   (87 pass)
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (326 pass, 0 fail, 1 skipped)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0   (6 pass)
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (458 pass, 0 fail, 0 SKIPPED)
+```
+
+Both DSNs were exported for the workspace and host gates with
+`ZERO_MIGRATE_REQUIRE_LIVE_DB=1`, and the workspace log contains ZERO
+`LIVE-DATABASE COVERAGE SKIPPED` banners - so every live suite, PostgreSQL and MySQL
+alike, actually ran. `fold_roundtrip_mysql`, `mysql_text_column_key_gate` and
+`injected_column_collation` are all present in the run.
+
+The `ignored` count moved 6 -> 11: the five newly-`#[ignore]`d complexity guards, which
+were run separately by the command the new `scaling` job issues:
+
+```text
+  cargo test -p zero-migrate --test f664_scaling --test f665_scaling \
+    -- --ignored --test-threads=1                         0   (4 pass, then 1 pass)
+```
+
+The addon was REBUILT from this tree before `test:host`, and both committed-artifact
+drift gates the CI runs (`index.d.ts`/`index.js` after the napi build,
+`embedded-recorder.js` after `pnpm -w build`) were checked by hand and are clean.
+
+Disk was checked before each gate run. It fell from 176G free to 88G across the cargo,
+release-addon and MySQL work and recovered to 129G; it never approached the 15G
+stop-line.
+
+The `fold_roundtrip_mysql` oracle took 32s against a MySQL container shared with two
+other agents and the TypeScript host suite. One earlier run of the same test took 186s
+with identical per-stage snapshot costs (5-10ms each), so the variance is contention on
+that shared container rather than anything in the suite; a CI runner's dedicated
+service will not see it.
+
+### Also observed, not acted on
+
+The live MySQL container used for this work carries over 200 leaked databases named
+`*_migrations`, left by the TypeScript host suite - it creates a project database per
+test and drops it, but the engine creates the `<db>_migrations` meta database itself
+on the first `ensure_journal` and the host tests do not drop that one. The new Rust
+`DatabaseGuard` guards both names for exactly this reason. The existing leak was NOT
+cleaned up: two other agents were running against the same server, and a bulk
+`DROP DATABASE` over a name pattern is the kind of destructive glob that should be
+matched against a listing and confirmed by a human, not run by an agent that is
+holding another job's brief.
