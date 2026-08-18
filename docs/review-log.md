@@ -32816,3 +32816,238 @@ PostgreSQL: 331 schemas before, 331 after. This change adds no live test, so its
 empty by construction; the global count is reported because other sessions are running against
 the same server. The MySQL client is not in the devShell, so MySQL was counted only by the
 suite's own guards - `ZERO_MIGRATE_MYSQL_URL` was set and the MySQL legs ran.
+
+## Step 4, consumer 1: the runtime metadata is a projection now, and the corpus that blessed it was blind to three carriers
+
+`docs/proposals/single-fold-and-effects.md` section G step 4 moves the artifact
+consumers off their private walkers one at a time, blast radius ascending.
+`runtime_metadata_from_ops` was first. `render_artifacts` now builds the runtime
+collection metadata from `FoldedSchema::project_runtime_metadata`, and the walker is
+DELETED - 183 lines, plus `record_plain_index` and `derived_plain_index_name`, which
+had no other caller. Not renamed, not left beside it: `git grep runtime_metadata_from_ops`
+returns prose only.
+
+### The headline: byte-identical everywhere except one row, and that row was a walker bug
+
+Both artifacts, on 27 recorded op fixtures plus 10 carrier streams, under 3 dialects -
+111 stream/dialect combinations, hashed whole. **108 are byte-identical through the new
+path. 3 moved, all the same row**, and the row is `index_include_column_dropped`:
+
+    CREATE INDEX users_email_idx ON users (email) INCLUDE (extra);
+    ALTER TABLE users DROP COLUMN extra;
+
+`runtime_metadata_from_ops` kept `users_email_idx` in `schema.runtime.json`. Its
+`DropColumn` arm matched on the runtime descriptor's own `fields` list, and an
+`INCLUDE` column was never in it. The projection drops it, and the projection is right:
+`render/fold.rs:1786-1790` records the measurement that settles it - on PG 18.4,
+`CREATE INDEX i ON t (b) INCLUDE (a); ALTER TABLE t DROP COLUMN a` leaves no `i` in
+`pg_indexes`. So the artifact was naming an index the database does not have.
+
+The tell that it was a defect rather than a preference: the `env.db.ts` half of the SAME
+`render_artifacts` call already cascaded the index away, because it renders indexes from
+`authoring_tables_from_ops`, whose `DropColumn` arm uses `index_uses_column` and that
+function checks `include`. Two artifacts out of one call disagreed about one index.
+The `env.db.ts` hash on that row did NOT move, which is the same fact from the other side.
+
+### What the 2,720-comparison gate could not see, and how much it actually proved
+
+Step 3 reported `project_runtime_metadata` "equal on every row" and that was true. It was
+also not enough, in a specific and reproducible way: **no stream in the step 1 corpus
+crosses a `unique` column with a rename or with a `dropIndex`.** Measured, not asserted -
+the golden this commit adds contains 63 index rows from the 27 recorded fixtures and
+NOT ONE of them is an implicit unique index. The carrier the change was about had zero
+coverage in the corpus that blessed the change.
+
+Three divergences were found by writing streams for the carriers, each on the `name`
+field of a runtime index descriptor:
+
+| stream | walker said | projection said |
+|---|---|---|
+| `createTable users(email unique)` + `renameTable users -> members` | `users_email_key` | `members_email_key` |
+| `createTable users(email unique)` + `renameColumn email -> mail` | `users_email_key` | `users_mail_key` |
+| `createTable users(email unique)` + `dropIndex users_email_key` | index removed | index still there |
+
+The walker is right on all three, and the reference is not an opinion: `render/fold.rs`'s
+`Op::RenameTable` arm already states the rule for the catalog half, with the live-server
+test that measured it - "PostgreSQL stores the constraint name independently of the
+table, so `ALTER TABLE tags RENAME TO labels` genuinely leaves `tags_pkey` named
+`tags_pkey`, and `fold_roundtrip_pg.rs` pins exactly that". Only MySQL re-derives, and
+only for the PRIMARY KEY, and only because MySQL never stored one.
+
+So the projection was re-deriving `{table}_{column}_key` from whatever names it could
+currently see, which renames an index on every rename and puts a name in
+`schema.runtime.json` that no catalog anywhere has. Had this shipped, it would have been
+a NEW instance of the exact class of defect section B of the proposal is a list of.
+
+The fix is a MODEL change, not a second replay, which is decision 4 of the proposal
+working as written: `AuthoredTable::implicit_unique_indexes: Vec<ImplicitUniqueIndex>`,
+where `name` is frozen at `createTable` and `column` follows a column rename. The
+lifecycle lives in the one traversal - created by `createTable`, cascaded by
+`dropColumn`, renamed-through by `renameColumn`, removed by `dropIndex` under either
+spelling - and the projection READS it.
+
+### The gate, and its two-sided neuter
+
+`tests/gen_types_runtime_metadata_from_the_fold.rs`, 13 tests, entirely offline, driving
+`render_artifacts` - the real entry point, not an in-memory struct.
+
+The corpus golden `tests/goldens/runtime_metadata_artifacts.txt` was captured from the
+OLD path, driven by `runtime_metadata_from_ops`, BEFORE the consumer was switched, and
+committed unchanged. The side that produced the expectation is not the side under test,
+so it is not the round trip that made step 3's `project_snapshot` evidence circular. One
+line block was hand-edited afterwards - the `include` row above - and the golden's header
+records which hash moved, from what, to what, and why.
+
+Per FIELD, not per object. `assert_index_fields` asserts `fields`, `unique` and `name`
+in three separate assertions, because two distinct descriptors always differ in `name`
+first and a whole-object `assert_eq!` never reaches the later terms - the failure this
+log already records once, where a behaviour-preservation proof passed while a comparator
+field was deleted.
+
+Four neuters, each verified to produce RED:
+
+- **N1** projection re-derives the implicit index name from current names -> 4 red
+  (the three rename tests plus the corpus golden).
+- **N2** `dropIndex` stops cascading to implicit indexes -> 3 red.
+- **N3** an artificial refusal added to `AuthoredState::advance` -> the over-refusal
+  control fails, naming it `OVER-REFUSAL` on `fixture:comments_indexes/Postgres`.
+- **N4** `dropColumn` stops cascading on `include` (the old walker's answer) -> the
+  `include` test and the corpus golden go red.
+
+N1 and N4 together are the two-sided neuter: N4 red proves the gate distinguishes the OLD
+walker from the new path, N1 red proves it distinguishes a naive projection from the
+fixed one.
+
+### The refusal question, and why the equality gate could never have answered it
+
+`single_fold::fold` runs BEFORE `render_runtime_descriptor_v1` and brings
+`AuthoredState::advance` with it, which has three fallible sites the old path never
+reached: `ResolvedInject::for_table` in the `createTable` arm and
+`NamedTypeRegistry::create_enum` / `create_domain` in the two named-type arms.
+
+A refusal added there is INVISIBLE to the differential gate by construction - that gate
+only compares streams the fold accepted, so a newly-refused stream leaves the sample and
+the count falls rather than a comparison failing. A check whose failure direction is
+toward green is not a check.
+
+Statically, all three sites are already reached with identical arguments:
+`fold_ops_onto` calls `ResolvedInject::for_table` at `fold.rs:1241` and
+`create_enum(...).map_err(fold_named_type_error)` at `fold.rs:1101-1104`;
+`fold_to_field_defs` calls `ResolvedInject::for_table` at `fold.rs:4694`; and
+`fold_ops_onto` runs FIRST inside `single_fold::fold`.
+
+But it is asserted rather than argued.
+`the_move_added_no_refusal_that_the_old_path_did_not_already_make` states the
+BICONDITIONAL: `render_artifacts` accepts a stream exactly when `fold_to_field_defs`
+accepts it - `fold_to_field_defs` being the whole of the coherence gate
+`render_artifacts` had before this move, since the other two walkers had none and the one
+fallible call they shared, `flatten_dialectal_ops`, `fold_to_field_defs` makes too - and
+when both refuse, the messages match. Driven over the 27 fixtures, the 10 carriers and 11
+named-type probes (duplicate enum, duplicate domain, drop-and-recreate, enum/domain name
+collision, undefined enum, dropped enum, duplicate inside a `dialect()` leg, duplicate in
+an INACTIVE leg, a schema-qualified table, a table created twice), x 3 dialects. It
+drives 57 refusals and 87 acceptances, and both counts are floored so an all-accept run
+cannot pass while proving nothing.
+
+### What retired, and what it cost
+
+`fold_projection_equality.rs` compares a projection to the WALKER it replaces. With the
+walker gone there is no second answer, so the `runtime_metadata` leg RETIRED rather than
+being pointed at itself. `PROJECTIONS` is 3, and:
+
+    EQUAL_COMPARISONS  2720 -> 2037   (-683: that leg's share; the corpus is unchanged)
+    DIFFERING_COMPARISONS  12 -> 12   (the retired leg carried none)
+    BOTH_REFUSED          392 -> 392  (accrues on FO/FFD, untouched)
+    FOLD_REFUSED          392 -> 196  (accrued only on the two walkers with no coherence
+                                       gate, ATO and RMO; removing RMO leaves ATO's half)
+
+**683 is the number that should be quoted for what step 3 proved about this projection,
+not 2,720.** 2,720 was the total across all four legs. Quoting the four-projection total
+for a one-projection claim overstates the prior evidence fourfold, and an inflated
+evidence claim is the same failure as a gate that passes for the wrong reason, only in
+prose. The `#[doc]` on the new test file says so in those terms.
+
+`differential_corpus.rs` keeps its RMO column, now driven through
+`project_runtime_metadata` - its real entry point. 13 recorded ROWS moved, every one of
+them `RMO=<answer>` -> `RMO=refused` on a stream the fold already refused, and 28 REACH
+cells moved, every one of them the 4th column `S -> R`. That is one fact: the runtime
+metadata became fail-closed, so three of the four artifact producers now sit behind the
+same coherence gate. **The cost, recorded because it is a real loss:** the RMO column of
+the reach matrix now conflates "the projection's answer changed" with "the fold refused
+this prefix", so that column is less discriminating than it was.
+
+### What this does NOT prove
+
+- **Nothing here ran against a live server.** Every claim about what PostgreSQL does to
+  an index name under `ALTER TABLE ... RENAME` is inherited from `render/fold.rs` and
+  from `fold_roundtrip_pg.rs`, not re-measured. If that inherited rule is wrong, this
+  change is wrong with it and the gate would still be green.
+- **The corpus golden covers the metadata map, not the whole artifact semantically.** It
+  hashes both artifacts whole, so a byte moving anywhere is caught; but the per-FIELD
+  lines beside the hashes only name `options.{softDelete,versioning,strictness}` and
+  `indexes[].{name,fields,unique}`. A hash that moved for some other reason would fail
+  the test without the lines saying which field did it.
+- **The over-refusal control proves equality of refusal SETS, not of error TEXT
+  ordering.** `render_artifacts` now reports the fold's error from an earlier call site.
+  The control asserts the new message CONTAINS the old one, so a caller that pattern-
+  matched on the exact string is covered, but one that depended on which of two
+  simultaneously-failing checks reported first is not.
+- **`AuthoredState::advance`'s `DropPartition` arm is still unmeasured**, as
+  `single_fold.rs` already says: no corpus stream builds `createTable` + `attachPartition`
+  + `dropPartition`, so the choice to follow the catalog there remains a choice.
+- **`render_artifacts` now runs the catalog replay TWICE** - once in `single_fold::fold`,
+  once in `fold_to_field_defs`. That is a cost, not a correctness change, and collapsing
+  it is the `fold_ops_onto` extraction the proposal assigns to the LAST consumer. Nothing
+  here measures the added time.
+- **The `include` correction is pinned on three dialects but proven on one.** The PG 18.4
+  measurement is PostgreSQL's. SQLite and MySQL get the same answer because the fold is
+  dialect-neutral here, which is a consistency argument and not a measurement.
+
+### Gates
+
+fmt 0. clippy `--workspace --all-targets -- -D warnings` 0. `cargo test --workspace
+--exclude zero-migrate-node`: 225 suites, 3,261 passed, 0 failed, 11 ignored. `cargo test
+-p zero-migrate-node --no-default-features`: 91 passed, 0 failed. `pnpm -w build` 0.
+`pnpm --filter zero-migrate check` 0. `pnpm --filter zero-migrate test`: 326 pass, 0 fail,
+1 skipped. `pnpm --filter zero-migrate-cli typecheck` 0. `pnpm --filter zero-migrate-cli
+test:docs`: 6 pass, 0 fail, 0 skipped. `pnpm --filter zero-migrate-node build` 0, rebuilt
+BEFORE the host suite. `pnpm --filter zero-migrate-cli test:host`: 458 tests, 458 pass, 0
+fail, **0 skipped** - ON THE SECOND ATTEMPT. The first invocation exported the wrong
+variable name and reported 458 tests, 380 pass, 0 fail, **78 skipped**, exit 0; see the
+instrument-failure note below, and read this line as a result obtained on a re-run rather
+than first time. `checksum_corpus_stability` green, both tests - the wire format did not
+move and no object key name changed.
+
+BASELINE RE-MEASURED on `fce0975d` in its own worktree, sequentially with the treatment
+run so the two never shared the PostgreSQL instance: 224 suites, 3,248 passed, 0 failed,
+11 ignored. The delta is +1 suite and +13 passed, which is exactly the file this commit
+adds. The brief's `224/3248` was accurate.
+
+TWO INSTRUMENT FAILURES OF MY OWN, both caught, both worth recording because both failed
+toward green:
+
+1. The first `test:host` run exported `ZERO_MIGRATE_PG_URL`. The variable the host tests
+   actually read is **`ZERO_MIGRATE_TEST_PG_URL`**. That run reported 380 pass / 78
+   skipped and **exited 0**. The skip count is the only thing that distinguished it from
+   a real pass. Diagnosed rather than assumed: the log carries 77 `# SKIP
+   ZERO_MIGRATE_TEST_PG_URL unset; PostgreSQL unavailable` lines and ZERO occurrences of
+   "recovery mode", "FATAL", "ECONNREFUSED" or "could not connect", so it was a missing
+   variable and not the shared instance misbehaving - a distinction worth making,
+   because the two look identical if you only read the exit code. This is why the gate is
+   "458/458 with 0 skipped" and not "0 failed": under the conventional signal, the bad
+   run was green.
+2. My first count of the Rust suite used `awk -F'[ ;]'` with field indices that were off
+   by the `test result: ok.` prefix, and reported `ignored=0` for BOTH trees. It would
+   have reported 0 whether or not anything was ignored - 11 silently-skipped tests and 11
+   correctly-reported ones look identical through it. Re-derived with a parser
+   demonstrated to return nonzero (it prints 4, 1, 1, 1, 4 on the individual lines that
+   sum to 11): **11 ignored on both trees, unchanged.**
+
+Servers left as found. PostgreSQL `pg_postmaster_start_time()` = `2026-08-17
+11:43:42.89391+00`, unchanged across the whole session, so the instance never entered
+recovery. 127 non-system schemas remain, all randomized per-run names from the shared
+suite (`allowlist_pg_*`, `conroutes_*`, `guardfold_adopt_pg_*`, `f662_*`); 4 match
+`fold|step4|runtime_metadata` and all 4 are `guardfold_adopt_pg_msjl*`, whose timestamp
+prefixes predate this session. This change adds no live test, so its own prefix is empty
+by construction. The MySQL client is not in the devShell, so MySQL was counted only by
+the suite's own guards - `ZERO_MIGRATE_MYSQL_URL` was set and the MySQL legs ran.
