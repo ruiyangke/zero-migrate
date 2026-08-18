@@ -32247,3 +32247,217 @@ ones that panicked mid-suite. The whole-catalog `pg_namespace` count moved 331 -
 recording: the shared instance entered `FATAL: the database system is in recovery mode`
 for 41s during the first RED attempt, with `pg_postmaster_start_time()` unchanged - a
 backend crash from another run, not a restart and not this work.
+
+## The single-fold spike: one model CAN serve both, and two of the brief's premises are false
+
+`docs/proposals/pluggable-backends.md:339-342` left one risk open and asked for a spike
+before step 3: "`TableSnapshot` carries catalog identity, the runtime descriptor is a wire
+contract. Whether one model can serve both without becoming a god-object is UNVERIFIED."
+
+### The answer
+
+**Yes, with a bound, and the bound is 34 fields.** Not one struct - `single-fold-and-effects.md`
+section C is right that `ColumnSnapshot` and `FieldDescriptor` speak different vocabularies -
+but one MODEL behind several typed projections is buildable, and here is what it costs,
+counted rather than estimated by `tests/schema_model_god_object_bound.rs`:
+
+| class | count | meaning |
+|---|---|---|
+| already in the model | 8 | the neutral `Column` carries the fact today |
+| would JOIN a unified model | 18 | dialect-neutral, IR-statable, and the model does not carry it |
+| vendor fact | 1 | `vector_metric`, pgvector's; belongs in `VendorFacts` |
+| projection-private | **1** | `unbounded_text`, whose own doc says `#[serde(skip)]`, "Never serialized" |
+
+That last row is the whole answer. The god-object objection is that a unified model ends up
+carrying every consumer's private state. Measured against the real wire contract, exactly ONE
+of `FieldDescriptor`'s 28 fields is a projection's private state, and it is a render-only
+marker derivable from two facts the model already has. The clash section C worried about is a
+VOCABULARY clash (`ty` is a DSL token, `data_type` is a catalog type) and it is real - `ty` is
+in the 18 - but a vocabulary clash is a field, not an architecture. The neutral `Column` has
+16 fields today; a unified one has 34.
+
+Thirty-four is a lot, and this entry does not pretend otherwise. What it is not is unbounded:
+the routing test is a compile error when `FieldDescriptor` gains a field and the four counts
+are pinned, so section I's admission that the bound is "a discipline, not a compiler check"
+and that "the god-object arrives one reasonable case at a time" no longer holds. The case can
+still be made; it now has to be made in a diff that moves a number.
+
+### Premise 1, REFUTED: `drift_identity` is not what `ColumnSnapshot::eq` should be called
+
+Section D proposes replacing `ColumnSnapshot::eq`'s exclusion list with
+`drift_identity(&Column, &Column)` "for structural drift". Measured across `crates/*/src` with
+`cfg(test)` excluded:
+
+- **`apply/drift.rs` contains ZERO uses of `PartialEq` on `ColumnSnapshot`, `IndexSnapshot`,
+  `ConstraintSnapshot`, `TableSnapshot` or `ViewSnapshot.`** Its column pass matches by name
+  into a `BTreeMap` and compares named fields by hand (`diff_attrs`, `drift.rs:2846-3141`).
+- **`ColumnSnapshot::eq` has exactly ONE production consumer, `TableSnapshot::eq`
+  (`snapshot.rs:1279`).** No production code compares two columns directly.
+- `TableSnapshot::eq`'s four production consumers are ALL in `render/declarative.rs`:
+  `DesiredSchema`'s equality (`:3450`), `desired_snapshot_second_pass`'s
+  `ConflictingDeclaration` check (`:4128`), `pure_sqlite_column_rename` (`:4261`), and
+  `enforce_ownership`'s "did anything change" gate (`:6645`, `:6647`).
+
+So `ColumnSnapshot::eq` is the TABLE-SHAPE comparator, not the drift comparator, and the two
+already disagree: drift compares `generated_kind` (through `comparable_generated_column`,
+`drift.rs:2919`) and `mysql_physical_type` (through `column_data_types_eq`,
+`drift.rs:2799-2840`); `eq` compares neither. Drift's definition of "the same column" is
+STRICTLY STRONGER than `PartialEq`'s and has been all along. Extracting `eq` under the name
+`drift_identity` would have taught the next reader something false, so the comparators are
+named for the questions the call sites ask: `column_shape_identity`, `index_pairing_identity`,
+`index_shape_identity`, `constraint_shape_identity`, `table_shape_identity`,
+`rename_equivalence_identity`, and a separate `drift_identity` built from what `apply::drift`
+actually compares.
+
+This also confirms the brief's own fact 1 from a second direction. `docs/review-log.md:9443`
+says the drift pass "runs independently of `PartialEq`". Measured, that is not a quirk of the
+`only` fix; it is true of every field, on every one of the five types.
+
+### Premise 2, CONFIRMED and made explicit
+
+An exclusion list has already blocked a fix (`28291-28297`, `28481-28487`):
+`ConstraintSnapshot::eq` compares `definition`, so following a rename into a constraint
+definition inside `sqlite_rename_rebuild` would have flipped `preserve_stored_shape` off and
+stopped the catalog path replaying SQLite's stored body. That coupling is preserved exactly -
+this step changes no behaviour - but it now runs through `rename_equivalence_identity`, a named
+function whose doc states the consequence, rather than through an `eq` a reader has to trace.
+
+### Two more measurements worth recording
+
+- **`Hash` on `ColumnSnapshot` (`snapshot.rs:726-746`) and `IndexSnapshot` (`:1077-1104`) is
+  UNREACHABLE.** No `HashSet`/`HashMap` anywhere in `crates/*/src` or `crates/*/tests` is keyed
+  by either type, and no containing type derives `Hash`. Thirty-six lines of carefully
+  canonicalising hash logic with no consumer, and every `Eq`/`Hash` consistency argument in
+  those field docs is currently unfalsifiable. Not touched here - it is a deletion, and this
+  step is required to change nothing.
+- **`enforce_ownership` already mutates a clone** (respelling index names, re-sorting) to make
+  `TableSnapshot::eq` answer the question it wants. That is the signal that whole-struct
+  equality is the wrong primitive there, independently of this work.
+
+### What the vendor split cost, and the one place it is not free
+
+`VendorFacts` absorbs five of `ColumnSnapshot`'s 21 fields (`sqlite_rowid`,
+`catalog_uuid_format_check`, `mysql_default_generated`, `mysql_text_storage`,
+`mysql_physical_type`), three of `IndexSnapshot`'s, two per index ELEMENT, and one of
+`TableSnapshot`'s. Four of `ColumnSnapshot::eq`'s eleven exclusions therefore stop being
+exclusions and become UNREACHABLE: `drift_identity` cannot compare `mysql_physical_type`
+because `Column` has no such field.
+
+The one that is not free is `sqlite_rowid`. `ColumnSnapshot::eq` COMPARES it, so moving it out
+and stopping there would silently stop reporting an out-of-band rowid/AUTOINCREMENT flip. The
+neutral and vendor halves are therefore recombined explicitly, by
+`SchemaModel::column_shape_identity`, and `VendorFacts` grew its own named comparators
+(`column_shape_identity`, `column_drift_identity`, `index_identity`, `table_identity`). That is
+the improvement: a drift verdict visibly has two inputs instead of one impl silently carrying a
+SQLite fact for every consumer.
+
+### The RED, and what made it the right one
+
+A compile error is not a RED, and the meaningful RED here is the FAILURE DIRECTION. The
+property is: *change exactly one field - does `==` notice?*
+
+`tests/structural_equality_field_sensitivity.rs` points it at both types, with the mutation set
+built by exhaustive destructuring so a new field is a compile error until a probe exists, and a
+probe whose mutation is a no-op is a failure rather than a false green (checked through `Debug`,
+because `PartialEq` is the thing under test and cannot check its own input).
+
+Measured on today's tree, and pinned in BOTH directions so the numbers cannot drift:
+
+```
+ColumnSnapshot      11 of 21 fields can differ while `==` reports EQUAL
+TableSnapshot        2 of 7      (runtime_options, stored_create_sql)
+IndexSnapshot        4 of 13     (only, opclass, nulls_not_distinct, expr_cascade_columns)
+ConstraintSnapshot   1 of 5      (cascade_columns)
+```
+
+The RED itself: `schema_model::Column` was first given a hand-written `eq` copying
+`ColumnSnapshot::eq`'s inclusion list. The property failed, naming the seven neutral fields the
+list drops:
+
+```
+`schema_model::Column` derives `PartialEq`, so NO field may be invisible to `==`.
+These were: ["Column::default", "Column::ddl_type_override", "Column::inline_checks",
+"Column::generated", "Column::generated_kind", "Column::encryption_sentinel",
+"Column::comment_sentinel"]
+```
+
+`#[derive(PartialEq)]` turns it green. All four model types now answer "yes" for every field.
+
+### The weak instrument I built first, and how it was caught
+
+The behaviour-preservation proof sweeps every ORDERED PAIR of real objects from a live snapshot
+and a folded one and asserts each named comparator answers what its `eq` answers. That catches a
+comparator with an ADDED term. It does NOT catch one with a DROPPED term, and the reason is
+specific: **any two distinct real columns differ in `name`, so the first term already decides
+and the later ones are never reached.** Only the (live X, folded X) pairs go deeper, and those
+agree on everything.
+
+Neuter N2 - deleting `collation` from `column_shape_identity` - passed the pairwise sweep. That
+is a false green, and it is exactly the shape of instrument failure the standing rule warns
+about.
+
+The fix is per-field probes against real data: take a REAL introspected column, change ONE field
+with the SAME probe inventory the failure-direction test uses, rebuild the model from the mutated
+snapshot so the two sides cannot drift apart, and assert both verdicts move together. With that
+in place N2 fails naming the field:
+
+```
+live PostgreSQL: changing ONLY `ColumnSnapshot::collation` on the real column sm_main.id
+moved `ColumnSnapshot::eq` to false but `column_shape_identity` (+ its vendor half) to true.
+The comparator is not the extraction it claims to be.
+```
+
+One probe inventory, `tests/support/field_probes.rs`, serves both tests - the
+`tests/support/carriers.rs` technique carried across to its sibling rather than reinvented
+beside it.
+
+### Neuters, each verified separately
+
+- **N1** - `Column` gets a hand-written `eq` instead of `#[derive(PartialEq)]` ->
+  `every_field_of_the_neutral_column_is_compared_by_default` fails, naming 7 fields.
+- **N2** - drop `collation` from `column_shape_identity` -> the live PostgreSQL test fails,
+  naming `ColumnSnapshot::collation` on a real column. (Passes without the per-field probes;
+  that is why they exist.)
+- **N3** - drop `mysql_physical_type` on the way INTO `VendorFacts` -> the live MySQL test fails
+  its vendor-population precondition.
+- **N3b** - keep it going in, drop it coming OUT -> the round trip fails on
+  `sm_mysql_main.amount`, on a real `Decimal { precision: 12, scale: 2 }`.
+
+### Why MySQL is a separate leg rather than a duplicate
+
+On PostgreSQL every `VendorFacts` family is at its DEFAULT: `sqlite_rowid` false,
+`catalog_uuid_format_check` false, `pg_index_only` false (PG introspection hardcodes it),
+`mysql_*` absent. So the lossless claim is not actually TESTED there - a round trip that dropped
+a vendor family would pass. MySQL populates `mysql_physical_type`, `mysql_text_storage` and
+`mysql_default_generated` on every column, so the MySQL leg is the only one that measures the
+side table, and it asserts that precondition rather than assuming it. N3 is the proof: it fails
+at that assertion.
+
+The round trip is compared through `Debug`, not `==`, for the same reason: `==` is the lossy
+thing under test, and a round trip that dropped a vendor fact would compare EQUAL.
+
+### Scope, honestly
+
+No consumer moves. The new fold is not written. The hand-written `eq` impls all stay, per the
+proposal's own sequencing. `apply/drift.rs` is not edited at all - a concurrent change owns it,
+and it was READ (in full) but not touched. `SchemaModel` is bounded to TABLES; views, sequences,
+roles, functions, policies and triggers are not modelled, and the 34-field number is about
+`Column` only.
+
+### Gates
+
+fmt 0. clippy `--workspace --all-targets -- -D warnings` 0. `cargo test --workspace --exclude
+zero-migrate-node`: 223 binaries, 3232 passed, 0 failed, 11 ignored. `cargo test -p
+zero-migrate-node --no-default-features`: 91 passed, 0 failed. `pnpm -w build` 0. `pnpm --filter
+zero-migrate check` 0. `pnpm --filter zero-migrate test`: 327 tests, 326 pass, 1 skipped, 0 fail.
+`pnpm --filter zero-migrate-cli typecheck` 0. `pnpm --filter zero-migrate-cli test:docs`: 6
+pass, 0 fail. `pnpm --filter zero-migrate-node build` 0 (rebuilt BEFORE the host suite). `pnpm
+--filter zero-migrate-cli test:host`: 458 tests, 458 pass, 0 fail.
+
+`checksum_corpus_stability` green - no wire change, and none was needed: the neutral model is a
+new type beside the snapshot types, not a rename of an op field.
+
+One incident worth recording. The PostgreSQL server entered recovery mode mid-run (a crash from
+a concurrent session, not from this work) and left three schemas behind under this session's own
+prefix. Counted by prefix before and after rather than globally, because other sessions are
+running: `schema_model_eq_pg%` and `%smeq%` are both ZERO on both servers now.
