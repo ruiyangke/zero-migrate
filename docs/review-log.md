@@ -32546,6 +32546,237 @@ equal. That is the falsifiable statement the old prose was gesturing at.
 restructuring of `snapshot.rs` - the type layout, field order and every `impl` block boundary are
 untouched. `render/fold.rs` was not opened.
 
+## Step 3 of `single-fold-and-effects.md`: one traversal, four projections, and two artifacts that outlive their ops
+
+Section G step 3: "Write `fold(ops) -> SchemaModel` and the four projections. Gate: every
+projection must reproduce its current walker byte-for-byte on the step 1 corpus. [...] This
+step ships with the new fold DEAD, reachable only from tests."
+
+It ships dead. The only reference to `render::fold::single_fold` outside the module and its
+`cfg(test)` gate is the `mod` line that declares it, and `#![cfg_attr(not(test),
+allow(dead_code))]` is that statement in the compiler's words: the attribute stops being needed
+on the day a consumer is wired to it, so the diff that removes it is the diff that moved the
+consumer.
+
+### The headline: three of four projections re-derive their walker; the fourth is a round trip
+
+| projection | walker | is it a re-derivation? | byte-for-byte |
+|---|---|---|---|
+| `project_field_defs` | `fold_to_field_defs` | YES - built from the AUTHORED model, not from a second replay | equal except 3 recorded rows |
+| `project_authoring_tables` | `authoring_tables_from_ops` | YES - the fold's own per-op advance | equal except 3 recorded rows |
+| `project_runtime_metadata` | `runtime_metadata_from_ops` | YES - the index set is a READ of the authored indexes, with no second lifecycle | equal, all rows |
+| `project_snapshot` | `fold_ops` | NO - see below | equal, all rows |
+
+`project_snapshot` is stated as what it is rather than dressed up. The catalog rules still live
+in `fold_ops_onto`, this fold calls it once, and the projection routes the result through
+`SchemaModel::from_tables` / `to_tables`. So it reproduces `fold_ops` because it CONTAINS
+`fold_ops`'s answer, and holding that up as evidence about the fold would be circular.
+
+What it does prove is something the tree did not have: the neutral/vendor split is lossless on
+FOLDED shapes. `tests/schema_model_equivalence_{pg,mysql}.rs` only ever ran the split on
+LIVE-INTROSPECTED snapshots, and an introspected snapshot populates a different half of the
+input space - `catalog_uuid_format_check` and `mysql_text_storage` are introspection-only,
+`ddl_type_override` and `encryption_sentinel` are author-only. 97 folded tables are now compared
+PER FIELD (21 column + 13 index + 5 constraint + 7 table fields, exhaustively destructured with
+no `..`) and none loses a field.
+
+And a caveat on the word "re-derivation", because it can be oversold. The fold's per-op advance
+was written by READING the three walkers, and it reuses their helpers (`named_index`,
+`constraint_uses_local_column`, `rename_expr_column`, `recover_check_facet`,
+`fold_create_column_to_field`) rather than re-spelling them. It is not a clean-room
+reimplementation and a shared bug in a shared helper would be invisible to this gate. What is
+genuinely new is the STATE: one authored model advanced once, with `fold_to_field_defs`'s three
+private side tables (`checks`, `fks`, `named_types`) and `runtime_metadata_from_ops`'s whole
+index lifecycle gone, replaced by reads of what the model already holds. Both defects below are
+that change paying out - each is a rule one walker maintained privately and got wrong, and
+neither survives being a read.
+
+Per field, not `==`, and not by accident: a whole-object comparison stops at the first
+difference, and this log already records a behaviour-preservation proof that passed while a
+comparator field was deleted because two distinct objects always differ in `name`. Neuter N5
+(drop `comment` on the way out of `Column::to_snapshot`) is what proves the probe bites.
+
+### Why it is not literally `fold(ops) -> SchemaModel`
+
+The proposal's own signature does not typecheck against the model that landed in `b0dd315a`.
+`SchemaModel` is bounded to TABLES: it carries 1 of `SchemaSnapshot`'s 13 object families.
+A stream that creates a view produces a model with nowhere to put it, so no projection of
+`SchemaModel` can reproduce `fold_ops` today. The fold returns `FoldedSchema`, which names the
+gap in three fields rather than hiding it:
+
+- `model` - the neutral tables and their `VendorFacts`;
+- `unmodelled` - the twelve families the neutral model does not reach (views, sequences, named
+  types, roles, schemas, extensions, functions, policies, triggers, partitions, per-table RLS,
+  vendor object identities), with its `tables` map deliberately empty so there is only one
+  answer about a table;
+- `authored` - the AUTHORED half at IR resolution, which is section C's "the model must be
+  RICHER than either current type, not a common subset" as a field rather than a claim.
+
+The proposal is right about the direction and wrong about the arithmetic. Section G step 3 as
+written cannot be completed until the model grows the other twelve, and that growth is not
+free: `tests/schema_model_god_object_bound.rs` already prices the `FieldDescriptor` half at 18
+new `Column` fields, and it prices nothing about the twelve.
+
+### The gate, and what it measures
+
+`render/gen_types/fold_projection_equality.rs`, `cfg(test)`, in-crate for the same reason the
+step 1 corpus is: two of the four walkers are private to `render::gen_types`, and the
+alternative is widening production functions so a test can reach them. It reuses the step 1
+corpus's streams verbatim - `differential_corpus` owns the fixtures, this file owns the
+comparison - so a stream added there is measured here without being written twice.
+
+60 streams (27 recorded op fixtures + 13 authored vehicles + 20 differential cases), every
+PREFIX of every stream, 3 dialects, 4 projections. 3,516 observations:
+
+- **2,720 byte-identical**
+- **12 differing**, all attributed below
+- **392 both-refused** - the two fold-backed sides refuse together
+- **392 fold-refused** - the fold fails closed and `authoring_tables_from_ops` /
+  `runtime_metadata_from_ops` answer anyway, which the step 1 corpus already records as
+  `ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED`. These are counted separately and pinned, because
+  they are prefixes the gate did NOT get to compare and a gate that quietly refuses more would
+  otherwise look greener.
+
+Per projection the arithmetic closes exactly, which is worth stating because it says the
+coverage is even rather than concentrated: 879 observations each; 196 of them unusable for each
+projection (both-refused for the two fold-backed sides, fold-refused for the two artifact
+walkers); 683 real comparisons each; 683 + 677 + 677 + 683 = 2,720 equal, with the 6 + 6
+differing rows in `field_defs` and `authoring_tables`.
+
+The canonical texts are the SAME ones `differential_corpus` compares (`{:#?}` for the three
+Rust-typed answers, `to_string_pretty` for the wire map), so a difference this gate reports is
+a difference that file could have reported, and neither can hide behind a comparator of its own.
+
+`walker_refused` is asserted to be ZERO: a walker refusing a stream the fold accepts would mean
+the single fold is LESS fail-closed than what it replaces, which is the dangerous direction and
+is not a difference that may be recorded away.
+
+### The RED, verbatim
+
+Not a compile error, and not a hand-built vehicle: the first run of the gate against the
+already-written fold, on named corpus rows, with both spellings.
+
+```
+the step 3 byte-for-byte gate moved:
+  MEASURED, NOT RECORDED: v_index_and_constraint|Postgres|field_defs differs on 2 of 7
+    prefixes; first after 5 ops -> line 9: fold "\"required\": true" walker "\"required\": true,"
+  MEASURED, NOT RECORDED: v_primary_key|Postgres|authoring_tables differs on 2 of 4
+    prefixes; first after 2 ops -> line 45: fold "\"legacy_id\"," walker "\"id\","
+  (and the same two on Sqlite and Mysql)
+```
+
+The first reads oddly on purpose and the file says why: the walker's descriptor carries a
+`unique` key the projection's does not, so the projection's object ends one key earlier and the
+FIRST differing line is the one before it - `"required": true` against `"required": true,`. A
+report that paraphrased instead of quoting would have hidden that the difference is a missing
+KEY rather than a changed value.
+
+### The 12 differences, triaged
+
+Both are the SAME defect shape in two walkers, and neither is in `docs/review-log.md` - this
+gate is the first record of both.
+
+**1. `fold_to_field_defs` never un-lifts a dropped UNIQUE** (3 rows, one per dialect,
+`v_index_and_constraint` at prefix 5).
+
+The walker lifts a single-column `UNIQUE` onto the column descriptor from `createTable` AND from
+`addConstraint`. Its `Op::DropConstraint` arm exists, and its comment says exactly why it must:
+"the policy outlived the constraint and gen-types kept emitting an ON DELETE the database no
+longer has". But that arm only touches `fks`. The uniqueness the same `dropConstraint` removed
+survives in `schema.runtime.json` - one fix, one instance, the sibling left open, which is the
+F113 pattern this log names.
+
+Evidence, not opinion: at that prefix `fold_ops` - the structural oracle the live PostgreSQL,
+SQLite and MySQL suites anchor - has already removed `users_email_uq`, so the artifact and the
+catalog disagree about the database.
+
+The gate found the UNIQUE half because a corpus stream drops one. **No corpus stream drops a
+CHECK**, so the gate is blind to the `min`/`max` half of the same hole, and blindness is not
+evidence of absence: `a_dropped_check_constraint_outlives_itself_in_the_field_def_map` measures
+it directly and it is there too. The projection derives all three from the constraints the model
+still holds, so one rule covers the family instead of one arm per facet.
+
+**2. `authoring_tables_from_ops` has no `Op::AlterPrimaryKey` arm at all** (3 rows,
+`v_primary_key` at prefix 2).
+
+Measured `S` for ATO in the step 1 reach matrix (`alterPrimaryKey|Postgres|RRSS`) - the op falls
+through the walker's `_ => {}`. `render_table` reads `primary_key` to emit the key, so after an
+exact-order `alterPrimaryKey` replace the SHIPPED `env.db.ts` still says:
+
+```
+    id: t.text().primaryKey(),
+    legacy_id: t.text().notNull().unique(),
+```
+
+while `fold_ops` has the key on `legacy_id` and `tests/pg_primary_key.rs` already proves against
+a real PostgreSQL that the server has it there too. Regenerating an app from that artifact
+reinstates a key the migration removed. `fold_to_field_defs` DOES handle the op (it clears the
+identity facet), so one `renderArtifacts` call emits two artifacts that disagree about one
+table - section B row 2's shape, on an op nobody had looked at.
+
+Neither walker is fixed here. Step 3 changes no behaviour, and adopting either side silently is
+the thing the proposal's own framing forbids; both are recorded with the side the gate believes
+and why.
+
+### Re-measured, because the prose was wrong twice before
+
+Behavioural reach on the step 1 corpus at `947f96e9`, by prefix sweep, not by counting `match`
+arms:
+
+| walker | section A's arm count | measured reach |
+|---|---|---|
+| `fold_ops` | 56 arms, 4 catch-alls | **46 / 56** |
+| `fold_to_field_defs` | 56 arms, 0 catch-alls ("exhaustive") | **22 / 56** |
+| `authoring_tables_from_ops` | 15 arms | **16 / 56** |
+| `runtime_metadata_from_ops` | 12 arms | **8 / 56** |
+
+The brief's `runtime_metadata_from_ops = 8` is confirmed. Its `fold_to_field_defs = 21` is 22 as
+measured here. Neither number is an arm count, and the difference matters in a way both framings
+miss: **7 of FFD's 22 are ops it reaches only because it calls `fold_ops` for coherence and the
+fold refuses** - `createIndex`, `dropIndex`, `dropView`, `dropSequence`, `dropPartition`,
+`attachPartition`, `synchronizeIdentity` move its answer by turning it into a refusal, not by
+being interpreted. Conversely its `createEnum` / `createDomain` arms ARE real and measure
+`S`, because registering a definition changes nothing until a column names it. An arm count and
+a reach count are answering different questions and neither is "how many ops does this walker
+decide".
+
+### Neuters, each verified separately
+
+- **N1** - `project_snapshot` returns no tables -> the gate fails.
+- **N2** - `project_field_defs` stops lifting the named-type facets -> the gate fails.
+- **N3** - `project_authoring_tables` drops `partition_by` -> the gate fails.
+- **N4** - `project_runtime_metadata` stops deriving the unique index from `column.unique` ->
+  the gate fails.
+- **N5** - `Column::to_snapshot` drops `comment` -> the PER-FIELD probe fails naming
+  `column.comment`. This is the one that proves the probe is not a whole-object sweep wearing a
+  field-shaped hat.
+
+One process note worth keeping: restoring each neuter with `mv file.bak file` gave the restored
+file an mtime OLDER than the build, so cargo did not rebuild and the "confirm green" run at the
+end reported three false failures. `touch` and re-run cleared it. The neuter results themselves
+are unaffected - each neuter EDIT gave the file a new mtime, so every neutered build was real -
+but a stale-mtime restore reads exactly like a broken revert.
+
+### Scope, honestly
+
+- No consumer moves, and none may: the byte-for-byte gate is the safety net step 4 spends.
+- The catalog rules are not in the traversal yet. `fold_ops_onto` cannot be driven one op at a
+  time, MEASURED rather than assumed: it seeds `named_types` with `NamedTypeRegistry::default()`
+  rather than from `base`, so a per-op drive loses every enum and domain definition between ops.
+  Bringing them in means extracting its 1,989-line loop body into an advance function, which is
+  a production refactor of the most dangerous walker in the tree. That is step 4's opening move.
+- `Op::DropPartition` is the one arm where the fold makes a choice no corpus stream measures:
+  the catalog replay and `runtime_metadata_from_ops` remove the relation and
+  `authoring_tables_from_ops` does not. The fold follows the catalog, and the arm says so rather
+  than presenting it as proven.
+- The 16 `pub(crate)` widenings in `render/gen_types.rs` are visibility only. The single fold
+  reuses those helpers rather than re-spelling them, so the rules that already have exactly one
+  implementation keep exactly one; what it re-derives is the STATE, which is the thing that
+  diverged.
+- `checksum_corpus_stability` green (`corpus_checksums_are_byte_stable`,
+  `every_corpus_op_has_a_deterministic_checksum`). Nothing here renames an op field or touches
+  the wire format; the fold is a new type beside the snapshot types.
+
 ### Gates
 
 fmt 0. clippy `--workspace --all-targets -- -D warnings` 0. `cargo test --workspace --exclude
@@ -32567,3 +32798,21 @@ They belong to a concurrent sibling run on the shared instance, and were deliber
 sweeping them is precisely the cross-run damage `dialect_conformance_live.rs` documents at line 69.
 The MySQL client is not in the devShell, so the MySQL side could not be counted; the MySQL-gated
 tests were unaffected either way.
+zero-migrate-node`: 224 suites, 3,248 passed, 0 failed, 11 ignored. `cargo test -p
+zero-migrate-node --no-default-features`: 91 passed, 0 failed. `pnpm -w build` 0. `pnpm --filter
+zero-migrate check` 0. `pnpm --filter zero-migrate test`: 326 pass, 0 fail, 1 skipped. `pnpm
+--filter zero-migrate-cli typecheck` 0. `pnpm --filter zero-migrate-cli test:docs`: 6 tests, 6
+pass, 0 fail. `pnpm --filter zero-migrate-node build` 0, rebuilt BEFORE the host suite. `pnpm
+--filter zero-migrate-cli test:host`: 458 tests, 458 pass, 0 fail, **0 skipped** (a run without
+`ZERO_MIGRATE_TEST_PG_URL` silently skips 76 of them and still exits 0, so the skip count is the
+number that says the DSN was really used).
+
+The brief gave a baseline of 220 suites / 3,233 passed. MEASURED on `947f96e9`
+itself, in this same worktree, with the same DSNs: 224 suites, 3,241 passed, 0 failed, 11
+ignored. So the delta this change makes is +7 passed and +0 suites, which is exactly the seven
+tests it adds - the stated baseline was stale, not the run.
+
+PostgreSQL: 331 schemas before, 331 after. This change adds no live test, so its own prefix is
+empty by construction; the global count is reported because other sessions are running against
+the same server. The MySQL client is not in the devShell, so MySQL was counted only by the
+suite's own guards - `ZERO_MIGRATE_MYSQL_URL` was set and the MySQL legs ran.
