@@ -362,19 +362,40 @@ authority on comparison; `apply::drift` has its own opinion.
 all fields equal, with no exceptions and nothing to maintain. Every place that
 today relies on an exclusion becomes an explicitly named comparator:
 
-- `drift_identity(&Column, &Column) -> bool` for structural drift, which states
-  which fields it ignores and why, in one place, with the field docs moved onto
-  it.
-- `index_pairing_identity(...)` for the differ's index pairing, which is a
-  DIFFERENT question and today accidentally shares an answer.
+- One named comparator per QUESTION A CALL SITE ACTUALLY ASKS:
+  `column_shape_identity`, `index_pairing_identity`, `index_shape_identity`,
+  `constraint_shape_identity`, `table_shape_identity` and
+  `rename_equivalence_identity` — each stating which fields it ignores and why,
+  in one place, with the field docs moved onto it.
+- `drift_identity` is a SEPARATE comparator built from what `apply::drift`
+  really compares. It is NOT an extraction of `ColumnSnapshot::eq`.
 - Vendor facts are compared only by code that knows the vendor, because they
   live in `VendorFacts` and are not reachable from the neutral model.
+
+**Correction, measured.** An earlier draft listed a single
+`drift_identity(&Column, &Column)` as the extraction of what `ColumnSnapshot::eq`
+does "for structural drift". There is nothing to extract, and the naming would
+have taught the next reader something false. Measured on `main`, with `cfg(test)`
+excluded:
+
+- `apply/drift.rs` contains **ZERO** uses of `==`, `!=` or `.eq()` on any of the
+  five snapshot types. Its column pass is entirely hand-rolled (`diff_attrs`).
+- `ColumnSnapshot::eq` has exactly ONE production consumer, `TableSnapshot::eq`.
+  Nothing compares two columns directly.
+- `ColumnSnapshot::eq` compares NEITHER `generated_kind` NOR
+  `mysql_physical_type`; `drift.rs` references those two fields 20 times.
+
+So **drift's "same column" is strictly stronger than `PartialEq`'s and always has
+been**, and drift never consults `PartialEq` at all. Section D's original claim
+that the drift pass "rolls a third opinion" understated it: drift runs
+independently of `PartialEq` for every field on all five types, not just for
+`IndexSnapshot::only`.
 
 Three properties follow, and they are the point. A new field is compared by
 default rather than silently ignored, so the failure direction flips from
 "invisible" to "noisy". A comparator's exclusions are readable as a list rather
-than inferred from an `eq` body. And the drift pass consumes a named comparator
-instead of rolling a third opinion.
+than inferred from an `eq` body. And each consumer names the question it is
+asking instead of borrowing an answer written for a different one.
 
 ## E. Effects, and whether they retire the classification
 
