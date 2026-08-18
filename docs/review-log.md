@@ -33361,3 +33361,214 @@ remain and NONE matches `env_db_ts` or `project_env`, so all 7 cases cleaned up 
 themselves across the RED run, the three neuter runs and the GREEN run. `ZERO_MIGRATE_MYSQL_URL`
 was set for every gate run and the MySQL legs ran; no MySQL client is in the devShell, so
 MySQL was counted only by the suite's own guards.
+
+---
+
+## Step 4 consumer 3: the `FieldDef` map is a projection, and the SQLite rebuild's dependency on it turns out to be PRESENCE, not content
+
+`docs/proposals/single-fold-and-effects.md` section G step 4, third of four consumers.
+`render_artifacts` and `engine` build the wire `FieldDef` map from
+`FoldedSchema::project_field_defs`; `fold_to_field_defs` is deleted, 614 lines, and ONE
+`fold` call now feeds all three artifact projections. `render::lower::retype_field_descriptor`
+goes with it (89 lines) - the walker was its only caller - and its per-facet retype verdict
+moves onto the traversal's `Op::SetColumnType` arm, which is now the single place that
+states it for descriptors.
+
+### The brief was wrong about the coverage, and I was wrong about the danger
+
+The brief said 9 test files reference `sqlite_schemas`, 12 open a live SQLite database, and
+the INTERSECTION IS ZERO. Measured: 7 of the 9 use `SqliteBackend` against a real temp file,
+and `hr_sqlite.rs` drives the whole thing through `deploy_envelopes` - 17 envelopes, seeded
+rows, a `renameColumn` at the end - and asserts employee row CONTENT afterwards. So the leg
+was already exercised live, row-level, through the real deploy path. The brief's narrower
+claim ("exercised but not observed") was the right one and I should have started there.
+
+What I then found is worse than the brief's version in one way and much better in another.
+
+**`preserve_stored_shape` decides which arm runs**, at
+`render/declarative.rs`: `pure_rename.is_some() && dt.stored_create_sql.is_some()`. The
+stored-shape arm replays SQLite's OWN `CREATE TABLE` text; only the SDK-value arm renders
+from `sqlite_schemas`. On the deploy path the live snapshot is INTROSPECTED, so it carries
+`stored_create_sql`, and a `renameColumn` the engine accepts is a pure rename. **So the
+deploy path takes the stored-shape arm and never reads the map's content.**
+
+MEASURED by neutering `engine.rs`'s two assignment sites, over the whole 229-binary suite:
+
+| neuter | failures |
+|---|---|
+| the map is EMPTY | 1 - `hr_sqlite`, on the ABSENCE check (`… needs the table's full live structure … it is absent`) |
+| every column rewritten to `{"type":"string"}`, `required`/`default`/`unique`/`refTarget`/`onDelete` stripped | **0. Nothing at all.** |
+
+That second row is the honest statement of the gap, and it is a stronger version of the
+brief's point: `render/lower.rs` fails closed on a MISSING entry and nothing anywhere reads
+a PRESENT one on that path. It also means the DDL blast radius of this move is far smaller
+than section I of the proposal implies - which is good news I did not have when I started,
+and which I only have because the neuter failed to fire.
+
+I had written the live file claiming to adjudicate the descriptor at the rebuild. That claim
+was FALSE and the neuter is what caught it. The file was rewritten around the two arms:
+`a_fold_seeded_rebuild_renders_its_create_table_from_the_map` drives the SDK-value arm (the
+fold-seeded live schema `engine::refresh_historical_live` builds, no `stored_create_sql`),
+applies it to a real SQLite file with three rows in the table, and asserts the server's
+`PRAGMA table_info` / `foreign_key_list` / `index_list` afterwards;
+`the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content` pins the finding above,
+including that the lowered plan is byte-identical for a right map and a deliberately wrong
+one.
+
+### Five divergence families, where the step 3 gate recorded one
+
+A sweep of the walker against the projection over every PREFIX of the 27 recorded fixtures
+and 22 carriers on 3 dialects: 486 prefix/dialect pairs compared, 216 refused by both, and
+**no prefix on which one refused and the other did not**. Five families, every one a carrier
+- the 27 recorded fixtures produced ZERO:
+
+1. a dropped `UNIQUE` constraint's `unique: true` outlives it (the one the step 3 gate had);
+2. a dropped `CHECK`'s `min`/`max` outlive it (PostgreSQL only);
+3. a dropped `CHECK`'s `enum` membership outlives it (PostgreSQL only);
+4. **a column dropped and re-added under the same name inherits the dropped column's FK
+   policy and CHECK bounds** - not previously recorded anywhere, and the only family that
+   reaches SQLite in the map;
+5. `dropPartition` leaves the dropped relation in the map.
+
+All five are one rule: the walker lifted a constraint's facet onto a column eagerly and kept
+a side map to un-lift from, and never kept that side map in step with the constraint. The
+projection reads the constraints the model still holds.
+
+`no_field_def_divergence_reaches_a_sqlite_rebuild` deploys each of the four SQLite-expressible
+families to a real SQLite database and each is REFUSED before any DDL, for four different
+stated reasons, with a control stream that DOES deploy and reach the rebuild.
+
+### What moved, exactly
+
+`tests/goldens/field_defs_artifacts.txt` was captured from the OLD path by a separate,
+since-deleted binary; 41 lines removed and 34 added by hand, all on the EIGHT carriers that
+carry the five families. **Not one line of the 27 recorded fixtures moved, and no other
+carrier moved.** The 7-line net is `p1` leaving `attached_partition_dropped`.
+
+Consumer 2's golden carries `runtime.json` as a control and SIX of its lines moved - the two
+carriers it shares with these families. ZERO `sha|env.db.ts` lines and zero per-field lines
+moved there, so the move is confined to the artifact it owns. The two goldens agree on the
+new hashes independently.
+
+`differential_corpus`: `dropConstraint|{Sqlite,Mysql}` FFD cells move `S -> R`, the only reach
+cells this move touches. `fold_projection_equality` retires its `field_defs` leg with the
+walker: PROJECTIONS 2 -> 1, EQUAL 1360 -> 683, DIFFERING 6 -> 0, BOTH_REFUSED 392 -> 196,
+FOLD_REFUSED 0 unchanged and still pinned, `FOLD_REFUSAL_PREFIXES` 196 unchanged,
+`TABLES_PROBED_PER_FIELD` 97 unchanged. DIFFERING at zero is NOT "the divergences were
+fixed": every one belonged to a retired leg.
+
+### Neuters
+
+| neuter | fires |
+|---|---|
+| corrupt `project_field_defs` (the SWITCH) | 33 tests / 11 binaries, including the live content test and the golden |
+| `Op::DropConstraint` arm made a no-op (the walker's bug) | both un-lift probes, both goldens, the reach matrix, both in-crate evidence tests |
+| `Op::DropPartition` arm made a no-op | the partition probe, both goldens, consumer 2's partition test |
+| `Op::DropColumn` constraint cascade removed | `a_re_added_column_does_not_inherit_the_dropped_columns_constraints` and the golden - **and nothing else in the tree** |
+| engine's map emptied | `hr_sqlite` only, on absence |
+| engine's map corrupted | NOTHING (see above) |
+
+### Instrument failures of my own, three
+
+1. The live file's central claim was false - it took the stored-shape arm and observed
+   nothing about the map. Caught by a neuter that did not fire, not by a test going red.
+2. My aggregation script used `bc`, which is not on PATH here, and printed `passed=` with no
+   number and no error of its own. A plausible-looking blank, one careless glance from a
+   fabricated baseline.
+3. I committed `CONTROL_REFUSALS`/`CONTROL_ACCEPTANCES` as `0`/`0` placeholders while wiring
+   the file up, which the brief explicitly forbids even transiently. The pin caught it on the
+   first run and both are measured now (74/97) - and the doc comment I wrote beside them
+   claimed "less the 6 the policy resolution rejects", which was arithmetic I had not done and
+   which is false; the identity is 57 x 3 = 171 = 74 + 97, nothing rejected.
+
+Also: the golden's own coverage floor reported that the un-lift fix had removed the LAST
+`onDelete` row from the corpus, leaving the facet unprotected. Rather than lower the floor I
+added `column_level_reference_policy`, restored the walker with `git stash`, re-captured, and
+verified the re-capture is a strict SUPERSET of the earlier one (nothing moved, 17 lines
+added, all from the new carrier). A golden row blessed from the new path would have been
+worthless.
+
+### A pre-existing defect this uncovered, NOT fixed here
+
+`schema::query::def_to_constraints_for_dialect` emits a column `DEFAULT` for the `string`,
+`number` and `boolean` type tokens and has NO arm for `int`. So a SQLite rebuild through the
+SDK-value arm silently drops an integer column's default while keeping a text column's
+(`"theme" TEXT DEFAULT 'dark'` is in the golden, captured from the old path). Both the walker
+and the projection put `"default": 1` in the map - the sweep found no `default` divergence
+anywhere - so this is downstream of the map and byte-identical across this change. It is
+characterized in `a_fold_seeded_rebuild_renders_its_create_table_from_the_map` with the map's
+own claim asserted beside the server's, so whoever fixes the emitter inverts one line.
+
+### WHAT THE GATE DOES NOT PROVE
+
+- **Nothing here observes the deploy path's rebuild DDL, because nothing on that path reads
+  the map.** The content evidence is all on the SDK-value arm, which the deploy path does not
+  take. If `preserve_stored_shape` ever goes false for a deployed rename, this move's DDL
+  exposure becomes real and untested, and `the_deploy_path_depends_on_the_maps_PRESENCE_not_its_content`
+  is the test that will notice.
+- **The over-refusal control is a regression guard, not a discovery instrument**, and less
+  than consumer 2's: the deleted walker ran `fold_ops` itself, so comparing against the
+  projection would compare the fold to itself. It compares against `fold_ops`, which cannot
+  see a refusal the walker's AUTHORED replay made and the catalog replay does not. What covers
+  that gap is the golden's `refused|` lines, captured from the walker. (I found and fixed the
+  same circularity in the two INHERITED controls, which my mechanical rewrite had silently
+  turned into fold-versus-itself comparisons.)
+- **`a_fold_seeded_rebuild_renders_its_create_table_from_the_map` uses one table.** Five
+  columns and five facets, but one shape; it is not a sweep.
+- **No PostgreSQL or MySQL server was asked anything by this move.** Families 2 and 3 are
+  PostgreSQL-only and are adjudicated by `fold_ops` offline, not by a server. Consumer 2's
+  live PostgreSQL file is what settles family 5, and I inherited that rather than re-running it.
+- **The 486/216 sweep numbers are from a deleted binary** and cannot be re-derived now that
+  the walker is gone. What survives is the golden, and the golden is what the numbers were
+  used to write.
+- **`cargo doc` is still not in the gate.** I measured it by hand: the deletion left exactly
+  one NEW `unresolved link` (`crate::fold_to_field_defs` in `gen_types.rs`), now demoted to
+  backticks; the three that remain are pre-existing.
+
+### The deleted-symbol sweep: scope, method, and what it missed
+
+SCOPE, stated because the blast radius crosses crates. My sweep ran from the WORKTREE
+ROOT, not from `crates/zero-migrate/`, so it did reach `crates/zero-migrate-ir/` and
+`crates/zero-migrate-node/`. Its real defect was the EXTENSION LIST: `--include` covered
+`*.rs *.md *.ts *.txt *.json` and NOT `*.toml`, which is how
+`crates/zero-migrate/Cargo.toml:60` survived - a present-tense claim about the deleted
+function sitting in a dependency rationale, where nothing would ever look for it.
+
+METHOD: by SET, and the set is the evidence rather than the total. 113 hits survive
+tree-wide. Every one was classified as historical-prose or stale-present-tense, and the
+classification is what the sweep produced - a matching count would have proved nothing,
+which is the same trap as `18 == 18` with two errors of opposite sign.
+
+The classification, after the fixes:
+
+- `docs/review-log.md` - 50-odd hits, ALL frozen by construction. This file is append-only
+  and every entry is a record of what was true when it was written. Correct to leave.
+- `docs/proposals/single-fold-and-effects.md` - 11 hits, ALL describing the PRE-MOVE tree
+  the proposal was written against, including its own section I warning about this
+  consumer. Consumers 1 and 2 left theirs for the same reason. Correct to leave.
+- code, config and goldens - every survivor now reads historically ("was", "until step 4
+  consumer 3", "measured when it produced it", "replayed", "so for each of those there is
+  no second answer left"). Each keeps its original claim and names the projection that
+  makes the claim now, per the rule both predecessors used.
+
+FIVE stale present-tense statements were found and fixed after the first sweep, four of
+them by the orchestrator's independent set-difference rather than by mine:
+
+1. `crates/zero-migrate-ir/src/ir.rs` - `IrMask`'s doc comment, which is the SOURCE of
+2. `crates/zero-migrate/ir-envelope.schema.json` - GENERATED, not hand-maintained:
+   `tests/ir_envelope_schema.rs` emits it with `schemars::schema_for!(MigrationIr)` and
+   gates the on-disk file against it, so fixing (1) and running
+   `UPDATE_SCHEMA=1 cargo test -p zero-migrate --test ir_envelope_schema` fixes both. The
+   regenerated file is committed and the gate passes without the variable. One line moved.
+3. `crates/zero-migrate/Cargo.toml` - the `indexmap` rationale (the extension-list miss).
+4. `crates/zero-migrate-node/tests/gen_artifacts_{domain,enum}_column.rs` - both in the
+   NODE crate.
+5. `ISSUES.md` x2, plus five reason strings and comments in `differential_corpus.rs`, the
+   `project_field_defs` doc ("Today's `fold_to_field_defs` output"), and consumer 2's
+   golden header - which additionally claimed "Every `sha|runtime.json` line is unchanged",
+   a statement THIS move made false by moving six of them. That header now records which
+   six and why.
+
+One more correction while re-reading that doc: `project_field_defs`' own doc said the map
+feeds `live.sqlite_schemas` "and therefore the 12-step rebuild". The "therefore" is what
+the neuter disproved, and the doc now says so and points at the file that measures it.

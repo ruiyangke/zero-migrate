@@ -244,7 +244,7 @@ it, all asserting on CONTENT rather than on `ok` - a silently dropped enum retur
 schema }` (`zero-migrate-ir/src/ir.rs:634`) carries the NAME ONLY. The members are in a
 separate `Op::CreateEnum { name, schema, values }` (`ir.rs:3380`). So no mapping whose
 whole input is one `IrColumn` can populate `enum_values`, at any signature - they have
-to be resolved from the op STREAM. `fold_to_field_defs` now carries the same
+to be resolved from the op STREAM. The `FieldDef` projection carries the same
 `NamedTypeRegistry` the DDL lower and the snapshot fold resolve named types through, and
 lifts the membership at the three sites where a column acquires a type (`createTable`,
 `addColumn`, `setColumnType`).
@@ -361,7 +361,9 @@ no room for either. The signature was never the obstacle.
 The real obstacle is stronger and the report did not state it: **the column does not
 carry the members at all.** `ColType::Enum` is `{ name, schema }`; the values are in
 `Op::CreateEnum`. `ir_column_to_field(c: &IrColumn)` could not populate `enum_values`
-from `c` no matter what it returned. That is why the fix lives in `fold_to_field_defs`,
+from `c` no matter what it returned. That is why the fix lives in the fold behind the
+`FieldDef` map (`fold_to_field_defs` when this was written; `project_field_defs` since
+step 4 consumer 3 deleted that walker),
 which has the op stream, and not in the type mapping.
 
 VERIFIED by the reporter, by running: the reproduction above against the addon built
