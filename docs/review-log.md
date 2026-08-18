@@ -30811,3 +30811,202 @@ The 18 paired PostgreSQL schemas and 6 paired MySQL databases from killed runs a
 real second leak, and the gate does not close it: a `finally` cannot run if the process
 is killed. Closing it means a suite-level sweep of namespaces older than some age, which
 is the same destructive-glob decision as the cleanup above and belongs to a human.
+
+## An internal placeholder was the refusal message on seven cells; five wrong declarations corrected, and the sixth refuted by the control that was supposed to protect it
+
+`op_support.rs` carried `NEVER_REFUSED`, the literal string
+`"internal: supported cell has no refusal reason"`, as the `_` fallback of
+`unsupported_reason`. It was never meant to reach anyone. It reached operators, and the
+brief for this work said four SQLite rows were shipping it.
+
+Measurement says four ROWS and SEVEN CELLS, and the difference is the whole reason the
+defect survived a live conformance pass.
+
+### The seven cells, measured
+
+An offline sweep over all 92 `(kind, variant)` rows x 3 dialects
+(`tests/unsupported_reason_is_operator_facing.rs`, RED at exit 101) reported
+`7 of 117 declared-unsupported cells hand the operator a non-reason`:
+
+```text
+  setColumnNotNull/base    [sqlite]  [mysql]
+  dropColumnNotNull/base   [sqlite]  [mysql]
+  dropColumnDefault/base   [sqlite]
+  validateConstraint/base  [sqlite]  [mysql]
+```
+
+Three of the seven are MYSQL cells. `dialect_conformance_live.rs` covers PostgreSQL and
+SQLite and says so in its own header - there is no live MySQL Rust coverage in this tree
+at all - so its sentinel sweep could only ever have found four of the seven. **A live
+layer bounds what it connects to.** The guard for this defect therefore belongs offline,
+where the reason is a pure function of `(op, dialect, variant)` and all three dialects are
+reachable without a server; the live sweep stays as the end-to-end confirmation.
+
+Three of the four rows are F674's own: it moved the cells to `unsupported` because the
+lowerer refused what they declared, which was right, and did not write the reason arms.
+
+### The fix, and what makes the fallback fail loudly now
+
+Real arms for every reachable cell, a `debug_assert!` in `support_cell`, and the offline
+sweep. The three are not redundant - each catches what the others cannot:
+
+- the `debug_assert!` fires in any debug build, which is every test run, and names the
+  exact `kind/variant/dialect` at the moment `Op::support()` builds the decision;
+- the sweep runs in RELEASE too, where `debug_assert!` is compiled out - which is the
+  configuration that actually ships;
+- the live suite still pins the operator-visible string end to end.
+
+Both halves were NEUTER-VERIFIED by reverting one arm (`validateConstraint`) to the
+placeholder. Debug: exit 101, `debug_assert` fires naming `validateConstraint/base` on
+`Sqlite`. Release (`--release`, assert compiled out): exit 101, the sweep reports
+`2 of 117`, naming the sqlite AND mysql cells. Neither half is load-bearing alone.
+
+`INTERNAL_NO_REFUSAL_REASON` is now `pub`, so the engine, the offline sweep and the live
+suite share ONE literal instead of three copies of a string that must match.
+
+### The six declarations, each measured on a live SQLite before deciding
+
+Every one of the six was driven through the production path
+(`load_and_lower_guarded` -> apply) against a live SQLite. All six REFUSE. That does not
+make all six safe to flip, and the difference is the finding.
+
+| row | what SQLite actually did | flipped? |
+|---|---|---|
+| `setColumnType/base` | refuses, `SqliteRebuildOnly`, gate unconditional | YES |
+| `setColumnDefault/base` | refuses, `SqliteRebuildOnly`, gate unconditional | YES |
+| `setColumnDefault/containerOrJson` | refuses, `SqliteRebuildOnly`, gate unconditional | YES |
+| `addConstraint/unique` | refuses; the three `fk*` variants APPLY | YES (per-variant) |
+| `createTrigger/bodyMultipleEvents` | refuses via the FEATURE gate, with a good message | YES |
+| `dropConstraint/base` | **APPLIES for a FOREIGN KEY** | **NO - refuted** |
+
+### The one that was refuted, and how
+
+`dropConstraint` on SQLite has a real lane in `render/lower.rs`. When the live snapshot
+carries the table and the named constraint is a FOREIGN KEY, the op lowers to a 12-step
+rebuild and applies. `SqliteRebuildOnly` is reached only for a MISSING snapshot or a
+NON-FK constraint. The conformance representative drops `c`, which is not a foreign key,
+so it measured the narrow refusal - correctly - and generalized it to the op.
+
+The flip was TRIED, not argued about. With all six flipped and both artifacts
+regenerated, `tests/sqlite_declaration_flip_over_refusal_control.rs` went red, exit 101:
+
+```text
+dropConstraint of a FOREIGN KEY must clear BOTH the authoring gate and the lowerer
+on SQLite ...: Load(Validate(AuthoringError { code: "UNSUPPORTED", ... dialect: Sqlite,
+reason: "SQLite cannot add or drop a table constraint in place: ..." }))
+```
+
+That is an over-refusal: a migration that works today, refused at authoring. The cell was
+reverted to `portable` and the conformance row reclassified from a WRONG DECLARATION to a
+DEGENERATE REPRESENTATIVE. There is one row for all constraint kinds and no variant
+split, so `portable` is the only disposition that does not break the working case.
+
+**The general rule this yields**: a refusal measured from ONE representative bounds what
+that SHAPE does, not what the OP does. Five of the six generalized safely because their
+gate is unconditional (`require_capability_for(NativeAlterColumn)` runs before anything
+else). The sixth did not, because its gate is conditional on the constraint KIND. Before
+flipping a cell, read whether the gate that refuses it is unconditional.
+
+### Why the existing suite could not have caught that over-refusal
+
+`sqlite_rebuild_apply.rs` already exercises this exact FK drop - through
+`IrAuthor::lower_steps`, which does NOT validate. The over-refusal is introduced at the
+AUTHORING gate, which that path never reaches, so the lowerer it calls would have kept
+building the rebuild happily. The control added here drives `load_and_lower_guarded`
+instead, putting the validate gate inside the measurement. It passes before the change
+(exit 0) and after (exit 0), and it is the thing that says no to a future flip.
+
+### What the conformance suite said, before and after
+
+Before: exit 0, 2 passed, 34.57s. After: exit 0, 2 passed, 229.90s.
+
+The outcome totals are IDENTICAL - sqlite `applied=29 refusedByCapability=58 other=5`,
+postgres `applied=72 refusedByCapability=14 other=6`. Nine ledger lines changed, and every
+one of them changed only its MESSAGE:
+
+- the four placeholder rows now name a real limit instead of the sentinel;
+- four flipped rows moved from the lowerer's `SqliteRebuildOnly` wording to the authoring
+  gate's, because the refusal now happens earlier;
+- `createTrigger/bodyMultipleEvents` did NOT change its message at all. That is
+  deliberate: validate checks the dialect cell BEFORE any feature gate, so correcting the
+  declaration would have REPLACED the feature table's good message with a new one. The new
+  arm reproduces `"SQLite CREATE TRIGGER accepts exactly one trigger event"` verbatim, so
+  the correction cost the operator nothing.
+
+This is the earlier entry's finding reproduced from the other side: flipping a cell to
+`unsupported` cannot move an outcome class, because `Op::support()` reads the table. Only
+the message moves. A suite that judged classes alone would have called this whole change
+a no-op.
+
+### A seventh false declaration, on MySQL, NOT flipped
+
+`setColumnType/base` declares `portable` on MySQL. Measured: `validate_op` ACCEPTS it and
+`lower_steps` then refuses with `MysqlAlterColumnUnsupported("setColumnType")` - the exact
+F674 shape, on the dialect the live suite cannot see. The declarative lane refuses MySQL
+type changes too (`declarative.rs`), so no path applies it and flipping would not
+over-refuse anything.
+
+It is RECORDED rather than flipped, because the discipline that refuted `dropConstraint`
+applies here as well: there is no live MySQL conformance layer in this tree, so the
+"before and after against a real server" that justified the other five cannot be run for
+it. The measurement is above; the flip wants the MySQL layer first.
+
+### The collateral, which is the same defect in three more places
+
+Correcting `addConstraint/unique` broke three sibling tests, and NOT ONE of them was an
+over-refusal. Every one had encoded the wrong declaration as an expectation:
+
+- `composite_foreign_keys.rs` asserted the op CLEARS VALIDATE on SQLite and then
+  explicitly skipped LOWER on SQLite alone (`if dialect != SqlDialect::Sqlite`). Its own
+  comment said SQLite "has no native ALTER TABLE ADD UNIQUE lifecycle operation". So the
+  test knew the lowerer refuses and pinned the gate accepting it anyway - F674's
+  "the gate accepted work the lowerer then rejected", written down as an assertion.
+- `authored_identifier_lengths.rs` asserted a 63-byte `addConstraint` name is ACCEPTED on
+  every dialect. On SQLite that passed only because the cell wrongly said `portable`.
+- `duplicate_constraint_name_on_one_table.rs` used `addConstraint(unique)` as the SQLite
+  carrier for its duplicate-name control.
+
+The third is the one worth care, because it is a genuine over-refusal control ("without
+this the natural tidy fix is a dialect-uniform rule, which would reject a migration SQLite
+runs") and the naive repair would have made it VACUOUS: with the op unsupported, the
+duplicate-name rule is never reached on SQLite, so the control would pass without testing
+anything - green by construction, the exact failure this file warns about elsewhere. It
+was moved to a SELF-REFERENCING FK carrier, the one `addConstraint` kind still authorable
+on SQLite, so the name rule is actually reached and observed not to fire. That SQLite
+accepts two FKs of one name was MEASURED against in-process SQLite rather than assumed,
+and the file's measured table gained the row.
+
+The other two lost no coverage: constraint-name length is still bounded on SQLite through
+the `createTable inline constraint` fixture, and the candidate-key replay through the
+unique-INDEX artifact, which is portable on SQLite.
+
+### An operational note
+
+The workspace gate was killed twice with exit 143 while the machine was at 100% disk (5.9G
+free, three agents building). Neither kill was a test failure - the second died during
+COMPILATION, before a single test ran. `target/debug` (47G) was deleted the moment a gate
+returned, and the suite then passed. Recorded because a SIGTERM mid-suite reads exactly
+like a flaky test, and the first instinct is to go looking at the code that was running.
+Check `df -h /` before believing any inexplicable failure here.
+
+### Gates
+
+Final exit codes, read directly rather than through a pipe. `cargo fmt` and `clippy` each
+failed once first (a reflowed import block; a `redundant_clone` in the new control) and
+are recorded at their post-fix value. The workspace suite needs `-j 4` on a contended
+machine.
+
+```text
+cargo fmt --all -- --check                                      0
+cargo clippy --workspace --all-targets -- -D warnings           0
+cargo test --workspace --exclude zero-migrate-node              0
+cargo test -p zero-migrate-node --no-default-features           0
+pnpm -w build                                                   0
+pnpm --filter zero-migrate check                                0
+pnpm --filter zero-migrate test                                 0
+pnpm --filter zero-migrate-cli typecheck                        0
+pnpm --filter zero-migrate-cli test:docs                        0
+pnpm --filter zero-migrate-node build                           0
+pnpm --filter zero-migrate-cli test:host                        0
+dialect_conformance_live (live PG 5434 + SQLite)                0
+```
