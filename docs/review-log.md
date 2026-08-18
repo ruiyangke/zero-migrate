@@ -31965,3 +31965,176 @@ One fixture decision came out of that rule. The EXCLUDE constraint uses `USING b
 rather than `gist` specifically to avoid `CREATE EXTENSION btree_gist`: an early probe
 created it inside the probe schema and `DROP SCHEMA ... CASCADE` took it away again,
 which happened to be correct only because the extension had not existed beforehand.
+---
+
+## MySQL structural drift could not report a physical-type difference the portable type cannot see
+
+**Branch** `fix/mysql-physical-type-drift`, based on `d53cc779`.
+
+### The premise, re-measured before anything was changed
+
+The brief said: `column_data_types_eq` treats the MySQL physical contract as the
+authority when both sides carry one, but `diff_attrs` reports the difference as
+`push("data_type", &ec.data_type, &ac.data_type)` and `push` drops an entry whose two
+sides are equal strings - so a deployed `varchar(255)` against a live `varchar(64)`
+reports CLEAN.
+
+**The mechanism is exactly as described. The example is not, and the difference
+matters.** `fold_ops` always emits the PostgreSQL `information_schema` spelling
+regardless of dialect (`fold_roundtrip_sqlite::canonicalize` documents the same fact for
+its own leg), while the introspected side runs through `mysql_canonical_type`. So for a
+column authored `string(255)` the two sides read `"character varying(255)"` and
+`"text"` - they DISAGREE, and the line survives. Measured on a live server:
+
+```text
+FOLDED       label  data_type="character varying(255)"  Character { fixed: false, length: 255 }
+LIVE AFTER   label  data_type="text"                    Character { fixed: false, length: 64 }
+-> AlteredObject { field: "data_type", expected: "character varying(255)", actual: "text" }
+```
+
+The hole opens where the two spellings COINCIDE, and the reachable case is a column
+authored `text`. The engine deploys that as MySQL `TEXT`; narrow it out of band to
+`VARCHAR(64)` and both sides read `"text"`:
+
+```text
+FOLDED       label  data_type="text"  Lob { tier: "text" }
+LIVE AFTER   label  data_type="text"  Character { fixed: false, length: 64 }
+-> no data_type line at all
+```
+
+A second face of the same defect was measured alongside it: when the strings DO differ,
+the surviving line names nothing a reader can act on. `decimal(12,2)` widened to
+`decimal(30,10)` reported `expected: "numeric", actual: "decimal"` - one type spelled
+two ways, with neither precision nor scale anywhere in the report. Same for a
+fractional-seconds change: `expected: "timestamp with time zone", actual: "datetime"`.
+
+### The RED, and why it is the right reason
+
+`tests/drift_column_physical_type.rs` deploys through `load_and_lower_guarded` +
+`MigrationEngine::apply_plan` over `MysqlBackend`, changes two live columns out of band,
+and runs `fold_ops` + `snapshot_schema` + `diff_snapshots`:
+
+```text
+a live physical-type change on widths.label was NOT reported. The comparator can see it
+- folded Lob { tier: "text" } vs introspected Character { fixed: false, length: 64 } -
+but the report carries no data_type line. Both sides read data_type "text", which is why
+printing that string drops the entry.
+```
+
+That is drift reporting NO difference where a real one exists, on a live server, through
+engine-emitted SQL. Not a compile error, not a connection failure: the same run's three
+over-refusal controls passed.
+
+**`is_clean()` is NOT the assertion, and could not be.** A bare `MODIFY COLUMN` also
+moves the collation MySQL reports, so the drift report is non-empty either way and
+`assert!(!drift.is_clean())` would have gone green against the defect. The test asserts
+the `data_type` LINE for the named column.
+
+**The instrument is asserted directly**, because a previous neuter on this code went
+green through an instrument that could not see what it was asserting about. Before the
+report is asked anything, the test requires that both sides carry a contract, that the
+two contracts DIFFER, and that the two portable `data_type` strings agree or disagree
+exactly as each fixture column intends. Any of those failing is reported as a BROKEN
+INSTRUMENT rather than as a pass or a fail. That check earned its place twice during
+this work: the first fixture (`string(255)`) tripped it and is why the premise above was
+corrected.
+
+### The fix
+
+`apply::drift::column_data_type_report` + `format_mysql_physical_type`. When BOTH sides
+carry a `mysql_physical_type`, the report prints THAT - the thing the comparator
+actually compared - in MySQL's own spelling. Both sides, not either: PostgreSQL and
+SQLite carry none, so they keep the portable spelling they always had, and a contract
+compared against an absent one still describes nothing about the database.
+
+The printed spelling round-trips through `MysqlPhysicalType::parse` for every family
+that function can produce, which is what keeps two unequal contracts from rendering to
+the same text and falling back into the `push` hole. Two unit tests pin it directly, one
+for the round-trip and one for pairwise injectivity over a 37-spelling corpus.
+
+### Neuter-verified
+
+Restoring `push(&obj, "data_type", &ec.data_type, &ac.data_type)` at the call site while
+leaving everything else in place: `3 passed; 1 failed`, failing on the same line with
+the same message. Restoring the fix: `4 passed; 0 failed`.
+
+### The over-refusal control, which is the whole risk
+
+Drift was made MORE sensitive, so the danger is phantom drift on a correct database.
+Three controls, one per dialect, deploy a table through the real pipeline and leave it
+alone:
+
+- **MySQL** - 16 columns covering every shape whose rendered DDL differs from the way
+  MySQL stores it (`DECIMAL(65, 30)` vs `decimal(65,30)`, `TIMESTAMP` vs `datetime(6)`,
+  `BOOLEAN` vs `tinyint(1)`, `uuid` vs `char(36)`), plus three `addColumn`s. Clean.
+- **PostgreSQL** - 14 columns, live. Clean.
+- **SQLite** - the subset whose folded spelling and SQLite affinity already agree, and
+  no authored primary key. Clean.
+
+The SQLite leg is narrowed for a reason recorded here rather than silently: `fold_ops`
+emits PostgreSQL spellings for `bigInt`/`double`/`bytes`/`json`/`timestamp` while SQLite
+reports storage affinities, and SQLite names a table's PRIMARY KEY `pk_corpus` where the
+fold names it `corpus_pkey`. Both divergences are present on `d53cc779` BEFORE this
+change - `fold_roundtrip_sqlite::canonicalize` exists to strip exactly them - and a
+control that is red on the baseline measures nothing. They are pre-existing and out of
+scope here.
+
+### One test was corrected, and it was a false green
+
+`apply::backend::mysql::render_tests::snapshot_schema_recovers_mysql_identity_id_defaults_and_format_checks`
+failed under the fix with
+
+```text
+AlteredObject { object: "column ordinary", field: "data_type", expected: "text", actual: "varchar(191)" }
+```
+
+This is NOT the fix inventing a difference. `column_data_types_eq` already answered
+"different" for that pair on `d53cc779` - `Lob { tier: "text" }` against
+`Character { length: 191 }` - and the report dropped the answer because both sides fold
+to the literal `text`. The test's `assert!(clean_drift.is_clean())` was passing on the
+strength of the defect.
+
+The hand-written catalog row was wrong: it declared `ordinary` as `varchar(191)` when a
+plain `ColType::Text` column deploys as MySQL `TEXT`. The `varchar(191)` spelling belongs
+to the two columns above it, which carry a `value_format` and so need an indexable width
+- and those two produce no drift line under the fix, which is the internal check. The
+oracle for the correction is a live server, not this reasoning:
+`drift_column_physical_type`'s MySQL control authors `text` and introspects back
+`Lob { tier: "text" }`. The row now reads `text`. No assertion or threshold was lowered.
+
+### Gate exit codes, each read directly
+
+```text
+cargo fmt --all --check                                       0
+cargo clippy --workspace --all-targets -- -D warnings         0
+cargo test --workspace --exclude zero-migrate-node            0   218 binaries, 3224 passed, 0 failed, 11 ignored
+  (live PG + MySQL DSNs exported, ZERO_MIGRATE_REQUIRE_LIVE_DB=1, --test-threads=1)
+cargo test -p zero-migrate-node --no-default-features         0   10 binaries, 91 passed, 0 failed
+pnpm -w build                                                 0
+pnpm --filter zero-migrate check                              0
+pnpm --filter zero-migrate test                               0   327 tests, 326 pass, 1 skip
+pnpm --filter zero-migrate-cli typecheck                      0
+pnpm --filter zero-migrate-cli test:docs                      0   6 tests, 6 pass
+pnpm --filter zero-migrate-node build                         0   rebuilt BEFORE test:host
+pnpm --filter zero-migrate-cli test:host                      0   458 tests, 458 pass, 0 skip
+```
+
+`pnpm install -r --frozen-lockfile` first, as the previous entry records.
+
+### Servers left as found
+
+MySQL: 246 databases before, 246 after, set-identical - every probe database dropped by
+`DatabaseGuard`. PostgreSQL: 333 schemas before, 331 after; nothing this branch created
+survived, and the two that disappeared are a previous run's leaked
+`proj_3440400_…` / `meta_3440400_…` pair, reaped by something other than this work
+(these servers are shared with concurrently running agents).
+
+`target` after the full gate: **7.2G** debug + 219M release, with
+`CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`.
+
+### Still open, deliberately
+
+The `data_type` line for a MySQL column WITHOUT a physical contract on both sides still
+prints the fold's PostgreSQL spelling against the catalog's canonical one. Nothing on
+this tree produces such a pair - the MySQL introspector always stamps a contract and so
+does the MySQL fold - but a snapshot written before the contract existed would.
