@@ -28389,3 +28389,234 @@ Disk was checked before each gate run. It fell to 8.5G during the second cargo t
 which is BELOW the 10G floor; `target/debug` (41G) was removed the moment that gate
 returned, which took it back to 50G, and the tree was verified intact afterwards. The
 pnpm gates ran from there and it never fell below 49G again.
+
+## A rename moved the column and left its FOREIGN KEY declaring the old one
+
+### The lead, and the one part of it that was wrong
+
+Handed over: `sqlite_rename_rebuild` follows a rename into `ColumnSnapshot::generated`
+and `ColumnSnapshot::inline_checks` but not into `ConstraintSnapshot::definition`, and
+the repair cannot go where those two went because `ConstraintSnapshot`'s `PartialEq`
+COMPARES `definition`. Both halves hold, and both were re-measured rather than read. The
+defect, through the real lowering of a real `renameColumn` against the live shape
+`engine::refresh_historical_live` builds:
+
+```sql
+CREATE TABLE "issues__zero_migrate_rebuild" (
+  ..., "holder_id" TEXT NOT NULL,
+  "status" TEXT NOT NULL CHECK ("status" IN ('UNCONFIRMED', 'CONFIRMED')), ...,
+  CONSTRAINT "issues_owner_id_fkey" FOREIGN KEY (owner_id) REFERENCES owners(owner_id))
+```
+
+The column is `holder_id`. Its foreign key still declares `owner_id`. After the fix, the
+same lowering:
+
+```sql
+  CONSTRAINT "issues_owner_id_fkey" FOREIGN KEY (holder_id) REFERENCES owners(owner_id)
+```
+
+What was wrong is the fourth instruction: "check whether the FOLD has the same second call
+site; two call sites was the shape last time". The fold ALREADY has it, and has had it
+since before the CHECK fix - `Op::RenameColumn` calls
+`rename_constraint_definition_column` for exactly the three kinds whose leading group is a
+local column list. Neutering that call alone still fails the two-rename test here, so it
+is load-bearing and it stays; there was simply never a second site to add. The shape this
+time is ONE site in a DIFFERENT layer, not two sites in the same one.
+
+### What SQLite does when handed it, and the half that is silent
+
+Applied for real through `SqliteBackend`, hardened open sequence, engine-emitted SQL:
+
+```text
+sqlite rebuild of 'issues' failed: sqlite migration statement failed:
+  unknown column "owner_id" in foreign key definition
+```
+
+A FAILED MIGRATION inside the transaction, at the rebuild's leading statement, before any
+value is copied - and unlike the stale CHECK this does NOT rest on
+`SQLITE_DBCONFIG_DQS_DDL`. A foreign key's CHILD column list is an identifier list, not an
+expression, and SQLite resolves it at CREATE TABLE time whatever the DQS settings say and
+whether or not `PRAGMA foreign_keys` is on.
+
+The PARENT column list of the SAME definition behaves the opposite way, and that is the
+finding that shaped the fix rather than decorating it. Measured on the same connection:
+
+```text
+CREATE TABLE stale_parent (..., FOREIGN KEY (holder_id) REFERENCES owners(holder_id))
+  -> ACCEPTED. The table is created and nothing is reported.
+INSERT INTO stale_parent ...                        -> foreign key mismatch
+PRAGMA foreign_keys = OFF; INSERT INTO stale_parent ...   -> ACCEPTED, silently
+```
+
+So a rewrite that overreached past the leading group would ship a table whose foreign key
+enforces nothing until the first write that fires it, and nothing at all while
+`foreign_keys` is off - which is precisely the window the rebuild itself opens. Loud on
+one side of `REFERENCES`, silent on the other.
+`sqlite_refuses_a_stale_child_key_and_silently_accepts_a_stale_parent_key` pins all three
+lines above, and the fixture points the FK at a parent column that SHARES the renamed
+column's name so the silent half is reachable if the rewrite ever widens.
+
+### Why the helper the previous fix built does not fit, and what does
+
+`rename_quoted_column_in_sql` was the obvious candidate and is the wrong tool twice over.
+It rewrites QUOTED runs and leaves bare words alone. A constraint `definition` spells its
+columns through `constraintdef_cols`, which quotes CONDITIONALLY: `FOREIGN KEY (owner_id)`
+is BARE, so the quoted-run walk would rewrite NOTHING and leave the body exactly as stale
+as it found it. Give the column a reserved-word name and the failure inverts - now both
+sides of `REFERENCES` are quoted, the walk matches the decoded identifier on both, and it
+rewrites the REFERENCED column into the silent-degradation case above. Useless when the
+name is ordinary, dangerous when it is not. It was not extended: widening it to understand
+`REFERENCES` would give it a second grammar to be wrong about, and the right grammar was
+already implemented elsewhere.
+
+That elsewhere is the fold's `rename_constraint_definition_column`, which re-renders only
+the LEADING parenthesized group through `constraintdef_cols`, splices the `REFERENCES`
+tail through byte-identically, and carries the round-trip guard that leaves a group its
+split-on-comma parse mishandles STALE rather than CORRUPT. It was made `pub(crate)` and is
+now the single speller for a moved column in a constraint body on both replays that own a
+`TableSnapshot`. Nothing was weakened; the distinction the FK needs is the thing that
+function is built around.
+
+### The seam, which is the actual fix
+
+`rename_column_in_generated_columns` and `rename_column_in_inline_checks` are called from
+`sqlite_rename_rebuild` and write into the DESIRED snapshot. That is safe only because
+`ColumnSnapshot`'s `PartialEq` excludes both fields. `ConstraintSnapshot`'s does not
+exclude `definition`, so the same call in the same place would make the desired table
+unequal to the renamed live one, flip `pure_sqlite_column_rename` to `None`, turn
+`preserve_stored_shape` off, and stop the CATALOG path replaying SQLite's own stored body.
+
+So the rewrite runs one layer down, in `render_create_table_sqlite_rebuild`, AFTER
+`build_sqlite_rebuild` has taken that decision and AFTER the stored-shape arm has already
+returned. Placing it there rather than in the snapshot-renderer arm also covers a carrier
+neither the report nor the previous sweep named: the SDK-value arm reads the PRIMARY KEY's
+local column list back out of `definition` through `sqlite_authored_primary_key_clause`,
+so a composite primary key over a renamed column would have gone out stale on a table with
+no inline CHECK at all. One rewrite before the arm split covers both arms.
+
+`preserve_stored_shape` is pinned two ways, because "it did not flip" is the whole reason
+this was deferred. `the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite`
+pins the DECISION and nothing else: it lowers the SAME rename against both live shapes and
+asserts `SqliteRebuildSpec::column_renames` is `[("owner_id", "holder_id")]` on the catalog
+leg and EMPTY on the fold-seeded one. That list is not a proxy - the planner populates it
+as `pure_rename.filter(|_| preserve_stored_shape)`, so a non-empty value is a direct
+statement that `pure_sqlite_column_rename` still matched AND the stored shape is still
+preserved. `a_catalog_sourced_rename_still_replays_the_stored_body` then pins the
+CONSEQUENCE: the emitted CREATE is the stored body token for token, still naming the
+PRE-rename column, and applying it shows SQLite's own `RENAME COLUMN` moving the foreign
+key afterwards. Both pass identically with the fix on and off, which is what makes them
+boundary pins rather than second copies of the fix's own test.
+
+One detail that byte-compare turned up and did not chase: the replay arm's emission is NOT
+byte-identical to the stored text. `rewrite_sqlite_stored_foreign_keys` re-splices the FK
+clauses and drops the space after the preceding comma. Every token is the stored one, so
+the assertion compares with whitespace removed and says why. Pre-existing, present with the
+fix disabled, not touched here.
+
+### The fourth carrier, found by measuring and NOT fixed here
+
+The sweep of `ConstraintSnapshot` / `TableSnapshot` / `IndexSnapshot` for another
+rendered-SQL field a rename must follow came back empty on the FIELDS, and turned up a
+carrier that is not a field at all.
+
+Cleared, with reasons: `ColumnSnapshot::default` cannot reference a column on SQLite; the
+mask and encryption sentinels carry no column name (`kind=…,classification=…`);
+`ConstraintSnapshot::cascade_columns` has no reader in `render::declarative` at all and is
+excluded from equality besides; a table-level CHECK never reaches a SQLite snapshot; and
+the rebuild emits no index DDL of its own - `recreate_objects` is empty on this path and
+only `statements[0]` is taken from the snapshot renderer.
+
+That last clearance is exactly where the real one is. The rebuild emits no index DDL
+because the EXECUTOR replays the table's dependents VERBATIM from `sqlite_master`, and on
+the non-preserve leg the new table has the NEW column name while the captured index DDL
+still has the old one. `spec.dropped_columns` excludes a rename's `from`, so the
+replay-skip does not apply. Measured end to end with a plain `createIndex` over the renamed
+column:
+
+```text
+sqlite rebuild of 't' aborted: the dependent index 't_qty_idx' could not be recreated
+  after the rebuild (no such column: "qty" ... in CREATE INDEX "t_qty_idx" ON "t" ("qty"));
+  the original table and its dependents are intact
+```
+
+FAIL-CLOSED and rolled back, so it is a rename that cannot apply rather than a schema that
+silently loses an index - but a fold-seeded rename of ANY indexed column is currently
+un-appliable, which is a wider blast radius than the FK case this entry fixes. It lives in
+`apply/backend/sqlite/rebuild_sql.rs`, not in the two files this work owns, and it is left
+for whoever holds that seam. The fixture here carries no index over the renamed column, so
+the two defects do not mask each other.
+
+### Neuter
+
+With the rewrite call in `render_create_table_sqlite_rebuild` disabled and nothing else
+changed:
+
+```text
+  rename_column_fk_definition_sqlite.rs
+      a_sqlite_rename_rebuild_emits_a_foreign_key_over_the_new_local_column   FAILED
+          FOREIGN KEY (owner_id) ... on a table whose column is "holder_id"
+      a_second_rename_starts_from_a_folded_definition_the_first_...           FAILED
+          unknown column "owner_id" in foreign key definition   (the real apply)
+      a_catalog_sourced_rename_still_replays_the_stored_body                  ok
+      the_stored_shape_decision_is_unchanged_by_the_constraint_rewrite        ok
+      sqlite_refuses_a_stale_child_key_and_silently_accepts_a_stale_parent... ok
+```
+
+Both failures name the pre-rename column, which is the reported symptom - not a compile
+error and not a fixture typo. The three boundary pins still pass, which is what they are
+for.
+
+Neutered the FOLD's call instead, leaving the rebuild's:
+
+```text
+      a_sqlite_rename_rebuild_emits_a_foreign_key_over_the_new_local_column   ok
+      a_second_rename_starts_from_a_folded_definition_the_first_...           FAILED
+          the FOLD moved the LOCAL column and left the REFERENCED one alone:
+            FOREIGN KEY (owner_id) REFERENCES owners(owner_id)
+```
+
+Independently load-bearing, as it was for the CHECK body: the fold's output is the NEXT
+migration's rebuild source, and the rebuild only knows the rename it is lowering.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      101  -> 0 on the idle re-run
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (326 pass, 0 fail, 1 skip)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0   (6 pass, 0 fail)
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (455 pass, 0 fail, 0 skip)
+```
+
+The 101 was `f664_scaling`, the known load flake, and it is worth naming what it looked
+like because it is the one suite whose failure is hardest to tell from a real regression at
+a glance. THREE of its four tests failed together, each with a wall-clock ratio just over
+the 3.0x ceiling (3.6x, 3.6x, 3.8x), while two other projects' live-DB suites held the
+machine at load average 26. Nothing else in the workspace failed: exactly one
+`test result: FAILED` in 1904 lines of log. It passed on the idle re-run.
+
+The worktree also needed `pnpm install` before the JS gates would run at all - a fresh
+worktree has no `node_modules`, and a first attempt at all five failed on
+`tsup: command not found` rather than on anything in this change. That attempt is not
+counted above; a gate that never reached the code proves nothing about it.
+
+The addon was REBUILT from this tree before the host suite, and both live DSNs were
+exported for the workspace run and the host suite, so the PostgreSQL and MySQL legs
+EXECUTED - the host suite reports 0 skipped.
+
+PostgreSQL and MySQL cannot reach the change by construction:
+`render_create_table_sqlite_rebuild` has ONE caller, `build_sqlite_rebuild`, which is the
+SQLite arm, and `rename_column_in_constraint_definitions` has ONE caller, which is that
+function. The `render::fold` edit is a visibility change plus a doc comment; no behaviour
+there moved. That file is outside the two this work was scoped to, and reaching into it was
+the deliberate alternative to copying forty lines of guarded parsing into
+`render::declarative` - one word of visibility beats a second implementation of a
+round-trip guard.
