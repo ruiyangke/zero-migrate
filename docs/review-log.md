@@ -30643,3 +30643,171 @@ The corpus compares walkers against EACH OTHER, with no live server in it. A row
 all four agree and all four are wrong - which `29590-29606` proves is a real shape -
 is recorded as AGREED. `Status::Defect` is deliberately reachable from an AGREED
 verdict for that reason, and no row currently uses it that way.
+
+## One host test out of 119 leaked one meta database per run, and nothing could see it
+
+The brief said "the TypeScript host suite leaks a database per run - it drops the
+project database but NOT the meta database the engine creates alongside it", and asked
+whether PostgreSQL had the same shape as schemas. Both halves needed measuring, and
+measurement moved both.
+
+### What actually leaks
+
+One file. `packages/zero-migrate-cli/tests/host/mysql-composite-and-nonid-fk.test.ts`
+ended its `finally` with
+
+```ts
+await connection.query(`DROP DATABASE IF EXISTS \`${database}\``).catch(() => {});
+```
+
+and never named `${database}_migrations`, which the engine creates itself on the first
+`ensure_journal`. Every other file that creates a namespace already drops both: of the
+119 host files that issue a `CREATE SCHEMA` or `CREATE DATABASE`, 118 name the meta
+namespace in their teardown.
+
+That single line is the whole leak. The prefix histogram over the 230 `*_migrations`
+databases the shared MySQL server carried when this started:
+
+```text
+  218  fkmy            <- mysql-composite-and-nonid-fk.test.ts
+    2  fkm             <- a predecessor of the same test, since renamed
+    2  probe_partial
+    1  each of: bytesrt_my, fk4m_fk, fk4m_foreignkeys, fk5m, mycol, mypart, myren, ""
+```
+
+218 of 230 from one file, one per run, over however many months of runs. The rest are
+single-run residue from names that no longer exist in the tree, i.e. from crashes or
+from tests that have since been rewritten.
+
+### PostgreSQL does NOT have the same shape
+
+The brief's guess was that PostgreSQL might leak schemas the same way and that nobody
+had looked. Looked, and it does not. A full `test:host` against
+`postgres://...@127.0.0.1:5434/zero_migrate_test` went 127 non-system namespaces before
+and 127 after, twice, with zero new names. Every PostgreSQL teardown in the suite drops
+the `_migrations` schema alongside the project schema, and every one of them sits in a
+`finally`, so an assertion failure still cleans up.
+
+That server does carry 7 orphaned `*_migrations` schemas
+(`allowlist_pg_*` x2, `app_migrations`, `ci_apply_probe_migrations`,
+`hrprobe_1786611239_migrations`, `zm_manual_probe2_migrations`,
+`zm_show_mslua0qk_migrations`) - but their prefixes are hand-run probes and older
+versions of tests, not the current suite. It also carries 18 `*_migrations` schemas
+whose project schema is still present; those are pairs abandoned by killed runs, which
+is a different failure (the process died) from the one fixed here (the teardown was
+incomplete).
+
+### The count is the test, because reading the teardown is what shipped this
+
+`mysql-composite-and-nonid-fk.test.ts` looked fine. It has a `try/finally`, it drops a
+database, it swallows the error. Nothing about reading it says "one namespace short",
+which is exactly why the instrument here does not read teardowns at all.
+
+`packages/zero-migrate-cli/tests/host-leak-gate.ts` (new, `pnpm --filter zero-migrate-cli
+test:host:leak`) snapshots the non-system namespaces on both servers, spawns the host
+suite verbatim from the `test:host` script in `package.json`, snapshots again, and fails
+on any namespace that appeared. It wraps rather than joins the suite because no test
+file can see the state before the first file ran and after the last one finished -
+`node --test` runs files concurrently and in unspecified order. It runs the suite ONCE,
+so it costs a pair of `information_schema` queries over `test:host`, and the CI `host`
+job now calls it instead of `test:host` for that reason.
+
+### Making the count non-racy while other agents drive the same servers
+
+Two other agents and the Rust suite were creating and dropping namespaces on both
+servers throughout. A global before/after count is racy in both directions, so the gate
+fails only on names it can SHOW this run owns: new since the snapshot, AND carrying an
+underscore-delimited segment of EXACTLY 8 characters of `[0-9a-z]` that reads as base36
+into a millisecond inside the run's window.
+
+The 8 is not a guess. Every namespace generator in the host suite - `uniqueNamespace`,
+`uniqueSchema`, `uniqueDatabase`, `uniqueName`, and the inline ones - is built around
+`Date.now().toString(36)`, which is 8 characters from 2004 to 2059. The foreign shapes
+on these servers are the Rust suite's `proj_<pid>_<nanos>_<n>` / `meta_<pid>_<nanos>_<n>`
+and `zm_<pid>_<counter>_<suffix>`, whose segments are decimal, and a decimal segment
+CANNOT alias into the window at that length: the largest 8-character one, `99999999`,
+is 7.1e11 ms (1992), and the smallest 9-character one starting with a nonzero digit is
+2.8e12 ms (2059). So the window is outside the range of a decimal segment of that
+length by construction, not by luck.
+
+What the scoping does not cover is printed rather than hidden. A new name with no
+timestamp, or one from a second host suite someone else starts inside the window, is
+reported as `UNATTRIBUTED new namespace (not failed)` and named. Failing on another
+job's namespace would make this gate the flaky thing it exists to prevent. This
+mattered during the work: the run that proved the fix shared the MySQL server with
+another agent's host suite, and four of that agent's live pairs were on the server at
+snapshot time.
+
+### RED, GREEN, and the neuter in between
+
+```text
+  run 1, tree at 075a2b39, manual diff    458 pass   PG 127 -> 127   MySQL +1: fkmy_msyekccd_fze0_migrations
+  gate, fix NEUTERED                      458 pass   PG 127 -> 127   MySQL 238 -> 239   EXIT 1
+                                          leak gate: mysql: LEAKED by this run: fkmy_msyewo8w_a03y_migrations
+  gate, fix RESTORED                      458 pass   PG 127 -> 127   MySQL 239 -> 239   EXIT 0
+```
+
+The neuter deleted the one added line and nothing else, and the gate named the exact
+database rather than reporting a count that merely differed. The suite is 458/458 green
+in all three runs, so the gate's verdict is about cleanup and not about a red suite -
+and when the suite IS red the gate exits with the suite's code and marks its own verdict
+advisory, so a leak never buries the tests that actually failed.
+
+The two databases my own runs leaked (`fkmy_msyekccd_fze0_migrations` from the
+pre-fix run, `fkmy_msyewo8w_a03y_migrations` from the neutered one) were dropped by
+exact name and their absence confirmed by re-reading `information_schema.schemata`.
+Nothing else was dropped.
+
+### Proposed cleanup, NOT run
+
+The 200+ existing leaks are still there. A bulk `DROP DATABASE` over `%_migrations`
+would be a destructive glob on a server three jobs are using, so here is the rule and
+the exact statements for a human.
+
+The rule is "a meta namespace whose project namespace is gone". A meta namespace that
+is still in use always has its project namespace next to it, so the rule cannot select
+a live one. Verified on both servers: it selected 229 of the 234 MySQL `*_migrations`
+databases and skipped all 6 paired ones, four of which belonged to another agent's host
+suite that was running at that moment; on PostgreSQL it selected 7 of 25 and skipped
+the 18 paired.
+
+These SELECTs PRINT the statements; nothing is dropped until the output is read and
+run. Do it when no host suite is running: a test sitting between its two drops is an
+orphan for that instant.
+
+```sql
+-- MySQL: mysql://root:root@127.0.0.1:3306/zero_migrate_test
+SELECT CONCAT('DROP DATABASE `', s.SCHEMA_NAME, '`;') AS stmt
+  FROM information_schema.SCHEMATA s
+ WHERE s.SCHEMA_NAME LIKE '%\_migrations'
+   AND NOT EXISTS (SELECT 1 FROM information_schema.SCHEMATA p
+                    WHERE p.SCHEMA_NAME = LEFT(s.SCHEMA_NAME, CHAR_LENGTH(s.SCHEMA_NAME) - 11))
+ ORDER BY 1;
+```
+
+```sql
+-- PostgreSQL: postgres://postgres:postgres@127.0.0.1:5434/zero_migrate_test
+SELECT format('DROP SCHEMA IF EXISTS %I CASCADE;', n.nspname) AS stmt
+  FROM pg_namespace n
+ WHERE n.nspname LIKE '%\_migrations'
+   AND n.nspname !~ '^pg_'
+   AND NOT EXISTS (SELECT 1 FROM pg_namespace p
+                    WHERE p.nspname = left(n.nspname, length(n.nspname) - 11))
+ ORDER BY 1;
+```
+
+The 11 is `length('_migrations')`. The MySQL set was checked to contain no name that
+does not end in `_migrations`.
+
+### What was NOT done
+
+The other 118 files were not refactored onto a shared guard. The Rust `DatabaseGuard`
+exists because Rust has `Drop`; the TypeScript equivalent would be a `t.after` helper,
+and converting 118 hand-written `finally` blocks to it is a large diff whose only
+measured defect is the one line fixed here. The gate above catches the next one at the
+only place it can be caught for certain, which is the server.
+
+The 18 paired PostgreSQL schemas and 6 paired MySQL databases from killed runs are a
+real second leak, and the gate does not close it: a `finally` cannot run if the process
+is killed. Closing it means a suite-level sweep of namespaces older than some age, which
+is the same destructive-glob decision as the cleanup above and belongs to a human.
