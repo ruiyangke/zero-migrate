@@ -28961,3 +28961,310 @@ and drops both, and every probe is schema-qualified. `pg_namespace` counted 331 
 331 after; zero `zm_planpre*`, `proj_zm_planpre*` or `meta_zm_planpre*` schemas remain. Disk
 was checked before each gate run and never fell below 98G.
 
+
+## A domain over `int` told the runtime it was a string
+
+`col_type_to_token` had ONE arm for two different named types:
+
+```text
+  ColType::Enum { .. } | ColType::Domain { .. } => ("string".into(), None)
+```
+
+`a4974347` fixed the ENUM half (the members) and deliberately left the DOMAIN half,
+recording the token as a separate defect. This is that defect. A column typed by a
+domain over `int` reported `{"type":"string"}` in `runtimeJson`, which is what a
+deployed app installs `env.db` from, so the app validated an integer column as text.
+
+### What the database actually stores, on all three dialects
+
+The brief expected this to be a PostgreSQL-shaped problem, because PostgreSQL is the
+only dialect with a native `CREATE DOMAIN`. MEASURED, it is not: SQLite and MySQL
+support a domain column by INLINING the base type and the constraint into the column,
+so all three store the base type and all three were being misdescribed.
+
+```text
+  postgres  CREATE DOMAIN "public"."positive_number" AS integer CHECK ((VALUE > 0))
+            CREATE TABLE  ... ("amount" "public"."positive_number" NOT NULL, ...)
+  sqlite    CREATE TABLE  ... ("amount" INTEGER NOT NULL CHECK (("amount" > 0)), ...)
+  mysql     CREATE TABLE  ... (`amount` INT NOT NULL CHECK ((`amount` > 0)), ...)
+```
+
+The dialect split is not in the DDL, it is in what happens when the definition is
+missing or nested. That is recorded below.
+
+### Where the base type lives, and why the fix is not a match arm
+
+Same structural reason as the enum half, verified rather than assumed:
+
+```text
+  ColType::Domain { name, schema }                      ir.rs:644   NAME ONLY
+  Op::CreateDomain { name, schema, as, check,
+                     default, notNull }                 ir.rs:3459  the base type
+```
+
+So the fix is a lift in `fold_to_field_defs`, off the SAME `NamedTypeRegistry` the DDL
+lower (`apply_named_type_column_metadata`) and the snapshot fold
+(`apply_fold_named_type_column_metadata`) already resolve names through. The registry
+was already threaded there by the enum fix; `Op::CreateDomain` / `Op::DropDomain` came
+off the exhaustive catch-all into real arms, and the three sites where a column
+acquires a type (`createTable`, `addColumn`, `setColumnType`) now go through ONE
+`lift_named_type_facets` so they cannot drift apart as kinds are added.
+
+### The token is not the whole type, and this is where that bit
+
+The enum lift sets one optional slot. A type token does not travel alone:
+`String { length }`, `Char { length }` and `Vector { vector }` carry their parameter in
+a SIBLING descriptor field. A domain over `varchar(40)` was reporting
+`{"type":"string"}` with NO `maxLength` - the length was lost as completely as the
+integer was. So the lift re-derives all five facets through the same
+`ir_column_to_field` a `createTable` column goes through, and the "re-derived from the
+type" block was EXTRACTED from `retype_field_descriptor` into
+`apply_col_type_to_field_descriptor` rather than re-spelled beside it. Re-spelling that
+mapping is exactly how this replay drifted from the other two in the first place. The
+retype still clears the facets it clears; the difference between the two callers is what
+they clear, not what they derive.
+
+```text
+  before   "code": { "type": "string",                  "required": true }
+  after    "code": { "type": "string", "maxLength": 40, "required": true }
+```
+
+### Unchanged beats invented - the analogue of the enum half's rule, and why it differs
+
+The enum half's rule was "an unprovable membership is OMITTED". That has no analogue
+here, because the token is not optional: something is always emitted. So an unresolvable
+domain name leaves the descriptor EXACTLY as `col_type_to_token` left it (`"string"`,
+no parameter), which asserts nothing that was not already being asserted. Refusing the
+fold instead would turn a call that succeeds today into a hard failure, which is a new
+failure mode traded for a stale one.
+
+The case is real and PostgreSQL-only, exactly parallel to the enum half, and measured:
+
+```text
+  no createDomain in the stream
+      postgres     folds OK - a native domain reference needs only the NAME, so
+                   `apply_fold_named_type_column_metadata` never asks for the base.
+                   Token stays "string".
+      sqlite/mysql already FAIL CLOSED: `fold: domain "positive_number" is not registered`
+```
+
+### Transitive resolution, and the termination proof
+
+`Op::CreateDomain`'s `as` is a full `ColType`, so a domain can name another domain. The
+DDL lower REFUSES that (`nested named base type`, both in `render_pg_domain_base_type`
+and at the non-PostgreSQL use site) - but `genArtifacts` never lowers DDL, so the
+refusal does not protect this path. Measured through the real API:
+
+```text
+  domain a AS domain b AS int
+      postgres     ok=true   -- reaches this replay
+      sqlite/mysql refused   -- `nested named base type`
+  domain a AS domain b, domain b AS domain a   (a CYCLE)
+      postgres     ok=true   -- reaches this replay
+      sqlite/mysql refused
+```
+
+So the walk is transitive AND has to terminate on inputs that really arrive.
+`resolve_domain_base_type` carries a `seen` set: every iteration either returns or
+inserts a name not already in it, and a name absent from the registry ends the walk, so
+it runs at most once per registered domain. The chain resolves to `"int"`; the cycle
+resolves to nothing and leaves the token untouched. Both are pinned in
+`a_domain_chain_resolves_and_a_domain_cycle_terminates`, and reaching its second
+assertion at all IS the termination proof.
+
+A base type that is an ENUM stops the walk and is returned as itself. Its token is
+`"string"` - the same token the domain already had - so a domain over an enum is
+unchanged either way. Its MEMBERS are deliberately not lifted: a domain's own `CHECK`
+may NARROW the base enum's set, so the members would be an upper bound rather than the
+contract, and `field_check_constraints` renders `enum_values` as a hard
+`CHECK (<col> IN (...))`.
+
+### `ColType::Encrypted` DOES route through here, and is excluded for a MEASURED reason
+
+`col_type_to_token` recurses into the inner type for `Encrypted`, so
+`t.encrypted({ of: t.domain("positive_number") })` reaches the same arm - and it folds
+`ok=true` on all three dialects, so this is not a hypothetical.
+
+The enum half excluded it because a membership over the plaintext is not a contract
+ciphertext satisfies. That reasoning does NOT transfer: the descriptor's `ty` for an
+encrypted column IS the plaintext token by design, and `encrypted.wraps` is derived from
+the same inner type. By that logic an encrypted domain over `int` SHOULD say
+`"int"`/`"number"`.
+
+It is still excluded, and the reason was measured rather than argued. `wraps` is also
+stamped into the CATALOG by the LOWER, which has no registry:
+
+```text
+  postgres  "amount" bytea /* zero-migrate:enc:randomised:default:string */ NOT NULL
+  sqlite    "amount" BLOB  /* zero-migrate:enc:randomised:default:string */ NOT NULL
+```
+
+With the recursion enabled as a scaffold and NOTHING else changed, an unrelated column
+rename on SQLite rebuilt the table as
+
+```text
+  "amount" BLOB /* zero-migrate:enc:randomised:default:number */ NOT NULL
+```
+
+- silently rewriting a live table's recorded encryption posture, which the introspector
+reads the facet back out of. Half-closing this gap is worse than leaving it: the fold
+would disagree with the catalog about how a column is encrypted. Closing it properly
+means moving the lower's sentinel with it, which is a different change with a different
+blast radius. RECORDED AS A DEFECT, not fixed here, and pinned as current behaviour in
+`an_encrypted_domain_column_is_left_exactly_as_it_was` so a later fix is deliberate.
+
+### The domain's CHECK is still dropped, and here is exactly what that costs
+
+A domain over `int` with `CHECK (VALUE > 0)` carries a real contract that reaches no
+descriptor slot at all. In scope or not was measured, not waved at:
+
+- the descriptor's only value-contract slots are `min`/`max` and `enum_values`;
+- `min`/`max` are INCLUSIVE bounds. The reported shape `VALUE > 0` is EXCLUSIVE, so
+  `min: 0` would tell the runtime to accept a row the database rejects. That is the
+  "absent beats wrong" rule the enum half established, pointing the other way;
+- `recover_check_facet` recognises only `Ge`/`Le` and `=`-chains, so `>` has no image
+  even structurally, and the domain's predicate names `VALUE`, not the use-site column;
+- an arbitrary predicate has no image at any width.
+
+MEASURED, and it REFUTED the reason this was expected to be dangerous: a scaffold that
+set `min` on the domain column did NOT add a CHECK to the SQLite rebuild - the rebuild
+reads `ColumnSnapshot::inline_checks`, not the descriptor's value contracts. So the
+obstacle is not a duplicate CHECK; it is that no faithful image exists. Left OUT, pinned
+as absent in both test files so a later fabrication is a failing assertion.
+
+### Which paths are affected
+
+The DESCRIPTOR route never had this defect and structurally cannot have it.
+`token_to_col_type` is the only way a `FieldDescriptor` becomes a `ColType`, and no
+token in its set maps to `ColType::Domain` - `declarative.rs` does not contain the word
+at all. Establishing that rather than inheriting the enum answer: a descriptor naming
+`"domain"` is refused outright on all three dialects, pinned in
+`the_descriptor_source_cannot_name_a_domain_at_all`.
+
+The ENVELOPE route is affected at all three type sites. `addColumn` and `setColumnType`
+into a domain are PostgreSQL-only - `fold_ops` refuses them on the inlining dialects
+with `unreachable use-site` - and that clean refusal is pinned beside the fix so it
+cannot quietly become a silent wrong answer.
+
+### The three replays now agree; before, one of them did not
+
+```text
+  fold_ops                    sqlite `INTEGER`, mysql `integer`,
+                              postgres `public.positive_number`     RIGHT
+  authoring_tables_from_ops   t.domain("positive_number")           RIGHT (keeps the NAME)
+  fold_to_field_defs          "string"                              WRONG -> now "int"
+```
+
+`the_snapshot_fold_and_the_field_def_fold_agree_about_the_storage` compares the first
+and third directly, per dialect, off one op stream.
+
+### The DDL did not move, and the one place it could was measured
+
+`fold_to_field_defs`' output is load-bearing for DDL in exactly one place: `engine`
+seeds `live.sqlite_schemas` from it and the 12-step rebuild renders `CREATE TABLE` from
+that `Value`. Rendered with the lift disabled and enabled:
+
+```text
+  CREATE TABLE "amounts__zero_migrate_rebuild" ("amount" INTEGER NOT NULL
+    CHECK (("amount" > 0)), "weight" INTEGER NOT NULL, "memo" TEXT NOT NULL)
+```
+
+BYTE-IDENTICAL. The rebuilt column's `INTEGER` storage and its single inline CHECK both
+come from the `ColumnSnapshot` `fold_ops` built from the registry, so the descriptor
+learning the base type adds nothing on either side. The three DDL arms of
+`domain_base_type_reaches_no_second_check.rs` pass with the lift on AND off, which is
+that byte-identity stated as tests.
+
+### What pins it
+
+```text
+  crates/zero-migrate-node/tests/gen_artifacts_domain_column.rs        8 arms
+      both artifacts, sqlite + postgres + mysql;
+      subject: a domain over `int` reports "int";
+      second domain over `varchar(40)` -> "string" + maxLength 40 (resolved, not
+        hardcoded, and the parameter travels with the token);
+      control A t.int() keeps "int"; control B t.text() keeps "string"; and the two
+        must not serialize identically;
+      the createDomain in an EARLIER envelope still reaches the later file's column;
+      an unprovable base type keeps the token it had (pg ok, sqlite/mysql fail closed);
+      a drop-and-recreate over a NEW base moves the column with it;
+      addColumn/setColumnType earn the same base type (pg), refused elsewhere;
+      a chain resolves, a cycle terminates;
+      an encrypted domain column is byte-unchanged;
+      a descriptor cannot name a domain at all.
+  crates/zero-migrate/tests/domain_base_type_reaches_no_second_check.rs 4 arms
+      the real lowered DDL on all three dialects, the replay agreement, and the
+      SQLite rebuild pinned to its exact CREATE.
+  packages/zero-migrate-cli/tests/host/gen-artifacts-domain-column.test.ts 3 arms
+      the reproduction through the recorder and the REAL addon, all three dialects.
+```
+
+Every assertion is on CONTENT. `ok=true` is the trap: a column silently described as
+text returns `ok=true`, which is how this shipped.
+
+### Neuter
+
+With `lift_named_domain_base_type` returning early, and nothing else changed:
+
+```text
+  gen_artifacts_domain_column.rs
+      a_domain_column_reports_its_base_type_on_every_dialect        FAILED
+      a_domain_declared_in_an_earlier_migration_still_reaches_...   FAILED
+      a_domain_recreated_over_a_new_base_type_moves_the_column_...  FAILED
+      an_added_or_retyped_domain_column_earns_the_same_base_type    FAILED
+      a_domain_chain_resolves_and_a_domain_cycle_terminates         FAILED
+          all five:  left: String("string")   right: "int"
+      an_unprovable_base_type_keeps_the_token_it_already_had        ok
+      an_encrypted_domain_column_is_left_exactly_as_it_was          ok
+      the_descriptor_source_cannot_name_a_domain_at_all             ok
+  domain_base_type_reaches_no_second_check.rs
+      the_snapshot_fold_and_the_field_def_fold_agree_about_the_...  FAILED
+      the three DDL arms                                            ok
+```
+
+They fail with the WRONG TOKEN in the emitted descriptor - the reported symptom - not a
+compile error and not a fixture typo. The four that still pass are the four that must:
+two assert that nothing changed, one asserts a structural refusal, and the DDL arms
+passing both ways IS the byte-identity claim.
+
+The host arm was neuter-verified separately, with the addon REBUILT from the neutered
+tree: all three dialects failed with `a domain over int is an integer` and the runtime
+JSON printed beside it. Rebuilt again from the fixed tree before the final host run.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0   (3136 pass, 0 fail, 6 ignored)
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (326 pass, 0 fail, 1 skipped)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0   (6 pass)
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (458 tests, 0 fail, 0 SKIPPED)
+```
+
+Both DSNs were exported for the workspace and host gates, and the host skip count is 0.
+`fold_roundtrip_pg` and `enums_domains` - the live-PostgreSQL named-type lifecycle
+tests - both ran and passed, so the change is exercised against a real server and not
+only against the renderer.
+
+`f664_scaling` failed three arms on the first workspace run at load average ~30
+(`createTable 3.5x`, `foreignKey 3.6x`, `addColumn 3.9x`), and passed on a re-run at
+load average ~19 and again standalone at ~8. A DIFFERENT shape each time is the
+signature of the known wall-clock flake, and it cannot be this change: it measures
+`validate_ir`, which never calls `fold_to_field_defs`.
+
+Disk was checked before each gate run. It fell from 328G free to 100G across the cargo
+and release builds and never approached the 15G stop-line.
+
+OPERATIONAL NOTE for parallel sessions: the session scratchpad is SHARED between
+concurrently running agents. A backup of `fold.rs` written there was overwritten by
+another agent's file of the same name between the copy and the diff, which would have
+read as "my edits vanished" if it had been trusted. Backups taken for a self-check need
+an agent-unique name, and `git diff` is the reliable check.
