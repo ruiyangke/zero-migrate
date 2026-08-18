@@ -31316,3 +31316,182 @@ that counts a server the suite was not allowed to touch cannot tell its own leak
 someone else's**, which is the same shape as the racing leak check `63447006` had to
 move inside its sweep. Recorded, not fixed: it is the CLI package's gate, not this
 branch's.
+## The MySQL physical contract is now derived from the column the fold finished with
+
+Closes the retype half of `30463-30481`. The brief for this work was to fix the
+`Op::SetColumnType` arm of `fold_ops`, which re-derives `data_type` and
+`ddl_type_override` and not `mysql_physical_type`, and to prove the fix with a live
+MySQL drift report before and after. Two of its premises are false, both measured,
+and the second one is worth more than the fix it was attached to.
+
+### The RED the brief asked for cannot exist
+
+`ZERO_MIGRATE_MYSQL_URL` set, real MySQL 8.4, a `string(255) -> string(64)` retype
+applied through `load_and_lower_guarded` + `MigrationEngine::apply_plan`. The engine
+never reached the server:
+
+```text
+setColumnType is not supported on MySQL: the engine renders alter-column DDL in
+PostgreSQL syntax, and MySQL's MODIFY COLUMN needs the whole column definition
+restated (omitting any part of it silently drops that part).
+```
+
+`render::lower`'s `refuse_mysql_alter_column` (`lower.rs:8248`) refuses EVERY
+alter-column op on MySQL unconditionally, and `require_alter_column_rendering`
+(`lower.rs:8235`) puts it in front of every arm. There is no capability flag and no
+escape. So a retype cannot be deployed on MySQL at all, the plan dies at lower time
+before anything is applied, and the phantom drift line the brief describes has no
+route to a live server. `30463-30481` proved the FOLDED snapshot was wrong, which it
+was; the sentence after it, that drift then reports a difference, was never measured
+and does not hold on the shipped pipeline. Its own "Left open" paragraph anticipated
+exactly this: "this corpus proves the FOLDED snapshot is wrong, not that the differ
+then reports a diff, and the difference between those two claims is exactly the kind
+this log has been burned by before."
+
+### The consequence is real, but it belongs to `createTable`, not to the retype
+
+Asking which OTHER arms maintain the field is what found it. `createTable` and
+`addColumn` are reachable on MySQL, and both were leaving a stale contract behind.
+Measured on live MySQL 8.4 through the real pipeline, on a table whose deploy
+SUCCEEDED and whose columns are exactly what was asked for:
+
+```text
+  server:      amount decimal(12,2)                uid varchar(36)
+  folded:      Plain { kind: "double" }            Character { length: 191 }
+  introspected Decimal { precision: 12, scale: 2 } Character { length: 36 }
+
+  StructuralDrift { altered_objects: [
+      AlteredObject { table: "shapes", object: "column amount",
+                      field: "data_type", expected: "numeric", actual: "decimal" } ] }
+```
+
+A phantom drift line on a database that is precisely what was deployed. The cause is
+not the retype arm and not any one arm: `declarative::column_snapshot_for_field`
+stamps the contract from `column_type_for_render`, and then FIVE later writers rewrite
+`data_type` / `ddl_type_override` without re-stamping it - the author type override
+(`numeric` / `DECIMAL(p, s)`), the UUID column metadata, the value-format metadata, the
+bytewise collation override, and the named-type metadata. Each exists in `fold.rs`
+and again in `lower.rs`. `SetColumnType` is a sixth writer of the same kind, which is
+why it had the same residue; it is not the origin of the shape.
+
+### So the field is derived once, from the finished column
+
+The derivation was three lines inside one builder. It is now
+`declarative::stamp_mysql_physical_type` (`declarative.rs:3234`), with the builder
+calling it and `render::fold::restamp_mysql_physical_types` (`fold.rs:3005`) calling
+it again over every column at the END of `fold_ops_onto`, after every arm has stopped
+writing. One spelling, and the "which arm forgot" question stops being askable.
+The retype arm carries a comment saying it deliberately does NOT copy the field, so a
+future reader does not add a seventh writer next to it.
+
+A blanket re-stamp would have been wrong, and this is the part that needed care.
+`fold_ops_onto` folds onto a base that is routinely a LIVE CATALOG READ - the napi
+lowerer hands `snapshot_schema`'s output straight in (`node/src/lower.rs:1178`). A live
+MySQL column carries the contract parsed from the server's own `COLUMN_TYPE`, which is
+strictly better than anything re-derivable from a snapshot: introspection stores
+`data_type` "decimal" with no `ddl_type_override`, so re-rendering it answers
+`Plain { kind: "decimal" }` and LOSES precision and scale. Re-deriving a column the
+replay never touched would corrupt the base rather than repair it. The test is the
+derivation's own inputs - `data_type`, `ddl_type_override`, `case_sensitive`, which are
+`column_type_for_render`'s entire MySQL input - and NOT `ColumnSnapshot`'s `PartialEq`,
+which excludes `ddl_type_override`, the single field most likely to have moved.
+
+PostgreSQL and SQLite cannot be reached by any of this: both the stamp and the
+re-stamp return early off MySQL, matching what `column_data_types_eq` requires -
+comparing a contract against an absent one "would report a difference that says
+nothing about the database".
+
+The name key is sound HERE and not in general, and the reason is worth writing down
+because it can rot. A RENAMED column would defeat it: its live-read contract carries
+information the derivation cannot rebuild, and after a rename it looks like a column
+the base never had. On MySQL a column name never moves - `renameColumn` is
+`unsupported` in `dialect-table.ts`, `refuse_mysql_alter_column` refuses every
+alter-column op, and the corpus measures `fold_ops` itself answering `refused` for a
+MySQL `renameColumn`. The comment on the function says so, and says what to add first
+if that cell ever opens.
+
+`render::lower` has the same five late writers over the same builder and is NOT
+changed here. Its snapshots are the DDL-emission side, which renders from `data_type`
+and `ddl_type_override` directly and never reads the physical contract, and nothing
+compares a lowered snapshot against a live one. Stated rather than fixed: the field is
+stale there too, with no reader today.
+
+### Measured, not asserted, at both ends
+
+`tests/fold_retype_physical_type_mysql.rs`, two live tests.
+`folded_column_shapes_describe_the_physical_type_mysql_holds` deploys the column shapes
+whose MySQL type is decided after the builder ran, introspects, and requires
+`diff_snapshots` to be CLEAN - the drift report is the assertion, so a fix that
+populated the field with a wrong value still fails.
+
+The retype cannot be applied, so its test asserts the refusal FIRST (and fails loudly
+if the refusal ever goes away, saying that live drift coverage is then owed), and gets
+its oracle from the server rather than from a literal: a second table is deployed
+carrying a `string(64)` column outright and introspected, and the contract MySQL
+reports for it is what the retype's fold must produce. A literal
+`Character { fixed: false, length: 64 }` in the test file would have been a second
+spelling of the derivation under test.
+
+NEUTERED to confirm both directions, one env gate restoring the old behaviour rather
+than a revert. Both went red, each in its own way:
+
+```text
+  after string(255) -> string(64) the fold describes widths.label as
+  Character { fixed: false, length: 255 }, but MySQL reports
+  Character { fixed: false, length: 64 } for a column declared string(64).
+  `data_type` cannot see this: both sides read "character varying(64)".
+
+  column amount data_type expected "numeric" actual "decimal"   (the phantom line)
+```
+
+### The differential corpus moved exactly three rows, and no others
+
+`c_retype_type_parameters|Mysql|column_carries(shapes.narrow ~ 24)`,
+`... (shapes.fixed ~ 8)` and
+`c_create_then_add_then_retype|Mysql|column_carries(invoices.total ~ 24)` all went
+`DIVERGENT FO=yes FFD=no ATO=no` -> `AGREED no`. Nothing else in the 114 rows changed,
+on any dialect.
+
+That answers the "do the other three walkers need a matching change" question by
+measurement: NO. FFD and ATO already answered `no` on these rows; only FO was wrong,
+and only FO moved. The recorded table is updated with the rows re-measured, the
+`MYSQL_RETYPE_KEEPS_THE_OLD_PHYSICAL_TYPE` evidence constant deleted, and the asserted
+shape moved 68/43 AGREED/DIVERGENT to 71/40 and defect rows 8 -> 5, with the reason
+stated in the assertion message so a later reader cannot mistake a lowered count for
+deleted evidence.
+
+### Two defects found on the way and NOT fixed here
+
+**A physical-contract difference cannot be REPORTED when the two `data_type` strings
+agree, which is the only case it exists for.** `diff_attrs` reads
+
+```rust
+    if !column_data_types_eq(ec, ac) {
+        push(&obj, "data_type", &ec.data_type, &ac.data_type);   // drift.rs:2907
+    }
+```
+
+and `push` (`drift.rs:2852`) drops the entry when expected == actual as STRINGS. So
+`column_data_types_eq` can answer "different" and the report says NOTHING. Measured:
+the `uid` column above folded `Character { length: 191 }` against a live
+`Character { length: 36 }` and produced no drift line, because both sides spell
+`data_type` "text". `column_data_types_eq`'s own comment states the case it was built
+for - "`mysql_canonical_type` folds every `varchar(n)` to the literal `text`, so a
+declared 255 and a live 64 are the same string here" - and that is precisely the case
+the report swallows. A real `varchar(255)` against a live `varchar(64)` on MySQL
+reports clean today. Only a difference that ALSO moves the portable string survives,
+which is how the `amount` line above got out.
+
+Not fixed here: it is a change to the drift report's shape rather than to the fold,
+with cross-suite blast radius, and it is not what this branch was sent to do. It is
+worth more than the fix above and should be taken next.
+
+**`value_format` does not round-trip on MySQL.** A freshly deployed table carrying
+`ids.typeId` reports `column acct format expected "typeId(account)" actual ""` against
+the database it was just deployed to. Pre-existing, unrelated to the physical contract,
+and the reason that column is not in the shipped test - a test that cannot go green is
+not a pin. Recorded so the next MySQL round trip does not rediscover it as new.
+
+### Gates
+
+
