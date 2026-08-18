@@ -68,7 +68,7 @@ These are the concrete barriers, each verified against `main` at `01385061`.
 | blocker | where | why it blocks |
 |---|---|---|
 | four closed dialect enums | `ir/dialect.rs:21`, `ir/validate.rs:347`, `render/step.rs:12`, `node/verbs.rs:28` | a plugin cannot add a variant to a crate it does not own |
-| `DialectSet(u8)` | `model/support.rs:40` | hard cap of eight backends, three bits used |
+| `DialectSet(u8)` | `model/support.rs:40` | cannot express a FOURTH backend at all (see note) |
 | spelling separated from execution | `render/` vs `apply/backend/` | `apply/backend/` references `crate::render` 137 times; extracting a backend crate would leave its SQL behind |
 | `Capability` is private | `render/renderer.rs:16` | 25 predicates exist but a plugin cannot answer or extend them |
 | vendor fields on shared structs | `ColumnSnapshot.sqlite_rowid`, three `mysql_*` fields | a new backend has nowhere to record its equivalent |
@@ -215,8 +215,20 @@ Each backend crate declares its own:
 pub const POSTGRES: DialectId = DialectId::new("postgres");
 ```
 
-`DialectSet(u8)` becomes a set over `DialectId`. The eight-backend cap
-disappears with it.
+`DialectSet(u8)` becomes a set over `DialectId`. The cap disappears with it.
+
+**Correction, measured.** An earlier draft of this document called that a "hard
+cap of EIGHT backends, three bits used", reasoning from the `u8`'s width. That is
+wrong, and wrong in the generous direction. `DialectSet` names exactly three bits
+(`POSTGRES 0b001`, `SQLITE 0b010`, `MYSQL 0b100`), and both of its entry points -
+`from_bools(postgres, sqlite, mysql)` and `contains(dialect: Dialect)` - are keyed
+to the closed three-variant `Dialect` enum. The five spare bits are unreachable
+because nothing can name them. The real limit is THREE, and a fourth backend does
+not "work until the ninth"; it cannot be expressed at all.
+
+The error shape is worth keeping: a type's WIDTH was reported as the system's
+LIMIT without checking what could actually name a slot. The same mistake produced
+the "one dispatch point" claim in the guard section above.
 
 ### Representation: a static string, decided
 
