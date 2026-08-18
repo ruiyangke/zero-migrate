@@ -20,11 +20,26 @@ defaults:
 
 jobs:
   # ---------------------------------------------------------------------------
-  # rust: fmt + clippy + build + the full workspace test suite against a LIVE
-  # Postgres service container (the env-gated pg_* tests actually RUN in CI).
+  # rust: fmt + clippy + build + the full workspace test suite against LIVE
+  # Postgres AND MySQL service containers (the env-gated pg_* and mysql suites
+  # actually RUN in CI).
+  #
+  # MySQL joined this job because the Rust engine had NO live MySQL coverage of any
+  # kind. Measured before adding it: `ZERO_MIGRATE_MYSQL_URL` appeared in 52 files
+  # under `packages/` and in ONE under `crates/`, and that one was
+  # `src/apply/backend/mysql/mod.rs` - source, not a test. So MySQL was exercised at
+  # RENDER level (unit tests over emitted SQL) and at CLI/HOST level (the
+  # TypeScript `host` job below), and nowhere in between. The first Rust test to ask
+  # a live MySQL server what the engine actually did found two permanent-drift
+  # defects and one hole in a load gate; see `crates/zero-migrate/tests/
+  # fold_roundtrip_mysql.rs` and the review log.
+  #
+  # The image and credential pattern are copied from the `host` job below rather
+  # than invented: one `mysql:8`, one `MYSQL_ROOT_PASSWORD: zero_migrate`, one
+  # `mysqladmin ping` health check. Two patterns for the same service would drift.
   # ---------------------------------------------------------------------------
   rust:
-    name: rust (fmt/clippy/build/test + live PG)
+    name: rust (fmt/clippy/build/test + live PG + MySQL)
     runs-on: ubuntu-latest
 
     services:
@@ -40,13 +55,29 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: zero_migrate
+          MYSQL_DATABASE: zero_migrate_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pzero_migrate --silent"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
 
     env:
       RUSTFLAGS: "-D warnings"
       ZERO_MIGRATE_TEST_PG_URL: postgres://postgres:zero_migrate@127.0.0.1:5432/zero_migrate_test
-      # This job exists to run the live-PostgreSQL suites, so a skipped one is a
+      ZERO_MIGRATE_MYSQL_URL: mysql://root:zero_migrate@127.0.0.1:3306/zero_migrate_test
+      # This job exists to run the live-database suites, so a skipped one is a
       # broken service rather than a contributor without a database. Fail instead
-      # of reporting the same pass count a real run reports.
+      # of reporting the same pass count a real run reports. This now covers the
+      # MySQL DSN too: `skip_if_no_mysql!` routes through the same
+      # `announce_live_db_skip`, so deleting the DSN line above turns the new MySQL
+      # suites red instead of letting them quietly skip.
       ZERO_MIGRATE_REQUIRE_LIVE_DB: "1"
 
     steps:
@@ -102,6 +133,71 @@ jobs:
         run: cargo doc --workspace --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: "-D warnings"
+
+  # ---------------------------------------------------------------------------
+  # scaling: the wall-clock COMPLEXITY guards (f664/f665), alone on a runner.
+  #
+  # These assert that doubling N does not quadruple the work - a RATIO, not a
+  # budget - and they are the one thing in this repository whose verdict depends on
+  # what else the machine is doing. They produced false failures repeatedly on a
+  # loaded developer box: 3.6x/3.6x/3.8x at load average 26 and 3.5x/3.6x/3.9x at
+  # load average 30, a different arm each time, all green on an idle re-run.
+  #
+  # NO `services:` block, deliberately. A service container is a second process tree
+  # competing for the same CPU, and a Postgres or MySQL container that this job never
+  # queries would still be initializing its data directory while the first ratio is
+  # being measured. It has no database work to do, so it gets no databases.
+  #
+  # This job is also why the `rust` job above can grow a live MySQL service without
+  # putting the flake next to it. A conformance matrix multiplies database load on
+  # these runners, and a known flake sitting beside a new suite gets the new suite
+  # blamed for it.
+  #
+  # The guards are `#[ignore]`d in source, so `cargo test --workspace` in the `rust`
+  # job compiles and lints them (clippy runs `--all-targets`) but does not TIME them,
+  # and `-- --ignored` here is the only place they are timed. The threshold was NOT
+  # relaxed to achieve this, and CPU time was measured against wall clock and
+  # rejected as an instrument; both arguments live in the header of
+  # `crates/zero-migrate/tests/f664_scaling.rs`.
+  # ---------------------------------------------------------------------------
+  scaling:
+    name: scaling (complexity guards, idle machine, no services)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-scaling-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-scaling-${{ runner.os }}-
+
+      # `--test-threads=1` so the two binaries' arms never time each other: these
+      # measure the machine, and libtest's default parallelism would have them
+      # competing for the cores whose availability is the whole measurement.
+      #
+      # `tee` plus the check below because `--ignored` combined with a filter that
+      # matched nothing exits 0 while running zero tests, which is exactly the
+      # failure this job exists to prevent - a guard that silently stops guarding.
+      # `(^| )0 passed` rather than a plain `0 passed` so a legitimate "10 passed"
+      # does not trip it.
+      - name: cargo test (complexity guards only)
+        run: |
+          set -o pipefail
+          cargo test -p zero-migrate --test f664_scaling --test f665_scaling \
+            -- --ignored --test-threads=1 2>&1 | tee scaling.log
+      - name: the guards actually ran
+        run: |
+          if grep -qE '(^| )0 passed' scaling.log; then
+            echo "a scaling test binary reported 0 passed: the --ignored filter ran nothing" >&2
+            exit 1
+          fi
 
   # ---------------------------------------------------------------------------
   # node: build the JS packages, typecheck, and run the DB-free test suites.
