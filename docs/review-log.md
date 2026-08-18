@@ -32461,3 +32461,109 @@ One incident worth recording. The PostgreSQL server entered recovery mode mid-ru
 a concurrent session, not from this work) and left three schemas behind under this session's own
 prefix. Counted by prefix before and after rather than globally, because other sessions are
 running: `schema_model_eq_pg%` and `%smeq%` are both ZERO on both servers now.
+
+---
+
+## `Hash` on `ColumnSnapshot` / `IndexSnapshot` had no consumer, and now has no impl
+
+Branch `chore/drop-unreachable-snapshot-hash`, base `947f96e9`.
+
+A previous entry (line ~32327) claimed these two manual `Hash` impls were unreachable, "roughly
+36 lines", and that every `Eq`/`Hash` consistency argument in the surrounding docs was therefore
+unfalsifiable. The premise is CONFIRMED. The line count was not: the two impls are 21 and 28
+lines, 49 together.
+
+### The measurement, not the impression
+
+Searched `crates/*/src` and `crates/*/tests` (there is no Rust outside `crates/`, and no
+`benches`/`examples`; both `build.rs` files were checked):
+
+- **`.hash(` calls**: zero outside `snapshot.rs` itself.
+- **`Hasher` / `DefaultHasher` / `hash_map::` / `hash_set::` / `FxHash` / `ahash`**: zero outside
+  the two impls' own signatures.
+- **`Hash` trait bounds** (`: Hash`, `+ Hash`, `where … Hash`): zero in the workspace. Every
+  other `Hash` token in the tree is the `PartitionSpec::Hash` / `PartitionBounds::Hash` variant,
+  which is unrelated.
+- **Hash-keyed collections over these types**: zero. The census of
+  `HashMap|HashSet|BTreeMap|BTreeSet|IndexMap|IndexSet|DashMap<… ColumnSnapshot|IndexSnapshot …>`
+  returns nine sites, and every one of them is `BTreeMap<&str, &ColumnSnapshot>` or
+  `BTreeMap<&str, &IndexSnapshot>` - the snapshot is the VALUE and the key is the name, so `Ord`
+  on `&str` is the only bound in play. The two `HashSet` literals in the crate
+  (`executor.rs:2406`, `:2562`) hold `&str`/`String`.
+- **The container trap, checked explicitly**: all 19 `#[derive(…Hash…)]` sites in the workspace
+  were read, not counted. None has a field of either type, directly or nested. The four in
+  `schema_model.rs` (`TableKey`, `ColumnKey`, `IndexKey`, `IndexElementKey`) are `String` +
+  `usize` only; the six in `snapshot.rs` are leaf enums/structs over primitives; the rest live in
+  `-policy` and `-ir`. `IndexElementSnapshot` does derive `Hash` and IS held by `IndexSnapshot`,
+  but that is the opposite direction and does not make `IndexSnapshot::hash` reachable.
+- **Generic code instantiated with these types**: not possible without a `Hash` bound, and there
+  are none. There are also no proc-macro derives defined in the workspace, so no impl is
+  generated out of sight.
+- **Tests**: the token `Hash` does not appear ANYWHERE under `crates/*/tests`. No test is a
+  consumer, so nothing had to be weakened - the usual removal hazard did not arise.
+- **TS packages**: not applicable; `Hash` is a Rust trait and the addon boundary is napi, which
+  marshals values rather than hashing them.
+
+### The compiler, used as a proof rather than a rubber stamp
+
+Deleting a manual impl cannot silently change behaviour the way REPLACING it with a derive can -
+a container that derives `Hash` over a field which has lost `Hash` fails to compile. So the check
+is real, provided every configuration compiles. The feature space is small and was covered:
+`--workspace --all-targets` (default), `--all-features`, `-p zero-migrate --no-default-features`,
+`-p zero-migrate-node --no-default-features`. All 0 except
+`-p zero-migrate --all-targets --no-default-features`, which exits 101 with 33 errors - all
+`E0432 unresolved import zero_migrate::driver` / `::PostgresBackend` / `::snapshot_schema`, i.e.
+tests reaching for `host-pg`-gated items. That is PRE-EXISTING: stashing the change and re-running
+gives the same 101 and the same 33. The failing log contains no occurrence of "hash" other than
+the worktree's own path. `--no-default-features --lib` is 0.
+
+`clippy --workspace --all-targets -- -D warnings` is 0, which also settles the follow-on question:
+`canonical_index_sort_order` and `canonical_index_sql_text` were called by the deleted
+`IndexSnapshot::hash`, and they remain live through `index_elements_canonically_eq`,
+`index_predicates_canonically_eq`, `schema_model.rs:1122`, `drift.rs:2962` and
+`declarative.rs:1691`. Nothing became dead code.
+
+### What the docs now say
+
+Twelve doc comments asserted a `Hash` exclusion for a trait that did not reach anything. Rather
+than delete the prose - the field-level exclusions are real and load-bearing for `PartialEq` -
+each was narrowed to the guarantee that actually exists: `PartialEq` / `Eq`, or plain "equality".
+`TableSnapshot::stored_create_sql` said "EXCLUDED from equality / hashing" and never had a `Hash`
+at all, so that one was vacuous before this change too. `apply/drift.rs:3362` said
+`index_elements_canonically_eq` "backs `IndexSnapshot`'s `PartialEq` / `Hash`"; it now says
+`PartialEq` / `Eq`.
+
+Two new comments sit above the surviving `PartialEq` impls saying why `Hash` is ABSENT rather than
+hand-written, because absence is the easy thing for a future reader to fix wrongly. Both hand-written
+`eq` impls ignore fields (`ColumnSnapshot` skips `default`, `mysql_physical_type` and the sentinels;
+`IndexSnapshot` compares canonically and skips `opclass` / `nulls_not_distinct` / `only` /
+`expr_cascade_columns`), so `#[derive(Hash)]` on either would separate values their own `eq` calls
+equal. That is the falsifiable statement the old prose was gesturing at.
+
+### Scope
+
+`model/snapshot.rs` (the two impls plus doc text) and one doc line in `apply/drift.rs`. No
+restructuring of `snapshot.rs` - the type layout, field order and every `impl` block boundary are
+untouched. `render/fold.rs` was not opened.
+
+### Gates
+
+fmt 0. clippy `--workspace --all-targets -- -D warnings` 0. `cargo test --workspace --exclude
+zero-migrate-node`: 224 suites, 3241 passed, 0 failed, 11 ignored - the baseline exactly. `cargo
+test -p zero-migrate-node --no-default-features`: 10 suites, 91 passed, 0 failed, 0 ignored.
+`pnpm -w build` 0. `pnpm --filter zero-migrate check` 0. `pnpm --filter zero-migrate test`: 327
+tests, 326 pass, 0 fail, 1 skipped. `pnpm --filter zero-migrate-cli typecheck` 0. `pnpm --filter
+zero-migrate-cli test:docs`: 6 tests, 6 pass, 0 fail, 0 skipped. `pnpm --filter zero-migrate-node
+build` 0, rebuilt BEFORE the host suite. `pnpm --filter zero-migrate-cli test:host` with
+`ZERO_MIGRATE_TEST_PG_URL` set: 458 tests, 458 pass, 0 fail, **0 skipped** - the DSN was live, so
+this is not the silent 76-test skip.
+
+Servers left as found. `pg_database` is byte-identical before and after. `pg_namespace` gained two
+schemas during the window, `zmconf_210740_dropindex_base_13` and its `_migrations` sibling. They
+are NOT this session's: the `zmconf_` prefix is minted by `tests/dialect_conformance_live.rs`, a
+Rust test, and this session's Rust run had already finished when the "before" snapshot was taken;
+only the addon build and the TS host suite ran afterwards, and neither creates `zmconf_` schemas.
+They belong to a concurrent sibling run on the shared instance, and were deliberately left alone -
+sweeping them is precisely the cross-run damage `dialect_conformance_live.rs` documents at line 69.
+The MySQL client is not in the devShell, so the MySQL side could not be counted; the MySQL-gated
+tests were unaffected either way.
