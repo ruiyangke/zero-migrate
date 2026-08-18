@@ -31010,3 +31010,309 @@ pnpm --filter zero-migrate-node build                           0
 pnpm --filter zero-migrate-cli test:host                        0
 dialect_conformance_live (live PG 5434 + SQLite)                0
 ```
+## Two ops that cleared every engine gate and died at the server, and the one that was never SQLite's alone
+
+The live conformance layer (`63447006`) recorded exactly two ENGINE DEFECTS among its
+22 disagreements: an `alterSequence` with no options that renders a statement with no
+action, and an `INSTEAD OF` trigger that SQLite refuses because its target is a table.
+Both are fixed here, in the lowerer, and both refusals are pinned by their own live
+suite with its own over-refusal control.
+
+The finding that outlives the two fixes is that the second defect was never SQLite's.
+PostgreSQL has the identical hole, through a variant the corpus never drives, and the
+sweep could not see it because the sweep only ever asks each row one question.
+
+### Defect 1 - what an option-less `alterSequence` MEANS
+
+The brief offered three readings: refuse it at validate, lower it to nothing, or
+something else. Measured, the answer is REFUSE, and the seam is the LOWERER, not
+validate.
+
+**Why refuse rather than lower to nothing.** `ALTER SEQUENCE <name>` with an empty
+action list is not a statement in PostgreSQL's grammar. Measured directly, against
+PostgreSQL 18.4, on the engine's own emitted text:
+
+```text
+  postgres=# ALTER SEQUENCE "zmred_aaf"."s";
+  ERROR:  syntax error at end of input
+  LINE 1: ALTER SEQUENCE "zmred_aaf"."s"
+                                        ^
+```
+
+So the op does not have a trivial rendering. It has NO rendering. Three further
+measurements say the same thing:
+
+1. **The engine's own house rule for an empty payload is refusal, three times over.**
+   `addConstraint` with `elements: []` is `exclusion constraint needs at least one
+   element`; `insert` with `rows: []` is `malformed insert into "t": no rows`; a SQLite
+   trigger with no events or no body statements is `VendorError::EmptyList`. All three
+   are in the LOWERER, at the point the statement is built, and none of them degrades
+   to a no-op. An option-less `alterSequence` is the same shape and now gets the same
+   answer.
+2. **A no-op is not free.** The step still takes a journal row and still enters the
+   drift anchor (`Checksum::of_ir` over the op list), so the history would record an
+   alter that altered nothing. The next reader of that history cannot tell a
+   deliberate no-op from an option that failed to deserialize.
+3. **It is reachable from the public authoring API**, not only from a hand-crafted
+   envelope. `packages/zero-migrate/src/ops.ts::recordAlterSequence` accepts
+   `sequence("s").alter({})` and emits the op with every field absent. The likeliest
+   author of an option-less alter is someone who meant to set something.
+
+**Why the lowerer rather than validate.** The brief suggested validate, and validate
+has one genuine advantage: `load_ir_document_authorized` runs it over `inverse_ops`
+too (`load.rs:111`), which lower never sees at author time. Two measurements outweigh
+it.
+
+* The `dropIndex` lesson from `63447006` is about SPELLING. A refusal routed through
+  validate's capability path carries `CODE_UNSUPPORTED`, the dialect table's own code,
+  so an option-less alter would read to the operator as "this dialect cannot alter a
+  sequence". It can. `IrLowerError::AlterSequenceHasNoAction` classifies as
+  `EngineError` - the malformed-op class, the same one `rows: []` lands in - which is
+  what it is.
+* The lowerer is the LAST gate before SQL text exists, and it is the only one every
+  caller passes. `IrAuthor::lower_plan` is public, takes an already-built
+  `MigrationIr`, and is reached directly by 13 suites in `crates/zero-migrate/tests`
+  alone - so any caller that constructs its ops in Rust rather than loading an
+  envelope never meets validate at all. The RED run below drives `lower_plan`
+  deliberately for this reason: it is the path with neither validate's inverse pass
+  nor the guard's parser in front of it.
+
+**PRESENCE is the test, never the inner value**, and this is the part a careless fix
+gets wrong. `restart: null` is a bare `RESTART`, `minValue: null` is `NO MINVALUE`,
+`ownedBy: null` is `OWNED BY NONE`. All three are `Option<Option<T>>` fields whose
+OUTER option is `Some`, all three render a real action, and a gate written against the
+inner value would refuse three legal migrations. All three are applied against the
+live server in the over-refusal control.
+
+### Defect 2 - a structural fact, not a capability cell
+
+`createTrigger/bodyInsteadOf` is declared `portable` on SQLite, and the coordination
+note asked whether the fix is that declaration. It is not, and the evidence is that
+SQLite genuinely applies the op:
+
+```text
+  CREATE TRIGGER "tg_good" INSTEAD OF INSERT ON "v" FOR EACH ROW BEGIN ... END
+```
+
+applies, fires, and writes the base row - measured in
+`tests/instead_of_trigger_needs_a_view.rs`. Flipping the cell to `unsupported` would
+deny the only thing `INSTEAD OF` is for, which is making a view writable. The
+declaration is right; the missing gate was the defect, exactly as `63447006` recorded.
+
+`dialect-support.toml` and `model/op_support.rs` were NOT touched.
+
+**And it is not SQLite's defect.** `create_trigger_variant` returns `"executeFunction"`
+for EVERY `ExecuteFunction` action, whatever the timing - the timing is only consulted
+on the trigger-BODY branch below it. `Feature::TriggerInsteadOfTiming` is declared
+supported on PostgreSQL. So a PostgreSQL `INSTEAD OF ... EXECUTE FUNCTION` trigger on a
+table selects the `executeFunction` cell, clears validate, clears lower, and dies at
+the server. Measured twice - once by psql directly and once through the production
+path:
+
+```text
+  psql          ERROR:  "t" is a table
+                DETAIL:  Tables cannot have INSTEAD OF triggers.
+  the engine    apply: migration mig_7n42DGM5OrENC776mHyHSb failed to apply: "t" is a table
+```
+
+The live sweep could not have found this. `bodyInsteadOf` is the ONLY corpus row
+carrying `INSTEAD OF`, and it is `unsupported` on PostgreSQL for an unrelated reason
+(PostgreSQL has no trigger bodies), so PostgreSQL's answer to that row is a correct
+capability refusal that says nothing about timing. **One representative per
+(kind, variant) cell means a defect living in the INTERSECTION of two facets is
+invisible whenever some other facet of the same row is refused first.** That is a
+property of the layer, not a bug in it, and it belongs beside the
+`unsupported`-is-a-tautology finding from `63447006`: layer 1 can only see what its one
+representative asks.
+
+The gate is therefore DIALECT-NEUTRAL and sits in `IrAuthor::lower_trigger_op`, which
+both dialects reach and which already carries the working `LiveSchema`.
+
+**It keys on a POSITIVE fact.** The refusal fires when the target is a KNOWN LIVE
+TABLE, never when a view cannot be proved. That direction matters:
+
+* `LiveSchema::tables` is filled by catalog introspection that filters to tables
+  (`relkind IN ('r','p')` on PostgreSQL, `type='table'` on SQLite), so a view is never
+  in it, and the over-refusal control would fail if it were.
+* `lower_one_op` inserts each `createTable` into the working `LiveSchema` as it goes,
+  so a table created earlier in the SAME envelope is caught too, not just one from a
+  previous migration.
+* A target the engine has never seen is left alone. That is the same fail-open posture
+  `lower_dml_op` documents for its resolved-`ColRef` rule ("never weaker than the
+  load-time structural-only gate"), and the server remains the backstop.
+
+### RED, and that both REDs failed for the right reason
+
+**Defect 1 RED.** Driven through `IrAuthor::lower_plan` - the UNGUARDED path - so the
+SQL guard's parser cannot be the layer that objects:
+
+```text
+  an alterSequence with no options must be refused by the engine, but it lowered to
+  ["ALTER SEQUENCE \"alterseqaction_2365363_0\".\"s\""] - a statement with no action
+  clause
+```
+
+That is the engine producing the defective statement, one layer above the guard error
+`63447006` recorded. The server's own verdict on that exact text is quoted above.
+
+**Defect 2 RED**, both dialects, in each server's own words:
+
+```text
+  sqlite      apply: backend error: sqlite migration statement failed:
+              cannot create INSTEAD OF trigger on table: t
+  postgres    apply: migration mig_7n42DGM5OrENC776mHyHSb failed to apply: "t" is a table
+```
+
+### Neuter, twice, separately
+
+Each gate was disabled on its own and both suites re-run, so neither GREEN can be
+resting on the other's fix.
+
+```text
+  gate 1 neutered   alter_sequence_needs_an_action    FAILED, with the RED message above
+                    instead_of_trigger_needs_a_view   ok (2 passed)
+  gate 2 neutered   instead_of_trigger_needs_a_view   FAILED, both dialects, server's words
+                    alter_sequence_needs_an_action    ok (1 passed)
+```
+
+### The over-refusal controls
+
+Mandatory for both, because both fixes ADD a refusal.
+
+**`alterSequence`** - three controls, all applied against the live PostgreSQL and all
+read back from `pg_sequence`, not from the plan:
+
+```text
+  { increment: 4 }      INCREMENT BY 4 reaches the SQL; seqincrement = 4
+  { restart: null }     bare RESTART reaches the SQL; applies
+  { minValue: null }    NO MINVALUE reaches the SQL; seqmin = 1 (the bigint default)
+```
+
+**`INSTEAD OF`** - one per dialect, and each one is EXERCISED rather than merely
+created: an `INSERT` through the view must land in the base table via the trigger.
+
+```text
+  sqlite      body action, INSTEAD OF INSERT ON "v"              applies, fires, 1 row
+  postgres    EXECUTE FUNCTION, INSTEAD OF INSERT ON "v"         applies, fires, 1 row
+```
+
+The PostgreSQL control is the one that would have caught a lazy fix: refusing
+`INSTEAD OF` on PostgreSQL outright, or keying the gate on "not provably a view", would
+break it.
+
+### The conformance rows that moved, and the fixture defect behind both
+
+Both rows were BOTH an engine defect and a DEGENERATE REPRESENTATIVE, the same family
+`63447006` put `insert` and `addConstraint/exclusion` in - and that is why the two
+allowances are DELETED rather than rewritten. An option-less `alterSequence` and an
+`INSTEAD OF` trigger aimed at a table cannot apply on any dialect, so as long as the
+representatives carried those shapes the two cells measured the missing gates instead
+of the declarations they exist to measure.
+
+```text
+  corpus        alterSequence/base           increment: None  ->  increment: Some(2)
+                createTrigger/bodyInsteadOf  table: "t"       ->  table: "v"
+  prelude       createTrigger/bodyInsteadOf  gains a createView "v"
+  OWNED_TABLES  gains "v"
+```
+
+The last line is a measurement, not a tidy-up. `Op::touched_table` answers a
+`createTrigger` with its TARGET, so with `v` outside the ownership registry the row
+reported `ownership violation: op 0 targets table "v" owned by <unregistered>` - a
+fixture answer wearing the shape of a real one, and the third such fixture defect this
+layer has produced. `dialect_table_faithfulness.rs` is unaffected: it reads
+`Op::op_variant()`, kinds, and the `(kind, variant)` set, and `create_trigger_variant`
+does not look at the target.
+
+Both rows now APPLY where they are declared supported:
+
+```text
+                              before                       after
+  alterSequence/base  [pg]    RefusedByPolicy (guard)      Applied
+  alterSequence/base  [lite]  RefusedByCapability          RefusedByCapability (unchanged;
+                                                             declared unsupported)
+  bodyInsteadOf       [pg]    RefusedByCapability          RefusedByCapability (unchanged;
+                                                             declared unsupported: no bodies)
+  bodyInsteadOf       [lite]  ServerError                  Applied
+
+  postgres TOTAL   applied 72 -> 73, refusedByCapability 14 -> 14, other 6 -> 5
+  sqlite   TOTAL   applied 29 -> 30, refusedByCapability 58 -> 58, other 5 -> 4
+```
+
+**`expectations.rs` now has no family (C) entry at all**, and its header says so: a (C)
+entry is a bug with a note on it, and it should never live long. The 20 remaining
+allowances - 14 family (A), two of which are the `dropIndex` ownership rows, and 6
+family (B) - are untouched, as are the four `PLACEHOLDER_REASONS`. The (B) family is
+still the other agent's to land.
+
+### Isolation, verified
+
+```text
+  pg_namespace total            before 331   after 331
+  schemas matching 'zmconf_%'   before 0     after 0
+```
+
+Both new suites take their own schema per run and drop it on the way out, plus the
+`SchemaGuard` the tree already arms; the SQLite suite runs in a `TempDir`. The one
+hand-run `psql` probe used to capture the two servers' verbatim words created
+`zmred_aaf` and dropped it with `CASCADE` in the same invocation; the count above was
+taken after it.
+
+### What was NOT done
+
+* `dialect-support.toml` and `model/op_support.rs` were not touched, by the
+  coordination note and, independently, because the measurement says neither
+  declaration is wrong.
+* `packages/zero-migrate`'s `recordAlterSequence` still accepts `alter({})` and emits
+  the op. That is deliberate: the IR envelope is the trust boundary and the engine is
+  the authoritative gate, so a second TypeScript check would duplicate rather than
+  close anything. It is recorded because it is the reason the defect is reachable
+  without a hand-crafted envelope, and an author-time refusal there would be a nicer
+  message, not a stronger guarantee.
+* The `dropIndex` mis-spelling `63447006` flagged (an OWNERSHIP refusal carrying
+  `CODE_UNSUPPORTED`) is still open. It is the same class of mistake this entry avoided
+  by choosing an `EngineError`-classified variant, but repairing it is a separate
+  change to the validate gate.
+
+### Gate exit codes
+
+```text
+cargo fmt --all -- --check                                    0
+cargo clippy --workspace --all-targets -- -D warnings         0
+cargo test --workspace --exclude zero-migrate-node            0   (212 suites, with the live PG DSN)
+cargo test -p zero-migrate-node --no-default-features         0
+pnpm -w build                                                 0
+pnpm --filter zero-migrate check                              0
+pnpm --filter zero-migrate test                               0
+pnpm --filter zero-migrate-cli typecheck                      0
+pnpm --filter zero-migrate-cli test:docs                      0
+pnpm --filter zero-migrate-node build                         0   (rebuilt before the host run)
+pnpm --filter zero-migrate-cli test:host                      0   (458 tests, 382 pass, 76 skip)
+pnpm --filter zero-migrate-cli test:host:leak                 0
+```
+
+`pnpm install --frozen-lockfile` was run once first; the worktree had no `node_modules`.
+
+### Two operational findings, neither about the engine
+
+**A `cargo test --workspace` debug tree here is 70G, and 62G of that is debug symbols.**
+Three agents building at once took the machine from 214G free to 8G, and at 8G an
+ENOSPC does not fail cleanly - the same day it truncated a Rust source file to zero
+bytes while the edit reported success, produced `ld.lld: Bus error` on four test
+binaries, and killed the PostgreSQL container mid-suite. Re-running the identical gate
+with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`
+produced a **6.9G** tree and the same exit 0 over the same 212 suites. Debug symbols
+change no test outcome, so an agent that only needs a verdict should not pay 63G for
+them. `target/debug/incremental` is a further 8.6G and is pure cache.
+
+**The leak gate reported a leak that was not this branch's, and the run that reported
+it was mis-instrumented.** Run without `ZERO_MIGRATE_TEST_PG_URL`, every PostgreSQL
+host test SKIPS - and the gate still counted PostgreSQL namespaces, so it attributed
+`zm_orphan_..._egat_migrations` (from `orphaned-contract-diagnosis.test.ts`, a schema
+whose project half was dropped and whose `_migrations` half was not) to a run that had
+opened no PostgreSQL session of its own. Re-run WITH the DSN it reported `127
+namespaces before, 127 after, 0 left behind by this run` and exited 0. **A leak gate
+that counts a server the suite was not allowed to touch cannot tell its own leak from
+someone else's**, which is the same shape as the racing leak check `63447006` had to
+move inside its sweep. Recorded, not fixed: it is the CLI package's gate, not this
+branch's.
