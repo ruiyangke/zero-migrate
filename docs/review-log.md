@@ -32138,3 +32138,112 @@ The `data_type` line for a MySQL column WITHOUT a physical contract on both side
 prints the fold's PostgreSQL spelling against the catalog's canonical one. Nothing on
 this tree produces such a pair - the MySQL introspector always stamps a contract and so
 does the MySQL fold - but a snapshot written before the contract existed would.
+
+## The conformance leak guard accused every concurrent run, because the prefix it scanned was not the pid the name already carried
+
+`dialect_conformance_live.rs` refused to start when it found any `zmconf_%` schema in
+`pg_namespace`, on the reading that a leftover probe schema is a previous run's leak. The
+names it scanned already embed the pid of the process that created them
+(`std::process::id()` inside `nonce`), but the predicate did not: `PROBE_PREFIX` is bare
+`zmconf_`. One PostgreSQL instance is shared by every agent and every gate run in this
+tree, so a sibling suite's IN-FLIGHT probe schema - a run that is working perfectly - read
+as this run's evidence of a leak and failed the gate.
+
+The reported instance: the failing test was pid 3692207 and it named schemas created by
+pid 3691707; a query immediately afterwards found zero `zmconf_%` schemas, because the
+other run had finished and cleaned up. That premise was re-measured here rather than
+trusted, against the real server:
+
+```text
+foreign pid 3929020 (a live `sleep`), schema zmconf_altersequence_base_3929020_26 planted
+cargo test ... every_postgres_row_of_the_dialect_table_answers_to_a_live_server   exit 101
+  dialect_conformance_live.rs:1264: a previous run leaked probe schemas:
+    ["zmconf_altersequence_base_3929020_26"]
+  (the test binary was pid 3929031 - a different, live process)
+```
+
+### What the guard is actually asking, and what it was asking instead
+
+"Is a `zmconf_%` schema present" is not the question. The question is whether a schema is
+present that NO RUNNING PROCESS CAN STILL DROP, and the pid in the name settles it. The
+census is now three-way (`ProbeOwner`): this process's own pid is always this run's leak;
+a foreign pid that is still running is a sibling mid-flight and is ignored; a foreign pid
+that has exited leaked its schema and still fails the run. The pid also moved from the
+middle of the name to the first segment after the prefix, because a row appends `_aux`,
+`_migrations` and `_role` to the base and PostgreSQL truncates past 63 bytes from the
+tail - only the head of the name is stable enough to parse.
+
+The care here was to fix the false accusation WITHOUT making the guard quieter, so all
+four directions were measured separately against the real server, not a mock. The two
+self-leak rows were produced by temporarily injecting a `CREATE SCHEMA` carrying the test
+binary's own pid, so the pid under test is the real one; that scaffold is reverted.
+
+```text
+foreign pid, ALIVE, new layout + legacy layout planted     exit 0    <- the fix
+  LEDGER ... probe_schemas_mine_after=0 probe_schemas_sibling_in_flight_after=2
+foreign pid, EXITED (spawned and reaped, /proc gone)       exit 101  <- cross-run leak, still caught
+  left by a process that has since exited: ["zmconf_3942218_altersequence_base_26"]
+OWN pid, before the sweep (injected, pid 3945616)          exit 101  <- self-leak, still caught
+  left by THIS process (3945616): ["zmconf_3945616_injectedleak_0"]
+OWN pid, after the sweep (injected, pid 3946269)           exit 101  <- self-leak, still caught
+  still holds 1 of this process's own (3946269): ["zmconf_3946269_injectedleak_0"]
+```
+
+Neuter-verified: restoring the pre-fix rule (`starts_with(PROBE_PREFIX) => Mine`) fails
+the new test at `a running foreign pid's schema is a sibling in flight, not a leak`,
+exit 101. No assertion or threshold was lowered; the guard gained a case it previously
+could not express and lost none.
+
+`a_probe_schema_is_judged_by_the_pid_in_its_name_not_by_its_prefix` is the landed test.
+It plants a schema owned by a real spawned process, reads it back through the same
+`probe_schemas` catalog query the sweep uses, and checks all three verdicts, taking the
+dead-pid one only after that process is killed and reaped. It deliberately never puts a
+DEAD pid's schema on the shared server: that is a real leak by every run's reckoning, and
+planting one would fail a sibling that is working. libtest runs it concurrently with the
+sweep in the same binary, which is the standing proof that it does not poison it.
+
+### Two limits, measured rather than hidden
+
+PID REUSE. A leak from a dead run whose pid has since been recycled by an unrelated live
+process reads as in-flight and goes unreported until that process exits. Detection is
+DELAYED, never dropped - the schema stays on the server and keeps failing later runs
+until cleaned up. `/proc/sys/kernel/pid_max` is 4194304 here, so a wrap takes millions of
+spawns. The reverse case is safe by construction: a run that inherits a leaker's pid
+reads the leftover as its OWN and fails loudly, which is the injected-self-leak row above.
+
+NON-LINUX. `process_is_running` reads `/proc`. On a target without it every foreign pid
+reads as running, which keeps concurrent runs green and gives up only the cross-run half.
+This run's own leftovers are still caught: "is this pid mine" needs no `/proc`.
+
+TRANSITIONAL. `legacy_layout_is_in_flight` exists only because binaries built before this
+change are running against this server right now, writing the pid in the middle of the
+name. It is delete-on-sight once no such binary can still be running.
+
+### Gate exit codes, each read directly
+
+```text
+cargo fmt --all --check                                       0
+cargo clippy --workspace --all-targets -- -D warnings         0
+cargo test --workspace --exclude zero-migrate-node            0   220 binaries, 3244 tests, 0 failed
+cargo test -p zero-migrate-node --no-default-features         0   10 binaries, 91 passed, 0 failed
+pnpm -w build                                                 0
+pnpm --filter zero-migrate check                              0
+pnpm --filter zero-migrate test                               0   327 tests, 326 pass, 1 skip
+pnpm --filter zero-migrate-cli typecheck                      0
+pnpm --filter zero-migrate-cli test:docs                      0   6 tests, 6 pass
+pnpm --filter zero-migrate-node build                         0   rebuilt BEFORE test:host
+pnpm --filter zero-migrate-cli test:host                      0   458 tests, 382 pass, 76 skip
+```
+
+`pnpm install -r --frozen-lockfile` first. The live PG DSN was exported for the cargo and
+`test:host` gates.
+
+### Server left as found
+
+Counted by this work's own prefix, which is the only usable invariant while other agents
+are running: `zmconf_%` was 0 before and 0 after every experiment above, including the
+ones that panicked mid-suite. The whole-catalog `pg_namespace` count moved 331 -> 333 ->
+331 across the session for reasons that are other agents'. One unrelated event is worth
+recording: the shared instance entered `FATAL: the database system is in recovery mode`
+for 41s during the first RED attempt, with `pg_postmaster_start_time()` unchanged - a
+backend crash from another run, not a restart and not this work.
