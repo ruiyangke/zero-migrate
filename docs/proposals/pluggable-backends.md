@@ -301,9 +301,16 @@ machinery. It moves into `zero-migrate-pg`. The seam it moves behind ALREADY
 EXISTS: `apply/executor.rs:1118` calls
 `guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()))`, and the
 crate already ships `PgGuard`, `SqliteDescriptorGuard` and a MySQL posture that
-rejects raw SQL outright (`GuardError::MysqlRawSqlRejected`). Three dialects,
-three postures, one dispatch point. This decision moves the implementations into
+rejects raw SQL outright (`GuardError::MysqlRawSqlRejected`, at
+`guard/mod.rs:1223` and `:1308`). This decision moves the implementations into
 the crates that own them; it does not invent a mechanism.
+
+**Correction, measured.** An earlier draft of this section said "three dialects,
+three postures, ONE dispatch point". The posture count is right; the dispatch
+count was not. There are TWO call sites, `executor.rs:1118` AND
+`executor.rs:1453`, and step 3 must move both. The error is worth recording
+because of its shape: "one dispatch point" was the first grep hit reported as a
+count. A count belongs in this document only after it has been grepped for.
 
 But the guard is a SECURITY boundary, so what moves and what stays are not the
 same question.
