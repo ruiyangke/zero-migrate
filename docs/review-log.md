@@ -28620,3 +28620,344 @@ there moved. That file is outside the two this work was scoped to, and reaching 
 the deliberate alternative to copying forty lines of guarded parsing into
 `render::declarative` - one word of visibility beats a second implementation of a
 round-trip guard.
+
+## The atomicity boundary was the step, and every live check sat inside it
+
+`MigrationEngine::apply_plan_locked` grew four plan-level preflights, each added after the
+per-step version of the same question was found to fire too late, each comment saying so in
+nearly the same words. Meanwhile every `Precondition` a plan carries was still evaluated
+inside the per-migration loop, which is after the earlier steps of the same plan have
+committed. `Op::DropColumn`'s `ColumnHasNoBlockingDependents` was the shipped case.
+
+This replaces the fourth of those bespoke preflights with a general phase, moves the drop's
+assertion onto it, and puts the online rename's dependents check behind the same test. The
+useful part is not the phase - it is what the measurement says belongs on it, and the two
+defects in the preflight the brief held up as the precedent to follow.
+
+### THE RED: the residue, read out of the catalog
+
+`tests/pg_plan_precondition_preflight.rs`, driving author -> `load_and_lower_guarded` ->
+`MigrationEngine::apply_plan` against a live PostgreSQL, engine-emitted SQL throughout. The
+envelope is the ordinary one: an op that WOULD commit, then a drop the database refuses
+because a view reads the column.
+
+```text
+  ops    [addColumn dropsrc.survivor, dropColumn dropsrc.doomed]
+  view   dropsrc_reader SELECTs dropsrc.doomed
+
+  apply_plan   -> Err  ColumnHasNoBlockingDependents { table: "dropsrc", column: "doomed" }
+                       is unmet (OnUnmet::Halt): blocking dependents
+                       ["rule _RETURN on view ....dropsrc_reader"]
+
+  information_schema.columns AFTER the refusal
+      dropsrc.survivor    PRESENT      <- the half migration
+      dropsrc.doomed      PRESENT
+```
+
+`survivor` is read back out of `information_schema`, not out of the engine's report. The
+error return is not the evidence; the committed column is.
+
+### Two defects in the preflight I was told to treat as precedent
+
+Both are in `preflight_plan_column_retypes`, which landed hours ago and which the brief
+cites as one of four correct instances of the shape. Both are live on `main`, both were
+found by measuring rather than by reading, and a general mechanism built by copying that
+preflight would have generalised both.
+
+**It over-refuses a plan that removes its own blocker.** It asks the pre-plan database with
+no reading at all of what the plan does:
+
+```text
+  ops   [dropView repairretype_reader, setColumnType repairretype.widened -> bigInt]
+
+  main  -> Err  changing the type of "repairretype"."widened" would be refused by the
+                database because ["rule _RETURN on view ....repairretype_reader"] block it
+```
+
+Every step of that plan succeeds when it is actually run. Dropping a view and widening the
+column it read is an ordinary deploy, and `main` refuses it.
+
+**It re-judges steps the executor would never evaluate, and the refusal is permanent.** The
+executor's pending set is `set - completed - superseded`, so a completed migration's
+preconditions are never asked. The preflight reads every step regardless. That is not the
+same question asked earlier - it is a NEW gate on a step this run will not run:
+
+```text
+  deploy 1   [addColumn replayed.survivor, setColumnType replayed.widened -> bigInt]  ok
+  then       CREATE VIEW replayed_reader AS SELECT widened FROM replayed
+  deploy 1 again (every step journaled completed, the executor applies nothing)
+
+  main  -> Err  changing the type of "replayed"."widened" would be refused ... 
+```
+
+The retype completed long ago. Adding a reader over a retyped column is legal and common.
+From that moment the deploy is refused on every re-run, forever, for a step that cannot run.
+
+Both are fixed here, because the general phase subsumes that preflight rather than joining it.
+
+### The classification, and the rule that decides it
+
+The phase is a REFUSAL and nothing else. The per-migration evaluation stays exactly where it
+is and remains the only thing that decides whether a migration APPLIES - `executor`'s second
+pass calls `evaluate_preconditions` unconditionally for every pending migration, and nothing
+the phase produces reaches it. So the hoist can only ever be wrong IN ONE DIRECTION: by
+refusing a plan that would have succeeded. That bound is what makes the rest tractable.
+
+A hoisted refusal is wrong exactly when the assertion is unmet against the pre-plan database
+and an earlier step REPAIRS it. So the only question is which earlier-step effects can repair
+which assertion.
+
+Classifying by VARIANT ALONE is wrong, and that is measurable rather than arguable: every one
+of the eight variants can be flipped from unmet to met by SOME earlier step. But they split
+cleanly on how they respond to the ordinary ADDITIVE work a plan is made of, and that split
+is the whole mechanism:
+
+```text
+  OBSTRUCTION   "nothing is in the way of this"        repaired only by a REMOVAL
+      ColumnHasNoBlockingDependents
+      ColumnTypeChangeHasNoBlockers
+
+  EXISTENCE     "this exists" / "this does not"        repaired by ADDITIVE work
+      TableExists  TableNotExists  ColumnExists  ColumnNotExists  RowCount
+
+  OPAQUE        untrusted SQL                          repaired by anything
+      SqlBoolean
+```
+
+For an obstruction assertion, additivity IS innocence: a step that only adds catalog facts
+cannot remove a dependency edge, an inheritance link or a partition-key membership. It can
+BREAK one - `CREATE VIEW` over the column does - but that direction is met-to-unmet, which
+the per-migration seam still catches exactly as today.
+
+For an existence assertion, additivity IS THE REPAIR. `CREATE TABLE` is precisely what makes
+`TableExists` true. No prefix test can license hoisting one, so none of them ever hoists.
+
+So the rule is:
+
+> A precondition on step `i` is answerable against the pre-plan database iff it is `Halt`,
+> its variant is an OBSTRUCTION assertion, `i > 0`, the step is a `Ddl` step, its version is
+> not journal-satisfied, and every step before it PROVABLY CLEARS NO OBSTRUCTION.
+
+and the prefix test is ONE boolean per step - `apply::plan_precondition::clears_no_obstruction`
+- rather than a per-object effect ledger. A ledger would have to be independently right about
+creation, deletion, column addition, column removal and row counts, each silently wrong until
+some plan exercised it, and each wrong in the over-refusal direction.
+
+`Skip` never hoists. It means "leave THIS migration pending and continue the batch", which is
+a per-migration verdict with no whole-plan reading - there is no plan-level refusal for it to
+make. Its own documentation records that a wrong `Skip` is quieter and worse than a wrong
+`Halt`, which settles which way to fail.
+
+`clears_no_obstruction` is a WHITELIST over parsed statements, not a blacklist, and that
+choice is load-bearing rather than stylistic. See below.
+
+### Does the stamped-vs-authored distinction generalise? No, and it does not have to
+
+F883 leaned on it. It does not generalise as a CORRECTNESS rule: the rule above is
+source-blind, because whether an answer is stable is a fact about the plan and not about who
+wrote the assertion. What the distinction always was is a BLAST-RADIUS argument, and on that
+axis it is answered structurally instead:
+
+`render::lower`'s `assemble_plan` attaches `ir.preconditions` to `steps[0]` and nowhere else,
+and hard-errors if `steps[0]` is not a `Ddl` step. One lowered IR is one `AppliedPlan`, and
+the declarative deploy path calls `apply_plan_locked` once per artifact. So on every path the
+engine itself builds, an AUTHORED precondition sits at index 0, where `i > 0` makes the hoist
+a no-op by construction. The two ENGINE-STAMPED assertions are the only ones that can sit at
+a later index, and they are exactly the two obstruction variants.
+
+A direct `apply_plan` caller can hand-build a step vector that puts an authored precondition
+later. For that caller the variant classification, not the stamp, is what protects it - and
+no authored variant is an obstruction variant, so none of them hoists there either.
+
+### `CREATE OR REPLACE VIEW`, and why the whitelist is not stylistic
+
+The obvious way to write the prefix test is "does this statement DROP something". That is
+wrong, and the engine emits the counterexample. `render/renderer.rs` emits
+`CREATE OR REPLACE VIEW` for `createView { replace: true }` under PostgreSQL's
+`CreateOrReplaceView` capability, and `render/fold.rs` calls `replace` "the authored way to
+change a view's body". A replaced view recomputes its dependency edges, so a body that stops
+selecting a column removes that column's blocker WITH NO `DROP` ANYWHERE:
+
+```text
+  ops   [createView replacedview_reader replace:true (now selects id, not doomed),
+         dropColumn replacedview.doomed]
+```
+
+That is the canonical safe way to retire a column a view reads, and a drop-shaped test reads
+the first step as a creation and refuses the plan. Asking instead "is this one of the shapes
+PROVEN to add only" gets it right, because the additive answer is forced to look at
+`replace` - and gets every shape nobody has thought about yet right too. An `up` that does
+not parse, a statement outside the list, an `ALTER TABLE` subcommand outside the list, a
+`DO $$ ... $$` block whose DDL is inside a string, and every structured step whose SQL is
+generated at apply time all answer "may clear an obstruction", which falls back to today's
+behaviour rather than forward into a new refusal.
+
+### What an operator sees differently
+
+Only for `dropColumn`, and only in a multi-step plan.
+
+```text
+  BEFORE   a multi-step plan   earlier steps COMMIT, then
+                               ApplyError::PreconditionFailed naming the blocker.
+                               The committed steps stay applied.
+  AFTER    a multi-step plan   the SAME PreconditionFailed, the same version, the same
+                               "is unmet (OnUnmet::Halt): blocking dependents [...]" text,
+                               the same pg_describe_object wording - and NOTHING committed.
+
+  BEFORE and AFTER, a ONE-STEP plan   identical. Nothing is hoisted, the refusal still
+                                      comes from the per-migration seam.
+```
+
+Both halves are pinned side by side, so "the firing point moves, the reading does not" is a
+measurement rather than a claim. The one thing that does change beyond timing is ERROR
+PRECEDENCE: a blocked drop in a multi-step plan now reports before the approval gate, the
+pending-contract read-back, the checksum-drift gate and the guard, because the phase sits
+where the retype preflight already sat. All of those are themselves all-or-nothing refusals,
+so nothing applies either way; only which error is named first differs.
+
+The retype keeps `ColumnTypeChangeBlocked` verbatim, so its reading is unchanged.
+
+### The four neuters
+
+Each disables ONE claim and nothing else.
+
+```text
+  N1  the whole phase returns Ok immediately
+        a_blocked_drop_behind_a_committing_op_leaves_nothing_behind   FAILED
+            "THE HALF MIGRATION: addColumn survivor committed"
+        the other six                                                 ok
+
+  N2  the prefix test ignored (hoist regardless of earlier steps)
+        a_drop_whose_blocker_the_same_plan_removes_still_applies      FAILED
+        a_drop_behind_a_replaced_view_still_applies                   FAILED
+        a_retype_whose_blocker_the_same_plan_removes_still_applies    FAILED
+        the RED arm and the rest                                      ok
+
+  N3  ViewStmt treated as a creation regardless of `replace`
+        a_drop_behind_a_replaced_view_still_applies                   FAILED
+        the other six                                                 ok
+
+  N4  journal-satisfied steps judged anyway (this IS main's behaviour)
+        a_replayed_plan_is_not_re_judged_against_a_world_that_moved   FAILED
+            "changing the type of replayed.widened would be refused ..."
+        the other six                                                 ok
+
+  N5  the online rename's dependents check asked unconditionally
+      (this IS main's behaviour)
+        a_rename_whose_blocker_the_same_plan_removes_still_applies    FAILED
+            "renaming repairrename.qty cannot complete: dropping the old column
+             at the end of the rename would be refused because [rule _RETURN on
+             view ....repairrename_reader] depend on it"
+        the other seven                                               ok
+```
+
+N2 is the one that matters most: without the prefix test, all three over-refusal controls
+fail. The controls are not decoration - they are what the mechanism is for. N3 shows the
+whitelist choice is load-bearing on a real shape, not a hypothetical. N4 and N5 reproduce
+two shipped over-refusals exactly, which is what says they were bugs rather than choices.
+
+### A third shipped over-refusal, in the FIRST of the four preflights
+
+N5 is not a hypothetical either. The online rename's plan-level dependents check has the
+identical shape and the identical hole:
+
+```text
+  ops   [dropView repairrename_reader, renameColumn repairrename.qty -> amount]
+
+  main  -> Err  renaming "repairrename"."qty" cannot complete: dropping the old column
+                at the end of the rename would be refused because [...] depend on it
+```
+
+The plan removes the blocker one step earlier and every step of it succeeds when run. So
+three of the four bespoke preflights the brief presented as the pattern to generalise
+(rename, retype twice over) were over-refusing or dead-locking on ordinary plans. The two
+that are NOT preconditions at all - timeouts and approval - are the two that were right,
+and they are right because neither asks the live database anything.
+
+### SQLite and MySQL
+
+Behind a new `MigrationBackend::evaluate_plan_precondition` whose DEFAULT ABSTAINS. Abstain
+is a third answer, not `Met`: a backend that cannot answer must never wave a plan through,
+and one that has no plan-level evaluator must say nothing so the per-migration seam stays the
+only judge. Both backends still fail closed on a declared precondition at that seam, at the
+same place, in the same words. Pinned on both: `sqlite_apply.rs` and the MySQL backend's own
+seam test assert `Abstain` explicitly, beside the existing fail-closed assertions.
+
+Deliberately NOT reused: `evaluate_preconditions(cfg, &synthesized_migration)`. That would
+have worked, and it would have moved SQLite's and MySQL's "precondition evaluation is not
+supported" error earlier - a behaviour change on two backends this work has no measurement
+for.
+
+### What did NOT move onto the phase, and why
+
+The other three plan-level preflights are not preconditions. `preflight_plan_timeouts` reads
+migration flags and executor config and touches no live state; `preflight_plan_approval`
+reads the journal; neither has a pre-plan-answerability question to ask. The online rename's
+dependents check IS the same obstruction question, so it now runs behind the same prefix test
+and `[dropView, renameColumn]` applies instead of being refused.
+
+Six of the eight `Precondition` variants stay entirely at the per-migration seam. That is not
+timidity about the general case - it is what the classification says, and the alternative is
+the over-refusal the controls exist to catch.
+
+### The second opinion
+
+Codex was unavailable ("You've hit your usage limit", retry 19 Aug), so the independent review
+was an Opus reviewer with no shared context beyond the design document and the repository.
+
+It AGREED that the one-directional-wrongness asymmetry is sound, and verified it at the call
+sites: `apply_plan_locked` is the only caller into `execute_pending`, and nothing it computes
+reaches `evaluate_preconditions`. It verified the authored-preconditions-land-on-`steps[0]`
+claim, found no path that concatenates plans, and confirmed `PlanStep::Dml` cannot carry DDL.
+
+It DISAGREED with the design's fine-grained effect ledger on two counts, and it was right on
+both. It found `CREATE OR REPLACE VIEW` in the renderer and showed the ledger classified it
+as a creation, which N3 then confirmed is a real over-refusal on a live server. And it found
+the journal-satisfied hole, worked out the retry deadlock concretely, and pointed out that
+the shipped retype preflight already has it - which N4 confirmed. It argued for replacing the
+ledger with one coarse whitelist per step, on the grounds that the ledger needs to be right
+on five independent axes each of which fails toward over-refusal.
+
+I adopted that, with one correction to its proposal: its coarse rule would hoist an
+existence assertion behind a purely additive prefix, and `CREATE TABLE` is purely additive
+AND is exactly what repairs `TableExists`. The obstruction/existence split above is what
+closes that, and it is why the classification is by question rather than by prefix alone.
+
+It also flagged the error-precedence change (recorded above) and asked for the phase to be
+scoped to `Ddl` steps explicitly, on the grounds that `AlterPrimaryKey` and
+`SynchronizeIdentity` carry a `preconditions` field that nothing evaluates today - scanning
+them would invent a gate rather than move one. Both are in.
+
+### Gates
+
+Exit codes, read as exit codes:
+
+```text
+  cargo fmt --all -- --check                              0
+  cargo clippy --workspace --all-targets -- -D warnings   0
+  cargo test --workspace --exclude zero-migrate-node      0
+  cargo test -p zero-migrate-node --no-default-features   0
+  pnpm -w build                                           0
+  pnpm --filter zero-migrate check                        0
+  pnpm --filter zero-migrate test                         0   (326 pass, 0 fail, 1 skip)
+  pnpm --filter zero-migrate-cli typecheck                0
+  pnpm --filter zero-migrate-cli test:docs                0   (6 pass, 0 fail)
+  pnpm --filter zero-migrate-node build, then
+  pnpm --filter zero-migrate-cli test:host                0   (455 pass, 0 fail, 0 SKIP)
+```
+
+Both live DSNs were exported for the workspace run and for the host suite, so the PostgreSQL
+and MySQL legs EXECUTED - the host suite reports 0 skipped. The addon was REBUILT from this
+tree before the host suite ran.
+
+`f664_scaling` flaked on an earlier workspace run - two of its four wall-clock ratio guards
+tripped while an unrelated `cargo test -p zeroship-control` was saturating the machine, and
+the failure text says in so many words to re-run idle before believing it. Re-run alone: 4
+passed, and it passed again in the final workspace gate above. It is the known flake, not
+this change; nothing here touches `validate_ir`.
+
+Every PostgreSQL arm creates its own `proj_*` + `meta_*` schema pair behind a `SchemaGuard`
+and drops both, and every probe is schema-qualified. `pg_namespace` counted 331 before and
+331 after; zero `zm_planpre*`, `proj_zm_planpre*` or `meta_zm_planpre*` schemas remain. Disk
+was checked before each gate run and never fell below 98G.
+
