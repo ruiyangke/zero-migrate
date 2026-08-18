@@ -390,5 +390,12 @@ jobs:
         run: pnpm --filter zero-migrate-node --fail-if-no-match build
       - name: pnpm -w build
         run: pnpm -w build
-      - name: zero-migrate-cli test:host (live PG + MySQL)
-        run: pnpm --filter zero-migrate-cli --fail-if-no-match test:host
+      # `test:host:leak` RUNS `test:host` - it snapshots both servers, spawns the
+      # suite verbatim from the `test:host` script, and snapshots again - so this is
+      # one suite run, not two, and its TAP output is the same. What it adds is the
+      # verdict the disposable service containers here can never give: whether the
+      # suite drops everything it created. A leak is invisible on a container that is
+      # thrown away at the end of the job and expensive on the shared development
+      # servers, where one file leaking one meta database per run had reached 218.
+      - name: zero-migrate-cli test:host (live PG + MySQL, leak-gated)
+        run: pnpm --filter zero-migrate-cli --fail-if-no-match test:host:leak
