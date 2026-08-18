@@ -30366,3 +30366,280 @@ pnpm --filter zero-migrate-cli test:host                      0   (360s)
 Disk was checked before each gate run: 138G, 99G, 92G, 86G, 133G free at the successive
 checks, never near the 15G stop-line. It did dip to 86G during the host suite, which is
 the tightest point and worth watching if more worktrees are added.
+
+## Four walkers, one op stream, and a table that says which of them is wrong
+
+Step 1 of `docs/proposals/single-fold-and-effects.md`: the differential corpus.
+Adds `render/gen_types/differential_corpus.rs`, a `cfg(test)` child module, and
+nothing else. No production behaviour changes.
+
+The corpus replays every stream through `fold_ops` (FO), `fold_to_field_defs` (FFD),
+`authoring_tables_from_ops` (ATO) and `runtime_metadata_from_ops` (RMO) and records
+what each one says. It measures 56 of 56 `Op` variants against 3 dialects. It found
+two live defects nobody had recorded, reproduced two the log had recorded as open,
+and refuted three numbers in the proposal it implements.
+
+### The corpus's reason to exist, stated as a constraint
+
+Recording current behaviour records shipped defects. A flat golden would cement them
+and make the later fix read as the regression. So every row carries a status as well
+as a verdict, and three readings are kept apart:
+
+    AGREED       every walker that can answer says the same thing
+    DIVERGENT    they disagree; every answer is listed, and the row is either
+                 ByDesign with a stated reason or Defect with a review-log pointer
+    SOLE         fewer than two can answer, so nothing cross-checks the one that did
+
+A walker that SWALLOWS an op is never counted as agreeing about it. That distinction
+is the whole file, and it is enforced rather than intended: a `Defect` row must name
+`review-log.md:<lines>` or say `UNRECORDED`, `Consistent` is rejected on any DIVERGENT
+row, and `Uncorroborated` is rejected on anything that had a second opinion.
+
+Shape: 114 rows over 20 cases. 68 AGREED, 43 DIVERGENT, 3 SOLE; 8 rows record a
+defect. The counts are asserted, because a corpus that quietly loses its divergence
+rows still passes every other test in the file - every other test compares the
+recorded set against itself.
+
+### The brief was wrong three times, and measurement is what said so
+
+FIRST: section A reports `runtime_metadata_from_ops` handling **12** of 56 variants
+and `authoring_tables_from_ops` **15**. Those are `match`-arm counts. MEASURED by
+prefix sweep - append one op, ask whether that walker's answer moved - on PostgreSQL:
+
+    FO   46 / 56        FFD  21 / 56        ATO  16 / 56        RMO   8 / 56
+
+RMO reaches EIGHT, not twelve. The four missing arms are named and inert:
+`CreatePartition | AttachPartition | DetachPartition => {}` is a literal empty arm at
+`gen_types.rs:301-303`, and `DropPartition` calls `metadata.remove(name)` for a name
+that can never be in the map, because the partition arm above never put it there.
+Four arms that exist and decide nothing. ATO reaches sixteen, not fifteen.
+
+SECOND, and this one is sharper: section A says `fold_to_field_defs` "has NO catch-all
+and handles all 56 variants", and uses that to argue exhaustiveness is not
+correctness. The measurement makes the argument much stronger than the prose does.
+FFD matches 56 and REACHES 21. Thirty-five of its exhaustive arms do not change its
+answer. Exhaustiveness is not even coverage, let alone correctness.
+
+THIRD, and this is the one that changed what the corpus is for: the brief asked for
+section B's divergences to appear "AS divergences ... the rows that prove the corpus
+can see what it exists to see". Fifteen of the seventeen rows are already FIXED and
+reproduce as AGREED. The corpus's proof that it can see a divergence had to come from
+somewhere else, and it does - from two carriers the log itself recorded as still open,
+and from two defects nobody had recorded at all.
+
+### Section B, re-measured, row by row
+
+    row 1  renameColumn + generated expr       AGREED  no walker keeps the old name
+    row 2  renameTable in a generated expr     AGREED  all three name line_items
+    row 3  setColumnType facet residue         AGREED  case_sensitive cleared, 3 dialects
+    row 4  setColumnType type parameters       AGREED on PG + SQLite; DEFECT on MySQL
+    row 5  setColumnType + value_format        both fold-backed walkers REFUSE
+    row 6  setColumnType drift-compared facets AGREED  (same probe as row 3)
+    row 7  Op::Dialectal not expanded by RMO   AGREED  softDelete AND docs_pg_idx reach RMO
+    row 8  Op::Dialectal under a hard dialect  AGREED  each dialect selects its own leg
+    row 9  named enum members                  FIXED; DIVERGENT ByDesign, see below
+    row 10 domain base type                    FIXED; DIVERGENT ByDesign, see below
+    row 11 renameColumn + CHECK body           the COLUMN-level check is fixed; a
+                                               TABLE-level one is a DEFECT, see below
+    row 12 renameColumn + FK definition        AGREED  no walker keeps owner_id
+    row 13 renameColumn + index name lists     key columns AGREED; the two rendered-SQL
+                                               carriers recorded open at 6837-6847 are
+                                               still open and both reproduce
+    row 14 dropColumn cascade + Expr::Dialectal AGREED on PG
+
+Rows 9 and 10 stay DIVERGENT and are recorded ByDesign, not as defects: the three
+column-describing walkers speak three vocabularies about a named type, and
+`29149-29156` tabulates the same spread and calls it correct. FO reports the STORAGE
+the dialect gives it, ATO keeps the type NAME the author wrote, FFD reports the base
+the runtime validates against. All three recent fixes are present and visible:
+membership reaches FFD on all three dialects, the domain base reaches FFD as `int`
+rather than `string`, and the encrypted-domain sentinel resolves through to the base.
+
+One thing worth naming about row 9. On PostgreSQL the enum members reach FFD and
+NOTHING ELSE carries them - FO holds the native type name, ATO holds the authoring
+token. The fix is real, and nothing in this corpus corroborates it on the dialect it
+matters most on.
+
+### Two defects the corpus found, neither previously recorded
+
+**A MySQL retype keeps the old physical type, and on MySQL that field IS the type.**
+
+`fold_ops`'s `SetColumnType` arm re-derives `data_type`, `ddl_type_override`,
+`inline_checks`, `collation`, `case_sensitive` and `id_default` from the target type
+(`fold.rs:2180-2214`). It does not re-derive `mysql_physical_type`. Measured, after
+`string(24) -> string(40)` on MySQL:
+
+    data_type            "character varying(40)"                 correct
+    ddl_type_override    "VARCHAR(40) CHARACTER SET utf8mb4 .."  correct
+    mysql_physical_type  Character { fixed: false, length: 24 }  the PRE-RETYPE type
+
+and after `char(8) -> int`, `data_type: "integer"` alongside
+`mysql_physical_type: Character { fixed: true, length: 8 }`. Same for `text -> int`,
+which keeps `Lob { tier: "text" }` on an integer column.
+
+The cost is not cosmetic. `apply::drift::column_data_types_eq`
+(`apply/drift.rs:2799-2820`) says that when BOTH sides carry a `mysql_physical_type`
+it is the AUTHORITY and `data_type` is not consulted at all - the live side gets one
+from `information_schema` at `mysql/drift_sql.rs:225`, the folded side gets one at
+`declarative.rs:3177`. So on MySQL the expected state after any `setColumnType`
+compares the OLD type against the live new one. Which also means the fix recorded at
+`26717-26733`, which cleared four `data_type`-adjacent facets, is INERT on MySQL,
+because `data_type` is never the field compared there. Same shape as that row, on the
+dialect that row never measured.
+
+Reproduced by two independent cases - `c_retype_type_parameters`, and
+`c_create_then_add_then_retype`, which reaches the column through `addColumn` - so the
+defect is in the retype arm and not in one column constructor.
+
+**A table-level CHECK body is a fifth rename carrier.**
+
+`6837-6847` lists four rendered-SQL carriers a `renameColumn` does not follow: UNIQUE
+and FK constraint definitions, index predicate, index expression. Measured, after
+`renameColumn issues.state_token -> status_token` on PostgreSQL, `fold_ops` produces
+
+    ConstraintSnapshot { name: "issues_state_ck",
+                         definition: "CHECK ((\"state_token\" <> ''))",
+                         cascade_columns: ["status_token"] }
+
+The cascade list followed the rename; the definition did not. `28188-28248` fixed the
+COLUMN-level `ColumnSnapshot::inline_checks` carrier; a TABLE-level CHECK's
+`ConstraintSnapshot::definition` is a different field and is untouched. It matters
+because `ConstraintSnapshot`'s hand-written `PartialEq` (`snapshot.rs:1244-1251`)
+COMPARES `definition`, so this is drift-visible rather than emission-only. FFD and ATO
+both answer `no`; FO alone keeps the old name.
+
+Both are recorded as `Status::Defect` with `UNRECORDED` evidence, so no later reader
+can mistake either row for a specification. Neither is fixed here: fixing them is not
+step 1, and a corpus that repaired what it found would have nothing left to prove it
+can see anything.
+
+### Two open carriers reproduced exactly as recorded
+
+`6837-6847`'s `IndexSnapshot::predicate` and `IndexElementSnapshot::Expr` are still
+open on PostgreSQL and SQLite. `carries(legacy_qty)` answers
+`FO=yes FFD=no ATO=no RMO=no` after the rename, in both cases. This is the corpus
+reproducing a KNOWN OPEN defect, which is the only thing that proves it can see one.
+
+### Three asymmetries recorded that nobody had asked about
+
+- **The two artifact walkers have no coherence gate.** On a stream the fold refuses -
+  a `setColumnType` over a `value_format` column, a table-level CHECK off Postgres, a
+  partial or expression index on MySQL - ATO and RMO answer normally. Checked rather
+  than assumed: `render_artifacts` calls RMO and ATO first but returns the FOLD's
+  error, so no artifact is emitted. Harmless at the composite entry point, and worth
+  knowing before a projection is moved off a walker in step 4.
+- **A primary key is an index in one vocabulary and a constraint in the other three.**
+  The most common divergence shape in this corpus, recorded ByDesign. A single fold
+  has to keep both readings reachable.
+- **A view has exactly one authority.** `createView` reaches FO and no other walker,
+  so `views` classifies SOLE. A defect there is invisible to this corpus by
+  construction, and the row says so rather than leaving a reader to assume otherwise.
+
+### RED, four times, each in a different place
+
+A characterization suite that cannot go red is worthless - the criticism this file's
+own proposal levels at `dialect_table_faithfulness.rs`. Four neuters, each applied
+alone and reverted:
+
+    N1  RMO folds Op::Dialectal under a hard-coded Postgres      (section B row 8)
+        RED: c_dialectal_leg_selection on Sqlite AND Mysql now report
+             RMO soft_delete: true and RMO={docs_pg_idx}, from the PG leg.
+             Reach matrix UNCHANGED - RMO still reaches dialectal, just wrongly.
+    N2  fold_ops stops re-deriving case_sensitive on setColumnType (row 6)
+        RED: c_retype_drops_case_sensitivity flips to DIVERGENT FO=yes FFD=no ATO=no
+             on Postgres and SQLite. MySQL stays AGREED, which is itself consistent
+             with the MySQL finding above: there the facet never rides on that field.
+    N3  rename_column_in_generated_columns returns early           (row 1)
+        RED: c_rename_column_generated_expr AND c_two_renames_in_sequence, all three
+             dialects, DIVERGENT FO=yes FFD=no ATO=no - the exact RIGHT/WRONG split
+             26342-26360 recorded.
+    N4  RMO stops handling setTableOptions
+        RED: reach matrix only. setTableOptions RSSR -> RSSS on all three dialects.
+             Case verdicts UNCHANGED.
+
+N1 against N4 is the load-bearing pair: they fail different halves of the file, so
+neither half is riding on the other.
+
+### An instrument bug caught mid-build, failing in the direction that reads as a fix
+
+The identifier probe guarded BOTH ends of a needle against adjacent identifier
+characters. For a value-bearing needle like `case_sensitive: Some(`, the character
+after it is the `f` of `false`, so every such probe answered "the facet is absent" -
+which reads exactly like the fix having landed. Three facet rows were briefly recorded
+as AGREED for the wrong reason. The guard now applies per end, and only where the
+needle's own edge character is an identifier character;
+`the_identifier_probe_is_not_a_broken_instrument` pins both failure directions.
+
+### Deliberately not asked
+
+"What type is this column" is absent from the question set. `ColumnSnapshot` speaks
+catalog types, `FieldDescriptor` speaks DSL authoring tokens, `AuthoringTable` speaks
+`ColType`. A cross-vocabulary type comparator written in the corpus would be a FIFTH
+interpreter of what an op means, which is the thing the proposal exists to stop
+growing. What survives translation is which objects a walker names, and whether a
+stated fact still appears in what it says about them - which is what the log compared
+by hand for every row of section B.
+
+One weakness, recorded rather than hidden: a `carries(...)` probe over a walker whose
+vocabulary cannot contain the thing asked about answers "no" truthfully and
+uninformatively, and the classifier cannot tell that from a contradiction. The rows
+that hit it carry `A_TEXT_PROBE_CANNOT_SEE_AN_EMPTY_VOCABULARY` so a reader is not
+misled into treating it as a disagreement.
+
+### Placement and runtime
+
+In-crate under `render/gen_types/`, not `tests/`, for the same reason as
+`guard_vendor_lower_tests`: two of the four walkers are private to `gen_types`, and
+the alternative is widening two production functions so a test can reach them.
+
+Offline throughout - these are fold and replay functions, no database is opened, so
+there is no skip that could read as a pass. 1.8s for the whole thing, including the
+prefix sweep over 59 streams (27 recorded op fixtures plus 32 authored) times three
+dialects times four walkers. That is under the noise floor of the default `cargo test`
+run; it belongs where it is and needs no job of its own.
+
+No re-bless environment variable, matching `tests/op_fixture_goldens.rs`. A mismatch
+prints the full measurement so a human can read it; updating a table is a hand edit
+that shows up in review as one.
+
+### Gates
+
+    cargo fmt --all -- --check                             0
+    cargo clippy --workspace --all-targets -- -D warnings  0
+    cargo test --workspace --exclude zero-migrate-node     0  207 targets ok, 0 failed
+    cargo test -p zero-migrate-node --no-default-features  0
+    pnpm -w build                                          0
+    pnpm --filter zero-migrate check                       0
+    pnpm --filter zero-migrate test                        0  326 pass / 0 fail
+    pnpm --filter zero-migrate-cli typecheck               0
+    pnpm --filter zero-migrate-cli test:docs               0
+    pnpm --filter zero-migrate-node build                  0  (rebuilt BEFORE test:host)
+    pnpm --filter zero-migrate-cli test:host               0  458 pass / 0 fail /
+                                                              0 SKIPPED
+
+Both DSNs were exported for the workspace and host runs and the host skip count is 0,
+so it measured the databases rather than skipping past them. `f664_scaling` did not
+flake on this run. Every exit code above was read directly from
+`nix develop --command <cmd>`, never through a pipe: `cargo` is not ambient here, and
+an earlier entry records `$?` capturing `tail` instead of `cargo`.
+
+One finding outside this change: `main` at `101eadf1` ALREADY fails
+`cargo fmt --all -- --check`, on `tests/encrypted_domain_catalog_sentinel.rs:128-133`.
+Verified by stashing the fix and re-running the gate (exit 1). It is fixed in its own
+one-line commit so the corpus commit stays clean.
+
+### Left open
+
+Neither new defect is fixed. Fixing them is step 4's business. The MySQL retype
+residue in particular wants a live-MySQL drift test to confirm the phantom-drift
+consequence end to end: this corpus proves the FOLDED snapshot is wrong, not that the
+differ then reports a diff, and the difference between those two claims is exactly the
+kind this log has been burned by before.
+
+`fold_ops` measures 46 of 56 on PostgreSQL and 42 on both SQLite and MySQL. The
+four-variant gap between the dialects was not investigated.
+
+The corpus compares walkers against EACH OTHER, with no live server in it. A row where
+all four agree and all four are wrong - which `29590-29606` proves is a real shape -
+is recorded as AGREED. `Status::Defect` is deliberately reachable from an AGREED
+verdict for that reason, and no row currently uses it that way.
