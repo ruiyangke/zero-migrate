@@ -33572,3 +33572,171 @@ them by the orchestrator's independent set-difference rather than by mine:
 One more correction while re-reading that doc: `project_field_defs`' own doc said the map
 feeds `live.sqlite_schemas` "and therefore the 12-step rebuild". The "therefore" is what
 the neuter disproved, and the doc now says so and points at the file that measures it.
+
+## 209 integration files become 17 themed binaries, and one test turns out to have been relying on process isolation for a quiet server
+
+`crates/zero-migrate/tests/` held 209 `.rs` files DIRECTLY in it, so cargo built 209
+separate test binaries, each statically linking its own copy of the ~75MB
+`libzero_migrate` rlib. They are now grouped into 17 themed subdirectories, each declared
+by a `tests/<theme>/main.rs` that lists its members with `mod`. The other four crates were
+left alone.
+
+MEASURED, not modelled:
+
+| | before | after |
+|---|---|---|
+| libtest executables (workspace minus node) | 225 | 33 |
+| `test result:` lines the aggregator counts | 229 | 37 |
+| passed / failed / ignored | 3301 / 0 / 11 | 3301 / 0 / 11 |
+| `target/` after a clean `cargo test` | 7,302,081,360 B (6.8G) | 1,863,706,826 B (1.8G) |
+| build all zero-migrate test targets, deps warm | 105s | 43s |
+
+The binary arithmetic closes exactly: 225 - 209 + 17 = 33. The 229/37 figures are four
+larger than the executable counts because the aggregator's regex also matches the four
+`Doc-tests` sections, which have no executable.
+
+### The load-bearing instrument was a set of names, not a count
+
+An omitted `mod` line does not error. The file simply stops being compiled, its tests stop
+existing, and the suite goes green with a smaller total - and two omissions in opposite
+directions would cancel in any count. So the check was a SET COMPARISON, keyed so the key
+survives the move: before, a test lives in binary `foo` under name `bar`; after, it lives
+in binary `<theme>` under name `foo::bar`. Keying on `foo::bar` in both makes the two sets
+comparable, and the module path stays in the key so the comparison keeps its meaning.
+
+Three scopes, each diffed in both directions, each empty:
+
+- 3302 libtest names across the workspace minus `zero-migrate-node`
+- 10 doctest names across the same scope
+- 91 libtest names in `zero-migrate-node`
+
+3302 + 10 = 3312 = 3301 passed + 11 ignored, exactly. `--list` enumerates `#[ignore]`d
+tests too, and all 11 are inside the captures: 7 libtest, 4 doctest.
+
+The empty diff was earned rather than assumed. Deleting one `mod` line from
+`tests/gen_types/main.rs` produced a tree that COMPILED CLEAN and would have passed every
+gate, and the set diff named the single casualty
+(`gen_types_mask_roundtrip::standalone_mask_on_plaintext_column_round_trips_through_the_fold`)
+and nothing else. The line was then restored and the diff went empty again.
+
+### What consolidation actually cost, and it was not what the brief predicted
+
+`pg_project_lock_grant::a_cancelled_lock_wait_leaves_no_advisory_lock_held` aims a peer's
+lock release at the instant a 3ms `statement_timeout` fires. That window is measured
+against a WALL CLOCK. Folded into a `pg_engine` binary alongside 116 other live-PostgreSQL
+tests it failed 1 run in 5 - `pg_advisory_unlock_all()` itself overran the 3ms budget under
+the load its new co-tenants put on the same server. Run beside its own subject only it
+passed 5 of 5, and after the split 20 of 20.
+
+The measurement is the point: 5/5 isolated versus 4/5 co-tenant is what identifies the
+cause as co-tenancy rather than an independently flaky test. The remedy is structural - the
+project-lock subject is its own binary, which is why there are 17 themes and not 16 - and
+the theme root says why, so nobody folds it back in for tidiness.
+
+The general lesson is broader than this file. A separate test binary per file was not only
+protecting against hard aborts. It was also serialising access to a SHARED EXTERNAL
+RESOURCE, because cargo runs test binaries one at a time while tests inside one binary run
+across N threads. Any test whose assertion depends on how busy the database is was getting
+that isolation for free, and consolidation takes it away. The failure direction is the
+dangerous part: this one went RED and was caught. A co-tenancy effect that made a test
+PASS which used to fail would be invisible to every instrument in this change.
+
+Process-global state was audited for the same reason. Exactly one moved test mutates it -
+`ir_contract/sql_preview.rs` calls `std::env::remove_var("DATABASE_URL")` - and no other
+test in that theme, and nothing in `src/`, reads that variable. The live suites gate on
+`ZERO_MIGRATE_TEST_PG_URL`, which nothing removes.
+
+### Relative paths: two compile-time includes, zero behaviour changes
+
+Moving a source file one directory deeper breaks any path built relative to that file.
+Every runtime file read in the 209 files is built from `env!("CARGO_MANIFEST_DIR")` or from
+an environment variable, so none of them moved. A sweep for `file!()`, `module_path!`,
+`env::current_dir`, bare `Path::new("`/`PathBuf::from("`, `fs::read*` and `File::open`
+across the 209 files plus `support/` and `dialect_corpus/` found exactly two relative
+constructions, both COMPILE-TIME:
+
+- `dialect_conformance_live.rs`: `include!("dialect_conformance/expectations.rs")`
+- `hr_sqlite.rs`: `include_str!("fixtures/hr/migrations.json")`
+
+Both gained a `../` and both resolve to the same bytes as before. No test needed adjusting
+and no assertion changed - had one needed adjusting it would belong in its own commit, not
+folded into a move.
+
+### What the mechanic actually is, since the obvious version does not work
+
+`tests/<theme>.rs` plus `tests/<theme>/foo.rs` does NOT work. For a CRATE ROOT file,
+`mod foo;` resolves to `foo.rs` NEXT TO the root, not into a subdirectory named after it -
+that rule applies only to non-root modules. The layout that works is cargo's other
+autodiscovery convention, `tests/<theme>/main.rs`, which becomes a target named `<theme>`
+and whose `mod foo;` finds `tests/<theme>/foo.rs`.
+
+Two consequences. First, `mod support;` in a theme root would look for
+`tests/<theme>/support.rs`, so each root carries `#[path = "../support/mod.rs"]`. Second,
+`support`'s macros are `#[macro_export]`, which reaches a crate root but not a submodule's
+bare invocation, so each root also carries `#[macro_use]`; `skip_if_no_mysql!` lives one
+level deeper still, so `support/mod.rs`'s `pub mod mysql;` gained a `#[macro_use]` of its
+own. That is the only edit to a shared harness file, and it changes no test.
+
+Inside the moved files the only edits were `mod support;` becoming `use crate::support;`
+(so every existing bare `support::` path still resolves), `use support::X` becoming
+`use crate::support::X`, the same two for `dialect_corpus`, the two include paths, and the
+removal of 35 `use crate::support;` lines that turned out to be unused once the module was
+declared centrally. No test body was touched.
+
+A collision the brief anticipated cannot occur: because each file becomes its own module,
+two files in one theme can define the same leaf test name without conflict, and the module
+path keeps them distinct in both the runner and the captured set.
+
+### Themes
+
+Chosen by reading what each file covers - the first `//!` line of all 209 (14 have none and
+were opened) - and grouping by the SURFACE under test and by whether a live server
+adjudicates the answer, then balanced for size:
+
+`refusals` 21, `column_shapes` 20, `rollback` 20, `fold_live` 17, `dialect_matrix` 15,
+`pg_drift` 15, `sqlite_engine` 14, `namespaces` 14, `pg_engine` 12, `policy_charter` 12,
+`authoring_surface` 10, `rename` 10, `fold_offline` 9, `ir_contract` 8, `gen_types` 6,
+`mysql_engine` 4, `pg_project_lock` 2.
+
+Genuinely ambiguous, recorded because the next person will disagree with some of them:
+`fold_roundtrip_{sqlite,mysql}` and `sqlite_rebuild_field_defs_live` went to `fold_live`
+rather than the engine themes, because the server is the ORACLE for a fold rather than the
+subject; `rename_carrier_sweep_{pg,sqlite}` went to `rename` for the mirrored reason;
+`collation_introspection` could as easily be `column_shapes` as `pg_drift`;
+`checksum_corpus_stability` walks the dialect corpus so it is `dialect_matrix` and not
+`ir_contract`; `gen_types_dialectal_*` and `gen_types_drop_column_dialect_legs` test the
+dialect LEG rather than the generator, so they left `gen_types`; `sqlite_confinement`,
+`sqlite_dqs_hardening` and `split_part_grammar_boundary` are hardening proofs and went to
+`policy_charter` rather than `sqlite_engine`; `plan_rollbackable` answers an offline
+question about rollback and went to `fold_offline`; and `embedding_guide_is_compiled` sits
+in `ir_contract` on the thin grounds that it is a golden-style gate, which is the weakest
+placement in the list.
+
+### What this does not prove
+
+- Nothing here proves the tests still test the same THING. It proves the same names exist
+  and the same number pass. `pg_project_lock_grant` is the existence proof that
+  consolidation can change an outcome; it was caught only because it changed the outcome to
+  RED.
+- 0 failures in 20 runs bounds a flake rate loosely. It does not make it zero.
+- `static` and `OnceLock` sharing inside the moved files was not audited exhaustively; only
+  environment mutation was.
+- The set instrument compares names, not bodies. It would not see a rewritten assertion.
+  The diff is what covers that, and it is at most two changed lines per moved file.
+- Nothing measures whether the themes are GOOD. A misfiled test still runs.
+
+### Wall clock, where the brief's model is directionally right and the evidence is thin
+
+The expectation was that the suite gets faster because cargo runs binaries largely serially
+while tests inside a binary run across N threads. Warm runs of
+`cargo test --workspace --exclude zero-migrate-node`, everything already built:
+
+- before: 123, 150, 153, 164, 324 seconds
+- after: 81, 91, 111, 121, 252 seconds
+
+The direction is right and the noise is enormous - a 4x spread within each layout on this
+machine. Cold from an empty `target/` the totals were 216s before and 219s after, n=1 each,
+which is indistinguishable at that noise level. The measurements that are NOT noise are the
+build (105s to 43s for the zero-migrate test targets with dependencies already compiled)
+and the target tree (6.8G to 1.8G, byte-identical across repeat clean builds). Those are
+where the win actually is; the run-time claim should not be leaned on.
