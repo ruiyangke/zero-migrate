@@ -33740,3 +33740,177 @@ which is indistinguishable at that noise level. The measurements that are NOT no
 build (105s to 43s for the zero-migrate test targets with dependencies already compiled)
 and the target tree (6.8G to 1.8G, byte-identical across repeat clean builds). Those are
 where the win actually is; the run-time claim should not be leaned on.
+
+## The catalog rules move into the traversal, and the blocker turns out to have been carrying rather than seeding
+
+`render/fold/single_fold.rs`'s module doc named one thing still breaking the rule the file
+exists to state: the single fold owned the AUTHORED rules and reached the catalog rules
+through ONE opaque call to `fold_ops_onto`. `fold_ops_onto`'s loop body is now
+`CatalogFold::advance`, and `single_fold::fold` drives it one op at a time beside
+`AuthoredState::advance`. `fold_ops_onto` survives, unchanged in behaviour, as `seed` + a
+loop of `advance` + `finish`.
+
+### The blocker was stated slightly wrong, and the correction is the whole change
+
+The recorded blocker was that `fold_ops_onto` seeds its named-type registry from
+`NamedTypeRegistry::default()` "rather than from `base`". There is nowhere in `base` to
+seed it from: `SchemaSnapshot`'s `named_types` map is `{kind, comment}` per type, and a
+`NamedTypeRegistry` holds enum MEMBERS and domain BASE TYPES. Seeding was never available
+and was never the fix. CARRYING was - the registry is now a field of `CatalogFold`, written
+by `createEnum`/`createDomain` and read by every later `createTable`, `addColumn` and
+`setColumnType`.
+
+The old wording's PREDICTION was exactly right even though its mechanism was not. Rebuilt
+the naive way - `fold_ops_onto(&acc, &[op], …)` once per op - the corpus refuses 15
+prefixes across four streams with ``enum `tier` is not registered`` and ``domain
+`positive_number` is not registered``: 8 MySQL, 7 SQLite, 0 PostgreSQL.
+
+Two more fields have the same shape and the same absence of a snapshot slot:
+`attached_partition_tables` and `created_partition_comments`. `attachPartition` parks a
+table shape for a LATER `createPartition` or `comment` to collect.
+
+### PostgreSQL cannot see this class of defect, measured
+
+`apply_fold_named_type_column_metadata` answers a named-type column three ways. On SQLite
+it calls `named_types.enum_def(name)?` and on MySQL `mysql_enum_type(&def.values)` - both
+ERROR without the registry. On PostgreSQL it calls `named_types.enum_schema_or(name,
+project_schema)`, which FALLS BACK to the project schema, so a same-schema enum folds
+IDENTICALLY with an empty registry.
+
+So the one live test that applies `createEnum; createDomain; createTable(using both)` to a
+real PostgreSQL - `fold_roundtrip_pg::named_type_lifecycle` - passes with the registry
+cleared on every op. It was measured, not reasoned about: with that neuter in place it
+reports `ok`, as do all 24 other PostgreSQL live tests in `fold_live`.
+
+Neither `fold_roundtrip_sqlite` nor `fold_roundtrip_mysql` folded a named type at all, and
+`fold_roundtrip_sqlite`'s header said why: it listed "domains, enums" under
+"PostgreSQL-only surface". `dialect-support.toml` rates `createEnum` and `createDomain`
+`portable` on all three dialects. The entry was wrong, and it was hiding the only two legs
+that can see this.
+
+### What was added, and which instrument is which
+
+- `fold_roundtrip_sqlite`, new stage (8): `createEnum` + `createDomain` + a `createTable`
+  using both, applied to a real SQLite file, catalog read back. NON-CIRCULAR and always
+  runs - no DSN gate. `ColumnSnapshot`'s equality does not compare `inline_checks`, so the
+  enum MEMBERSHIP is asserted separately out of `sqlite_master`'s stored `CREATE TABLE`
+  text, and asserted BEFORE the fold's answer.
+- `fold_roundtrip_mysql`, new stage (9): the same shape, domain only, `as: bigInt` so a
+  wrong base type is distinguishable from the column's own declared type. On MySQL the
+  domain's base type lands in `data_type`, which `diff_snapshots` compares against
+  `information_schema.COLUMNS.COLUMN_TYPE`, so this leg checks the registry's ANSWER
+  structurally rather than by substring.
+- `the_folds_refusal_set_is_the_catalog_replays_refusal_set` now compares the refusal
+  REASON as well as the set. UNREACHABLE ON TODAY'S CORPUS and labelled as such in the
+  test: neutered two of the authored half's three fallible sites to a distinct error string
+  AND ran the authored half first, and it still reports empty, because the authored half
+  never refuses on this corpus. It is a guard, not evidence.
+
+### The neuters
+
+| neuter | what it breaks | caught by |
+|---|---|---|
+| N1 `self.named_types = default()` at the top of `advance` | the registry, per op | 25 tests: 3276 passed / 25 failed against a 3301 baseline. One of them - `fold_roundtrip_sqlite` - is externally adjudicated; the other 24 compare the fold against a recorded verdict or against itself. |
+| N2 rebuild `single_fold::fold` on per-op `fold_ops_onto` | the mechanic the doc predicted | 4 lib tests, naming 15 refused prefixes: 8 MySQL, 7 SQLite, 0 PostgreSQL |
+| N3 swap the two `advance` calls | refusal precedence | NOTHING. See the unreachability note above. |
+| N5 clear both partition accumulators on every op | cross-op partition state | NOTHING. 3301/3301 green. |
+
+N5 is the finding worth carrying. `attached_partition_tables` and
+`created_partition_comments` are cross-op state that no test in the tree pins, and the
+reason no snapshot comparison CAN pin them is structural: `PartitionSnapshot` is `{of,
+bounds}` and carries no comment, and `diff_snapshots` compares only the presence of
+partition NAMES. A stage was written for it, measured against N5, found not to catch it,
+and REMOVED rather than shipped claiming coverage it did not have.
+
+### A MySQL defect the probe found on the way, not fixed here
+
+The first draft of the MySQL stage carried an enum COLUMN, which would have made it the
+only oracle comparing enum membership in a compared field. It fails:
+
+    altered_objects: [ accounts / column tier / case_sensitive expected "" actual "false" ]
+
+`mysql_type_takes_collation` (`render/declarative.rs`) lists VARCHAR/CHAR/TEXT and their
+siblings and NOT ENUM, while MySQL treats ENUM as a character type. Every other character
+column is emitted with an explicit `COLLATE utf8mb4_0900_as_cs`; an enum column is emitted
+with none and inherits `utf8mb4_0900_ai_ci`. The permanent phantom drift is the smaller
+half - the column is genuinely case-INSENSITIVE on MySQL and case-sensitive on the other
+two backends, so `'FREE'` and `'free'` are one value there and two everywhere else. Not
+caused by the fold; recorded in the stage's comment so the next reader does not rediscover
+it by writing the same fixture.
+
+### The diff, accounted for exactly
+
+The 1,843-line match moved with a script rather than by hand, and 49 of those lines
+changed:
+
+- 3 `continue;` -> `return Ok(());`. COMPILER-FORCED: `advance` has no loop, so `continue`
+  is an error rather than a warning and cannot be forgotten.
+- 46 borrow strips (`&mut tables` x18, `&tables` `&views` `&partitions` `&sequences`
+  `&named_types` x5 each, `&mut views` `&mut sequences` `&mut named_type_snapshots` x1
+  each), applied at the exact `line:col` clippy named, because the destructured bindings
+  are already references.
+
+The other 1,794 lines are byte-identical, checked by diffing the extracted body against
+`git show HEAD:` rather than by reading.
+
+### Two claims in the brief that measurement did not support
+
+- **`fold_ops` does not retire.** After the extraction it is `fold_ops_onto` with a default
+  base and contains no op semantics at all, so it is not a walker and deleting it would not
+  remove one. It has exactly two production callers (`engine.rs`, the node
+  `bridge.rs` preview) and about thirty test files, and is `pub` and re-exported. Removing
+  the name is a public-API churn that does not advance "one traversal decides what an op
+  means", so it stays.
+- **`#![cfg_attr(not(test), allow(dead_code))]` does not retire either.** Measured by
+  deleting it: the non-test build then warns on `project_snapshot` and on the two
+  `FoldedSchema` fields it reads, `model` and `unmodelled`, and on nothing else. The
+  brief's "load-bearing for `project_snapshot` and `project_field_defs`" is wrong on the
+  second - `project_field_defs` is `pub` and live. The attribute goes when a consumer reads
+  the CATALOG half, and that is the `refresh_historical_live` / drift move, which the
+  brief's own fact list keeps on `fold_ops_onto`.
+
+### One correction to the proposal's own inventory
+
+`docs/proposals/single-fold-and-effects.md` section A tabulates this walker as "56 arms, 4
+`_ =>`". The top-level `Op` match has NO catch-all - the ops that contribute nothing to a
+structural snapshot are named in two explicit arms. The four `_` arms it counted are nested
+matches INSIDE four op arms, over `IndexElementSnapshot`, `ColType`, `IrConstraintKind` and
+an `Option<&ViewSnapshot>`. No op can fall through this walker silently, and the catch-all
+worry belongs to the two artifact walkers the same table lists, both of which are gone.
+
+### The gate
+
+Twelve gates on `agent-a77433efcc6d5f4e2 @ 8e339e31`, `FAILED_GATES: none`. Every counter
+is identical to the baseline taken on the same tree before the change: workspace 3301
+passed / 0 failed / 11 ignored across 37 sections (33 binaries + 4 doc-test sections), node
+10 sections / 91 / 0 / 0, host 458/458/0/0, DSL 327/326/0/1 skipped, docs 6/6/0/0, rustdoc
+6 warnings against the pin of 6. The test COUNT is unchanged because both new oracles are
+stages inside existing `#[compio::test]` functions rather than new tests, and no pinned
+refusal constant moved because the corpus did not change.
+
+The gate failed once on the way, on the rustdoc pin: 7 against a pin of 6, because the new
+public doc on `fold_ops_onto` linked `[CatalogFold]`, which is `pub(crate)`. That is the
+exact trap `single_fold`'s module doc already records. Backticks, back to 6, and the whole
+gate re-run rather than the one gate.
+
+Two other runs are worth recording because both were green-looking and neither measured
+anything. The FIRST baseline attempt reported seven pnpm gates failing with
+`tsc: command not found` - a fresh worktree with no `node_modules`. Had those gates been
+written to fail upward only, they would have reported clean. And the brief's suggested
+libtest parser matches `test result: ok\.` only, so its `failed=` field can never be
+nonzero: a FAILED section leaves the count entirely and shows up only as a DROP in
+`sections=`. Verified against a synthetic two-line log - the one-sided parser reports
+`sections=1 passed=10 failed=0` on a log containing two failures. Every count above uses a
+two-sided `(ok|FAILED)` parser.
+
+### What the gate does not prove
+
+- Nothing here reads the catalog half `single_fold::fold` produces. All three live
+  projections read `authored` and `named_types` only, so inside `render_artifacts` the
+  catalog replay is still a fail-closed gate whose value is discarded. The extraction makes
+  the rules SHARED; it does not make the result USED.
+- The refusal-reason check is unreachable today, by measurement, and is listed above as a
+  guard rather than as evidence.
+- N5's hole is open. The two partition accumulators are correct in this change by
+  construction and unpinned by any test.
+- The MySQL enum collation defect is recorded, not fixed.
