@@ -30065,3 +30065,304 @@ cleaned up: two other agents were running against the same server, and a bulk
 `DROP DATABASE` over a name pattern is the kind of destructive glob that should be
 matched against a listing and confirmed by a human, not run by an agent that is
 holding another job's brief.
+
+## The dialect table has never been asked a server, and 22 of its 184 cells disagree with one
+
+The brief for this work said `dialect_table_faithfulness.rs` proves the dialect table
+against live behaviour. It does not, and the brief said so itself: that file opens no
+connection, and what it proves is that `dialect-support.toml`, the generated
+`DIALECT_TABLE` and `Op::support()` agree with each other. All three are the engine's own
+opinion. A backend could declare an op `portable`, fail against a real server, and pass.
+
+This entry records the layer that asks a server -
+`crates/zero-migrate/tests/dialect_conformance_live.rs` - what it measured, every
+disagreement it found with the words that produced it, what was fixed versus recorded,
+and the two errors it found in its own commissioning brief.
+
+### What was measured
+
+Every one of the 92 `(op-kind, variant)` rows, on PostgreSQL 18.4
+(`postgres:18` on 127.0.0.1:5434) and on in-process SQLite, driven through the production
+path - `resolve_create_table_policy` -> `IrAuthor::load_and_lower_guarded` ->
+`MigrationEngine::apply_plan` - with engine-emitted SQL only. 184 cells, 184 answers.
+
+```text
+                Applied  RefusedByCapability  RefusedByPolicy  ServerError  EngineError
+  postgres         72            14                  1              0            5
+  sqlite           29            58                  0              1            4
+```
+
+**184 of 184 rows executed. Zero were inexecutable**, which is why `NOT_EXECUTABLE` in
+`tests/dialect_conformance/expectations.rs` is empty. That is a measurement, not an
+omission: several representatives are DEGENERATE and cannot apply anywhere, but every one
+of them still reached the subject op and produced an answer, so they are recorded as
+disagreements rather than hidden as skips.
+
+The 72 PostgreSQL `Applied` sits against the F877 inventory's 67-of-80 prediction quoted
+in `docs/proposals/backend-conformance.md`. The proposal warned "anything better than
+that means the instrument is wrong". It is better, and the reason is that F877 counted
+tokens observed executing across the EXISTING suites, while this layer drives every token
+deliberately with a prelude built for it. The two numbers answer different questions.
+
+### The corpus is shared, and what had to change to make it executable
+
+The 92 representatives moved out of `dialect_table_faithfulness.rs` into
+`tests/dialect_corpus/mod.rs`, byte-for-byte, and that file imports them back. Its four
+guarantees - variant derivation, kind exhaustiveness, corpus/table bijection, sidecar
+drift - are unchanged and still green. Two corpora in bijection with one sidecar is the
+drift that file exists to prevent, so there is one.
+
+The representatives were built to be CONSTRUCTIBLE and to select a support branch. Three
+things were needed to make them EXECUTABLE, and none of them touched an op:
+
+1. **A per-row PRELUDE**, itself authored as IR and applied through the same production
+   path. There is no single fixture table, because the rows contradict each other:
+   `update t SET a = x` needs `a` and `x` to be the same type, `addConstraint/fkSimple`
+   needs `a` to match `other.id`, and `setColumnType a -> text` needs `a` to be castable.
+   `createIndex/pgOnlyMethodOrFeature` builds a GIN index, so its `a` is `json`.
+2. **Localization of the names that are not schema-scoped.** A PostgreSQL ROLE is
+   cluster-scoped and an EXTENSION is database-scoped, so the corpus's literal `r` and
+   `citext` collide with whatever cargo runs in parallel - `drop_extension_rollback_pg.rs`
+   states in its own header that `pg_extension_name_index` rejects a second `citext`
+   creator. Roles and the `createSchema`/`dropSchema` name take a per-row unique suffix;
+   the extension becomes `pgcrypto`, which no live test in the tree claims. `nextval`'s
+   hard-coded `app` schema is retargeted at the probe schema, or a cross-schema POLICY
+   refusal would mask the capability answer the row is asking about.
+3. **A live schema read back after the prelude.** For SQLite that is not enough on its
+   own: its 12-step rebuild is authored from the SDK field maps, not the catalog, so a
+   catalog-only `LiveSchema` makes every rebuild-shaped op refuse with "the live table
+   snapshot is incomplete" whatever the table says. `engine::refresh_historical_live`
+   folds the applied history for exactly this; the prelude IS the row's history, so it is
+   folded with `fold_to_field_defs`. Before this, six SQLite rows reported a
+   disagreement that was entirely the fixture's. **A conformance suite that cannot tell a
+   missing referent from a wrong declaration reports the fixture as a defect.**
+
+Two fixture defects were found by the measurement and fixed before anything was reported.
+`createTable/nextvalDefault` fell into a `("createTable", _)` catch-all and lost its
+sequence, and PostgreSQL answered `[42P01] relation "...s" does not exist` - a
+`ServerError` manufactured entirely by the harness. `alterPrimaryKey` was given a
+`bigInt` key, and SQLite's primary-key lifecycle correctly refused an add that would
+introduce INTEGER-PRIMARY-KEY rowid generation.
+
+### The disagreements, in three families
+
+**(A) DEGENERATE REPRESENTATIVE - 14 cells.** The corpus op cannot be authored on any
+dialect. `insert` (all three variants, both dialects) carries `rows: []`:
+`malformed insert into "t": no rows`. `addConstraint/exclusion` carries `elements: []`.
+`createDomain/nextvalDefault` declares a nextval default on `as: text`:
+`nextval defaults require an integer column`. `createTable/partitionedCollapse` (both
+dialects) and `createPartition`/`dropPartition` on SQLite need a collapse affirmation
+that is a WHOLE-RECORDING property, so a single-op representative can never satisfy it -
+`this recording does not contain a collapse-affirmed partitioned parent`. These say
+nothing about the declarations and everything about the corpus.
+
+`dropIndex/base` belongs here on both dialects and is worth its own line. The
+representative omits its owning table, and the production gate refuses a bare-name index
+drop fail-closed - correctly, since it would let a migration drop another app's index by
+name. But the CODE it refuses with is `UNSUPPORTED`, the dialect table's own code, so an
+OWNERSHIP refusal reads as "this dialect cannot drop an index". The refusal is right; its
+spelling is not.
+
+**(B) DECLARATION ERROR - 6 cells, all SQLite.** The sidecar says `portable` and the
+engine itself refuses, cleanly, every time.
+
+- `setColumnType/base`, `setColumnDefault/base`, `setColumnDefault/containerOrJson`,
+  `dropConstraint/base` and `addConstraint/unique` all refuse with
+  `IrLowerError::SqliteRebuildOnly`: *"IrAuthor::lower of SQLite op "..." needs the
+  12-step table rebuild, which this path cannot emit"*. The imperative op lane has no
+  SQLite render for these; only the declarative differ's rebuild does. This is not a new
+  class. `render/lower.rs`'s comment on `require_alter_column_rendering` records F674 as
+  having moved `setColumnNotNull`, `dropColumnNotNull` and `dropColumnDefault` to
+  `unsupported` for precisely this reason - *"those cells said `portable` while this gate
+  refused them, so the gate accepted work the lowerer then rejected"* - and stopped there.
+  These five are the rest of it. Note `addConstraint`'s FK variants DO apply, so this is
+  a per-variant gap, not a per-op one.
+- `createTrigger/bodyMultipleEvents` refuses with *"SQLite CREATE TRIGGER accepts exactly
+  one trigger event"*, and that string is already in the tree: `support.rs`'s
+  `Feature::TriggerMultipleEvents` cell declares SQLite UNSUPPORTED, with a comment
+  recording that SQLite *"used to be declared supported beside a message that already
+  spelled out why it could not be"*. The FEATURE table was corrected and the OP sidecar
+  was not. They disagree, and the feature gate wins.
+
+**These six were RECORDED, not fixed, and the brief's own criterion is why.** It says fix
+"only if the declaration is plainly wrong and the fix is a one-line sidecar change". The
+declarations are plainly wrong. The fix is not one line, and the proof is below.
+
+**(C) ENGINE DEFECT - 2 cells.** The declaration is defensible and the engine still gets
+it wrong at or after render.
+
+- `createTrigger/bodyInsteadOf` on SQLite is declared `portable`, clears validate, clears
+  lower, and **dies against the database**: `cannot create INSTEAD OF trigger on table:
+  t`. SQLite accepts INSTEAD OF triggers on VIEWS only and nothing in the engine checks
+  the target's kind. The cell is not wrong - the op IS supported, on a view - the missing
+  gate is. This is the one `ServerError` in 184 cells, and it is exactly the shape the
+  brief named: cleared authoring, died mid-apply.
+- `alterSequence/base` on PostgreSQL is declared `portable` and carries no options, so the
+  engine renders `ALTER SEQUENCE "s"` - a statement with no action. The only thing that
+  notices is the SQL guard's PARSER: `failed to parse SQL: Invalid statement: syntax
+  error at end of input`. Nothing in validate or lower objects. With the guard absent this
+  is a server error.
+
+### A fourth finding, from trying to fix family (B)
+
+Flipping a sidecar cell to `unsupported` routes the operator's message through
+`op_support.rs::unsupported_reason`, which is a match over `(Op, dialect, variant)` with a
+`_ => NEVER_REFUSED` fallback, and `NEVER_REFUSED` is the literal string
+`"internal: supported cell has no refusal reason"`. There is no arm for any of the six.
+
+**Four SQLite rows already ship that sentinel to the operator today**:
+`setColumnNotNull/base`, `dropColumnNotNull/base`, `dropColumnDefault/base` and
+`validateConstraint/base`. The first three are F674's own rows. F674 made exactly the fix
+this entry declined to make, moved the cells, and did not add the reason arms - so an
+ordinary, well-understood SQLite limitation is reported to the user as an internal
+placeholder. That is a real user-visible defect, found only because the live layer reads
+the message rather than the class.
+
+It is recorded and pinned rather than repaired, because repairing it is engine work.
+The suite now fails if a fifth row joins them, and fails if one of the four leaves without
+its pin being removed.
+
+### The RED demonstration, and the error it exposed in the brief
+
+A green conformance suite that cannot go red proves nothing, so it was made to go red
+twice, each time by flipping one row in a scratch copy of `dialect-support.toml`,
+regenerating both artifacts with `pnpm --filter zero-migrate gen:dialect-table`, running,
+and reverting.
+
+**Flip 1, `comment/base` sqlite `unsupported` -> `portable`.** Exit 101, exactly one new
+row:
+
+```text
+  comment/base [sqlite] declares Portable (requires Applied) but the server produced
+  RefusedByCapability: ... COMMENT ON is PostgreSQL-only in the current engine
+```
+
+**Flip 2, `dropTable/base` postgres `portable` -> `unsupported`.** This declares an op
+PostgreSQL obviously supports to be impossible on PostgreSQL. **The suite stayed GREEN,
+exit 0.**
+
+That is the error in the brief, and it is in the layer-1 rule the proposal specifies. The
+brief says: *"declared UNSUPPORTED / refused -> the op must be REFUSED, and refused
+CLEANLY by the engine before or at apply"*. But `Op::support()` READS the dialect table,
+so a cell declared `unsupported` makes validate refuse ON THE TABLE'S OWN SAY-SO. The
+required outcome is satisfied BY CONSTRUCTION. **Half of layer 1 is a tautology, and on
+SQLite it is the majority half: 49 of 92 cells are `unsupported`.** Layer 1 can falsify a
+declaration that is too GENEROUS. It cannot falsify one that is too CONSERVATIVE, and no
+amount of live coverage changes that while the declaration is also the gate.
+
+What flip 2 DID move is the operator's message, which became the `NEVER_REFUSED`
+sentinel. So the message is the one observable a too-conservative flip still disturbs,
+and pinning it recovers a real check from an unfalsifiable cell. The sentinel sweep was
+added for this reason, and re-running flip 2 with it in place now fails, exit 101:
+
+```text
+  dropTable/base [postgres] refuses with the INTERNAL sentinel "internal: supported cell
+  has no refusal reason" instead of an operator-facing reason.
+```
+
+The suite now goes red in BOTH flip directions. It could only go red in one when it was
+written to the specified rule.
+
+### A second error in the brief, and one in this suite's own instrument
+
+The brief said to read `docs/proposals/backend-conformance.md` and
+`docs/proposals/pluggable-backends.md` "on main". They are on main, at `f1cad744`. The
+agent worktree was checked out at an unrelated branch head that predated them, so the
+first look found only `id-system-design.md`. Recorded because the conclusion "the brief
+names files that do not exist" was one command away from being reported as a finding, and
+it would have been wrong. `git branch --contains` answered it; `ls` did not.
+
+The instrument's own defect is worth more. The `pg_namespace` leak check was written as
+its own `#[test]`, and libtest ran it CONCURRENTLY with the sweep. It observed
+`zmconf_alterprimarykey_base_..._1` - the first row's schema, mid-flight - and failed the
+workspace gate reporting a leak that was a live probe. A check whose subject is another
+test's in-progress state cannot be its own test. It is now a step of the sweep, and it
+takes the count before and after itself.
+
+### Isolation, verified
+
+Every PostgreSQL row runs in its own schema pair (project + `_migrations`), plus a
+per-row role and the one extension, all dropped per row. Every SQLite row runs in its own
+`TempDir`. Measured over a full run:
+
+```text
+  pg_namespace total            before 331   after 331
+  schemas matching 'zmconf_%'   before 0     after 0
+  roles matching 'zmconf_%'                  after 0
+  pg_extension                               after 1  (plpgsql only; pgcrypto dropped)
+```
+
+The total is 331 rather than a smaller number because this database is shared with every
+other live suite in the crate and with other agents' worktrees; the global count moves for
+reasons that are not this file's, which is why the prefixed list is the one asserted on.
+
+### Runtime, and where this belongs
+
+**63s** for both dialects with `--test-threads=1` (PostgreSQL sweep, SQLite sweep, and
+the leak check). Inside the default parallel `cargo test --workspace` the whole gate ran
+in **181s**, against 150s and 442s in earlier runs of the same gate on this machine at
+varying load, so this suite is inside the existing noise band rather than above it.
+
+**It belongs where it is: the default `cargo test` run.** It costs about a minute, it is
+gated on `ZERO_MIGRATE_TEST_PG_URL` exactly like the other 35 live suites, and a
+database-free run pays only the SQLite half. Moving it behind a flag would make the one
+suite that proves the capability declarations the one suite nobody runs. If it ever needs
+to move, the natural split is the PostgreSQL sweep to the `rust` CI job it already
+matches and the SQLite sweep left in the default run, since SQLite needs no service.
+
+`f664_scaling` did NOT fire in any run this session. It is a known load-sensitive flake
+and this suite raises load; nothing is attributed to it here because nothing happened.
+
+### Scope, and what a MySQL author must add
+
+PostgreSQL and SQLite only, deliberately: a parallel effort is adding live MySQL Rust
+coverage, and no CI config or MySQL DSN was touched here. The harness is already
+dialect-parameterised - `prelude()` takes the dialect and already splits PostgreSQL from
+SQLite for the trigger fixture - and the disposition lookup already reads `row.mysql` from
+the generated table. What is missing, restated in `MYSQL_TODO` in the suite itself so a
+MySQL author finds it in the file rather than only here:
+
+1. A live MySQL DSN env var and skip macro in `tests/support/mod.rs` shaped like
+   `PG_URL_ENV` / `skip_if_no_pg!`, and a `MysqlDevSession` implementing
+   `driver::SqlSession` shaped like `PgDevSession`. None of this exists:
+   `ZERO_MIGRATE_MYSQL_URL` occurs in exactly one file under `crates/`, and it is
+   `src/apply/backend/mysql/mod.rs`, not a test.
+2. A MySQL probe arm. MySQL has no CREATE SCHEMA that is not a DATABASE, so the per-row
+   isolation unit is a throwaway database and the `pg_namespace` leak check becomes a
+   `SHOW DATABASES` check.
+3. A pass over the 92 preludes for MySQL's own shape.
+
+The one thing a MySQL author must not do is relax `Outcome::ServerError`.
+
+### What was fixed versus recorded
+
+Fixed: nothing in the engine and nothing in `dialect-support.toml`. Two harness fixture
+defects were fixed before reporting (the missing `createTable/nextvalDefault` sequence and
+the `alterPrimaryKey` key type), and one instrument defect (the racing leak check).
+
+Recorded: all 22 disagreements, each as a named allowance carrying the observed outcome
+class AND a substring of the verbatim refusal, plus the four sentinel rows. An allowance
+fails if the row starts agreeing, fails if it disagrees differently, and fails if its
+words change - so it can go red in three directions, which `#[ignore]` cannot go in any.
+
+### Gate exit codes
+
+```text
+cargo fmt --all -- --check                                    0
+cargo clippy --workspace --all-targets -- -D warnings         0
+cargo test --workspace --exclude zero-migrate-node            0   (181s, with the live PG DSN)
+cargo test -p zero-migrate-node --no-default-features         0
+pnpm -w build                                                 0
+pnpm --filter zero-migrate check                              0
+pnpm --filter zero-migrate test                               0
+pnpm --filter zero-migrate-cli typecheck                      0
+pnpm --filter zero-migrate-cli test:docs                      0
+pnpm --filter zero-migrate-node build                         0   (rebuilt before the host run)
+pnpm --filter zero-migrate-cli test:host                      0   (360s)
+```
+
+`pnpm install --frozen-lockfile` was run once first; the worktree had no `node_modules`.
+
+Disk was checked before each gate run: 138G, 99G, 92G, 86G, 133G free at the successive
+checks, never near the 15G stop-line. It did dip to 86G during the host suite, which is
+the tightest point and worth watching if more worktrees are added.
