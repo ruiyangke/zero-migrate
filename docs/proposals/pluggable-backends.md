@@ -218,6 +218,39 @@ pub const POSTGRES: DialectId = DialectId::new("postgres");
 `DialectSet(u8)` becomes a set over `DialectId`. The eight-backend cap
 disappears with it.
 
+### Representation: a static string, decided
+
+`DialectId` wraps `&'static str` and not an interned integer. It is the simplest
+thing that works, it gives `Debug`, serialization and error messages for free,
+and it needs no central name table, which is the whole point: a backend crate
+declares its own id without asking anything to register a number for it.
+Interning to a `u16` is a later optimization, and only if dialect comparison
+ever appears in a profile. It should not - comparisons happen per rendered
+statement, not per row.
+
+Equality, ordering and hashing are by CONTENT (`str` semantics), not by pointer,
+so two crates spelling `"postgres"` are the same dialect. That is the desired
+behaviour and it is also the risk below.
+
+### What the string gives up, and the rule that covers it
+
+A closed enum made identity unique BY CONSTRUCTION. Strings do not: nothing
+structurally stops two backends from both claiming `"postgres"`, or one claiming
+`"postgresql"` while the dialect table says `"postgres"`. A silent collision
+would be worse than the enum ever was, because two backends would quietly share
+capability rows and dialect-table entries.
+
+So the id carries a validity rule, enforced at registration rather than trusted:
+
+- lowercase ASCII, `[a-z][a-z0-9_]*`, no aliases and no display names
+- the facade REFUSES to build a registry containing a duplicate id, and this is
+  a hard error naming both crates, never a last-one-wins
+- the conformance suite asserts that a backend's declared id matches the id its
+  dialect-table rows are filed under
+
+The registry check is cheap and runs once. Skipping it trades a compile-time
+guarantee for nothing.
+
 The four existing enums are removed in this order: `DialectScope` and
 `ApplyDialect` are internal and go first; `Dialect` in `ir/validate.rs` folds
 into `SqlDialect`; `SqlDialect` becomes a deprecated alias for `DialectId`
