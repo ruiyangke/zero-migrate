@@ -29551,3 +29551,213 @@ load, so there is no flake to attribute.
 
 Disk was checked before each gate run: 144G free at the start, 92G before the host suite,
 never near the 15G stop-line.
+
+## An encrypted column over a domain recorded the wrong plaintext type
+
+Closes the defect the domain-token work recorded and excluded (`f4b52c18`, `7d27adcd`).
+Touches `render/lower.rs`, `render/fold.rs`, and the two test files that pin them.
+
+### The brief was wrong about the two things that decided the fix
+
+Both were checkable, and checking them changed the answer rather than decorating it.
+
+FIRST: "the lower has no `NamedTypeRegistry`". It has one. `NamedTypeRegistry` is
+DEFINED in `lower.rs:154`, the lower builds it (`lower.rs:3674`, `6884`) and threads it
+through `lower_op_guarded` as a `&mut` parameter, and it is IN SCOPE at the exact
+`createTable` site that stamps the sentinel (`lower.rs:4854`). The true constraint was
+narrower and less dramatic: the shared leaf `ir_column_to_field` takes only an
+`&IrColumn`, so the registry stops one frame short of the function that needs it. That
+distinction is the whole fix. "No registry" implies new plumbing through the lower;
+"the leaf does not take one" is solved by resolving the type BEFORE the leaf.
+
+SECOND, and this one reversed a design choice the brief offered as the better option:
+"have the sentinel carry the DOMAIN NAME rather than a resolved base type, so it needs
+no registry ... more stable under a domain redefinition and needs no new plumbing".
+
+It cannot carry a domain name. `wraps` is a CLOSED three-variant `WrappedType`
+(`schema/diff.rs:388`), and two independent sites refuse anything else:
+
+    schema/query.rs:2468       "encrypted.wraps must be string, number, or bytes, got .."
+                               -> QueryError, so the DDL FAILS TO EMIT
+    schema/mask_codec.rs:91    wrapped_type_from_sql -> None for an unknown token, and
+                               parse_encryption_sentinel is documented fail-closed
+
+So a domain-named sentinel would not render at all, and any that reached a catalog by
+another route would be unparseable by the introspector that recovers it. The option was
+not merely worse, it was unavailable. Measuring the consumer before choosing, which the
+brief demanded, is what surfaced that; picking by symmetry would have picked it.
+
+### Shipped, not latent, and the recorded framing had it inverted
+
+The recorded measurement described a DISAGREEMENT: the fold saying `number` against a
+comment still saying `string`. Measured on `main` at `3b5bdfda` through
+`IrAuthor::lower`, the two producers AGREE:
+
+    postgres  "amount" bytea /* zero-migrate:enc:randomised:default:string */ NOT NULL
+              COMMENT ON COLUMN "app"."amounts"."amount" IS '..:string'
+    sqlite    "amount" BLOB  /* zero-migrate:enc:randomised:default:string */ NOT NULL
+
+for a domain whose base is `int`, while the plain `int` control on the same run says
+`number`. Both producers are consistently WRONG. The disagreement the finder saw was an
+ARTIFACT OF THEIR OWN SCAFFOLD: enabling the fold's recursion without the lower's is
+what split them. So the wrong VALUE ships today and the DISAGREEMENT was latent, which
+is the reverse of the recorded shape, and it means the RED had to assert the sentinel's
+CONTENT rather than the two sides matching each other. Two sides that match are exactly
+what `main` already produces.
+
+Also worth stating plainly: on PostgreSQL the inline sentinel and the `COMMENT ON
+COLUMN` body are BOTH stamped by the lower from one descriptor. They are one producer,
+not two, so "a sentinel that disagrees with the column's own comment" could never have
+been the shape. The two producers are the LOWER and the FOLD.
+
+### What consumes it, and what a wrong one costs
+
+Traced rather than assumed, because "a sentinel nothing reads" and "a sentinel that
+drives decryption" are different severities.
+
+`EncryptionMeta::wraps` is documented at `schema/diff.rs:377`: "The DDL emitter uses
+`BYTEA`/`BLOB` regardless; `wraps` survives so validation walks the right type-checker
+before the encrypt pass swaps bytes in."
+
+So it is not decoration and not merely descriptive. It SELECTS THE VALIDATOR. A column
+whose plaintext is an integer ran the text type-checker on every write and decoded back
+as text on every read. And because the ciphertext sits in `BYTEA`/`BLOB`, the sentinel
+is the ONLY surviving record of the plaintext's shape: on PostgreSQL it is recovered
+from `pg_description`, on SQLite parsed back out of `sqlite_master.sql`. There is no
+second source to cross-check it against, which is why a wrong one is not self-healing.
+
+### Per-dialect, measured before anything changed
+
+    postgres  inline sentinel + COMMENT ON COLUMN, both "string"     WRONG
+    sqlite    inline sentinel in sqlite_master.sql, "string"         WRONG
+    mysql     NO zero-migrate:enc: sentinel emitted AT ALL            not expressible
+
+MySQL emits no encryption sentinel for an encrypted domain column AND none for a plain
+encrypted `int` column, so the DDL there is unchanged by this fix and there is nothing
+for the runtime descriptor to disagree with. That is a clean absence rather than a
+refusal, so there was no clean refusal to turn into a silent wrong answer. It is pinned
+in `mysql_emits_no_encryption_sentinel_to_disagree_with` so that a later change which
+STARTS emitting one has to come and decide what it should say, instead of silently
+inheriting whichever answer the column happened to carry.
+
+### The fix, and why the plain-domain half is deliberately untouched
+
+One walk, two producers. `resolve_domain_base_type` moved out of `fold.rs` to
+`lower.rs`, next to `NamedTypeRegistry`, and is now `pub(crate)`; the fold imports it.
+A second walk is exactly how the two would drift apart again, so there is only ever one.
+
+`resolve_encrypted_inner_domain` rewrites `Encrypted { of: Domain }` to
+`Encrypted { of: <base> }` on the TYPE, upstream of the shared `ir_column_to_field`.
+That placement is the point. The descriptor's `ty` and its `encrypted.wraps` are derived
+from the same inner type by two DIFFERENT functions (`col_type_to_token` and
+`encrypted_wraps_token`). Patching the descriptor afterwards would have fixed whichever
+facet the patch remembered and left the other, which is a smaller copy of the very
+defect being closed. Normalising the type makes both derivations agree by construction,
+on every caller, forever.
+
+Applied at the four op sites where a column acquires a type and the registry is in
+scope: the lower's `createTable` and `addColumn`, and the mirror pair in
+`fold_ops_onto` that seeds the SQLite rebuild, plus the two `fold_to_field_defs` sites.
+
+A PLAIN domain column is deliberately NOT resolved, and the asymmetry is load-bearing:
+on PostgreSQL a plain domain column's rendered type IS `"schema"."domain_name"`, so
+resolving it would rewrite the DDL. An encrypted column's physical type is
+`BYTEA`/`BLOB`/`LONGBLOB` no matter what it wraps, so its inner type reaches the catalog
+through the sentinel alone. The same resolution that is safe for one is not for the
+other, which is why this is scoped to the encrypted inner rather than done wholesale.
+
+Termination is the reused `seen`-set walk. A domain over a domain resolves to the
+ultimate base; a cycle, an unregistered name, and an ENUM base all leave the column
+exactly as it was. The sentinel is not optional, so "absent beats wrong" is "unchanged
+beats invented" here too.
+
+### What the tests assert, and the control that carries the weight
+
+Content, never `ok`. The pre-fix answer was `ok=true` on all three dialects, which is
+how it shipped, and both defects in this family shipped green.
+
+The strongest assertion is not a substring check. `an_encrypted_domain_column_renders_
+identically_to_its_resolved_base` asserts the full emitted SQL for an encrypted column
+over a domain over `int` is BYTE-IDENTICAL to an encrypted column over a plain `int`,
+on all three dialects. That says the column is indistinguishable from the type it stands
+for, and simultaneously proves the resolution changes nothing else: physical type,
+masked sibling, system columns, and index DDL all have to match too.
+
+The discriminating control is `an_encrypted_domain_over_a_text_base_still_says_string`.
+Without it, a fix that hardcoded `number` passes everything else.
+
+`an_unrelated_rename_carries_the_encrypted_domain_columns_sentinel_unchanged` reproduces
+the finder's actual trigger: a rename of a DIFFERENT column, which on SQLite is the
+12-step rebuild that re-renders the table from the folded snapshot rather than from the
+original DDL. That is where a half-fix rewrites a deployed column's recorded encryption
+posture.
+
+### The three replays agree
+
+`the_lower_the_snapshot_fold_and_the_field_defs_agree_on_wraps` asserts all three
+producers on the same ops in one test: `IrAuthor::lower`'s emitted SQL, `fold_ops`'
+snapshot column sentinel, and `fold_to_field_defs`' descriptor. All say `number`, and
+the descriptor's `ty` says `int` alongside it. The previous fix made the third agree
+with the first two for plain domains; this keeps that and extends it to encrypted ones.
+
+### Verified by neutering, and the controls prove the tests discriminate
+
+The GREEN was re-refuted by gating `resolve_encrypted_inner_domain` behind an env var
+that returns `None`, leaving every signature and export intact rather than reverting
+files. With it set, 4 of the 8 new catalog tests fail on the sentinel-content
+assertions and 2 of the node tests fail on `wraps`, while the three controls (textual
+base, undeclared domain, MySQL absence) and all 9 pre-existing domain tests still PASS.
+That last part is what makes the neuter meaningful: it shows the harness is scoped to
+the encrypted path and is not merely tracking the flag. The rename test was neutered
+separately, because its outer `before == after` assertion passes vacuously when both
+sides are wrong; it fails on the inner `randomised:default:number` assertion, at
+`encrypted_domain_catalog_sentinel.rs:347`.
+
+An earlier instrument failure is worth recording. `cargo` is NOT ambient here; it lives
+in the `nix develop` shell. A warm-up build written as `cargo build ... | tail -5;
+echo "BUILD_EXIT=$?"` reported `BUILD_EXIT=0` while the shell printed `command not
+found` - `$?` had captured `tail`, not `cargo`. A false green on the very first
+measurement. Every gate below was run as `nix develop -c <cmd>` with the exit code read
+directly, never through a pipe.
+
+### Gates
+
+    cargo fmt --all -- --check                            0
+    cargo clippy --workspace --all-targets -- -D warnings  0
+    cargo test --workspace --exclude zero-migrate-node     0  (see f664 note)
+    cargo test -p zero-migrate-node --no-default-features  0  90 passed / 10 targets
+    pnpm -w build                                          0
+    pnpm --filter zero-migrate check                       0
+    pnpm --filter zero-migrate test                        0
+    pnpm --filter zero-migrate-cli typecheck               0
+    pnpm --filter zero-migrate-cli test:docs               0
+    pnpm --filter zero-migrate-node build                  0  (rebuilt BEFORE the host run)
+    pnpm --filter zero-migrate-cli test:host               0  458 tests / 458 pass /
+                                                              0 fail / 0 SKIPPED
+
+The host run was made with both DSNs exported and the skip count is 0, so it measured
+the databases rather than skipping past them. The addon was rebuilt first, so the host
+suite measured this tree and not a prebuilt artifact.
+
+`f664_scaling::validate_ir_does_not_scale_quadratically_in_any_op_kind` FAILED in the
+first workspace run and PASSED on an idle re-run (exit 0). Known flake, unrelated to
+this change, and SAID SO rather than quietly re-run. Excluding it, the workspace run was
+1577 passed across 54 targets with 0 other failures.
+
+### Left open
+
+The `zero-migrate:enc:` sentinel is not the only thing a domain contributes and does not
+close the domain `CHECK` gap recorded by the previous entry, which is unchanged and
+still real.
+
+One genuine consequence to name rather than bury: a table deployed BEFORE this fix
+carries `..:string` in its catalog, and a SQLite rebuild triggered by any later schema
+change will now re-stamp it as `..:number`. That rewrite is a CORRECTION, and it is the
+same rewrite the previous entry flagged as dangerous when only one producer moved. It is
+safe now only because both producers moved together. There is no migration that repairs
+an already-deployed sentinel WITHOUT a rebuild, and none is attempted here.
+
+A parallel agent owns `apply/backend/sqlite/rebuild_sql.rs`. This change needed no edit
+there: the rebuild is seeded from the folded snapshot's own `encryption_sentinel`, which
+is fixed at its source, so the rebuild inherits the corrected value without the emitter
+changing.
