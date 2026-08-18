@@ -31432,17 +31432,41 @@ reports for it is what the retype's fold must produce. A literal
 `Character { fixed: false, length: 64 }` in the test file would have been a second
 spelling of the derivation under test.
 
-NEUTERED to confirm both directions, one env gate restoring the old behaviour rather
-than a revert. Both went red, each in its own way:
+A third test covers the half a from-empty fold cannot reach and the half that can do
+DAMAGE: `folding_onto_a_live_mysql_base_keeps_the_contracts_the_server_reported`
+deploys a table, reads it back with `snapshot_schema`, folds an `addColumn` ONTO that
+snapshot, and requires the untouched columns to still carry the server's own contracts
+while the added one gets a derived one.
+
+NEUTERED three times, each an env gate restoring the old behaviour rather than a
+revert, each applied alone:
 
 ```text
-  after string(255) -> string(64) the fold describes widths.label as
-  Character { fixed: false, length: 255 }, but MySQL reports
-  Character { fixed: false, length: 64 } for a column declared string(64).
-  `data_type` cannot see this: both sides read "character varying(64)".
-
-  column amount data_type expected "numeric" actual "decimal"   (the phantom line)
+  N1  no re-stamp at all
+      RED: after string(255) -> string(64) the fold describes widths.label as
+           Character { fixed: false, length: 255 }, but MySQL reports
+           Character { fixed: false, length: 64 } for a column declared string(64).
+           `data_type` cannot see this: both sides read "character varying(64)".
+  N2  no re-stamp at all
+      RED: column amount data_type expected "numeric" actual "decimal"
+           - the phantom drift line, on the deployed table.
+  N3  re-stamp everything, carried-through guard removed
+      RED: the fold overwrote the contract MySQL reported for the untouched column
+           ledger.amount: the server said Decimal { precision: 12, scale: 2 },
+           the fold now says Decimal { precision: 65, scale: 30 }.
 ```
+
+N3 is the one that taught something. It was GREEN on the first attempt, and the
+instrument was the reason: the test asserted only `diff_snapshots`, and drift CANNOT
+SEE this failure. Destroying the base's contract leaves `data_type` reading "decimal"
+on both sides, so `column_data_types_eq` answers "different" and the report throws the
+answer away (see below). `mysql_ddl_type` maps a bare "decimal" to `DECIMAL(65, 30)`
+and a bare "text" to `VARCHAR(191)`, so a blanket re-stamp turns `decimal(12,2)` into
+`decimal(65,30)` and `varchar(36)` into `varchar(191)` SILENTLY. The test now asserts
+the contracts directly, with the reason written next to the assertion and a note to
+delete it when the reporting hole closes. A neuter that stays green is not a passing
+neuter; it is a broken instrument, and this one was found only because the guard it
+was aimed at was the part of the change most likely to be wrong.
 
 ### The differential corpus moved exactly three rows, and no others
 
@@ -31472,19 +31496,25 @@ agree, which is the only case it exists for.** `diff_attrs` reads
 ```
 
 and `push` (`drift.rs:2852`) drops the entry when expected == actual as STRINGS. So
-`column_data_types_eq` can answer "different" and the report says NOTHING. Measured:
-the `uid` column above folded `Character { length: 191 }` against a live
-`Character { length: 36 }` and produced no drift line, because both sides spell
-`data_type` "text". `column_data_types_eq`'s own comment states the case it was built
-for - "`mysql_canonical_type` folds every `varchar(n)` to the literal `text`, so a
-declared 255 and a live 64 are the same string here" - and that is precisely the case
-the report swallows. A real `varchar(255)` against a live `varchar(64)` on MySQL
-reports clean today. Only a difference that ALSO moves the portable string survives,
-which is how the `amount` line above got out.
+`column_data_types_eq` can answer "different" and the report says NOTHING. Measured
+TWICE, independently: the `uid` column above folded `Character { length: 191 }` against
+a live `Character { length: 36 }` and produced no drift line, and the N3 neuter turned
+`decimal(12,2)` into `decimal(65,30)` and drift stayed clean. Both sides spell
+`data_type` "text" and "decimal" respectively.
+
+`column_data_types_eq`'s own comment states the case it was built for -
+"`mysql_canonical_type` folds every `varchar(n)` to the literal `text`, so a declared
+255 and a live 64 are the same string here" - and that is precisely the case the report
+swallows. A real `varchar(255)` against a live `varchar(64)` on MySQL reports clean
+today. Only a difference that ALSO moves the portable string survives, which is how the
+`amount` line above got out at all.
 
 Not fixed here: it is a change to the drift report's shape rather than to the fold,
 with cross-suite blast radius, and it is not what this branch was sent to do. It is
-worth more than the fix above and should be taken next.
+worth more than the fix above and should be taken next. Note what it implies about
+COVERAGE while it is open - no drift-report test on MySQL can pin a width, so the
+fold's physical contracts have to be asserted directly, and
+`fold_retype_physical_type_mysql.rs` says so at each place it does that.
 
 **`value_format` does not round-trip on MySQL.** A freshly deployed table carrying
 `ids.typeId` reports `column acct format expected "typeId(account)" actual ""` against
@@ -31494,4 +31524,39 @@ not a pin. Recorded so the next MySQL round trip does not rediscover it as new.
 
 ### Gates
 
+```text
+cargo fmt --all -- --check                             0
+cargo clippy --workspace --all-targets -- -D warnings  0
+cargo test --workspace --exclude zero-migrate-node     0  211 targets ok, 0 failed
+cargo test -p zero-migrate-node --no-default-features  0  90 passed
+pnpm -w build                                          0
+pnpm --filter zero-migrate check                       0
+pnpm --filter zero-migrate test                        0  326 pass / 0 fail / 1 skipped
+pnpm --filter zero-migrate-cli typecheck               0
+pnpm --filter zero-migrate-cli test:docs               0  6 pass / 0 fail
+pnpm --filter zero-migrate-node build                  0  (rebuilt BEFORE test:host)
+pnpm --filter zero-migrate-cli test:host               0  458 pass / 0 fail / 0 SKIPPED
+```
+
+Every exit code read directly from the command, never through a pipe. Both DSNs were
+exported for the workspace and host runs, with `ZERO_MIGRATE_REQUIRE_LIVE_DB=1` on the
+workspace run, and the host skip count is 0 - so both measured the databases rather
+than skipping past them. Servers: MySQL 8.4.11 and PostgreSQL 18.
+
+The addon staleness guard earned its keep on the way. A first `test:host` run failed 10
+files with "the host suite's addon is older than the sources it is built from", because
+a COMMENT-ONLY edit to `fold.rs` landed after the addon was built. The guard's own
+message says a comment-only edit trips it and that a rebuild is the right answer
+either way, and it is right: the alternative is a host suite measuring a binary the
+tree no longer describes. Rebuilt, re-run, 458/458.
+
+`pnpm install --frozen-lockfile` was run once first; the worktree had no `node_modules`.
+
+Disk was checked before every gate run, and it mattered. The machine reached 100% used
+/ 6.6G free mid-run with three agents building - the condition an earlier entry records
+as truncating a source file to zero bytes while the edit tool reported success. This
+worktree's `target/debug` was 49G of that, and was deleted the moment a gate returned,
+taking free space from 6.6G to 100G; the release tree and the addon are untouched by
+that and the debug tree rebuilds on the next `cargo test`. Every gate reported above ran
+at 34G free or better, and the final full sequence at 78G.
 
