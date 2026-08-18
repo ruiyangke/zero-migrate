@@ -294,6 +294,59 @@ answers or backend-internal detail.
 capability is a QUESTION CORE ASKS, never a vendor name. Adding a capability is
 a core change and should be rare; adding a backend is not a core change at all.
 
+## The guard
+
+The SQL security guard is `pg_query`-backed, which makes it PostgreSQL-specific
+machinery. It moves into `zero-migrate-pg`. The seam it moves behind ALREADY
+EXISTS: `apply/executor.rs:1118` calls
+`guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()))`, and the
+crate already ships `PgGuard`, `SqliteDescriptorGuard` and a MySQL posture that
+rejects raw SQL outright (`GuardError::MysqlRawSqlRejected`). Three dialects,
+three postures, one dispatch point. This decision moves the implementations into
+the crates that own them; it does not invent a mechanism.
+
+But the guard is a SECURITY boundary, so what moves and what stays are not the
+same question.
+
+**Stays in core, in a neutral `zero-migrate-guard` contract crate:**
+
+- the `Guard` trait and the statement-classification vocabulary
+- the PROPERTIES every guard must enforce: no cross-schema reference, no
+  file/network access, no privilege escalation, deny-by-default on a statement
+  the guard cannot parse
+- the enforcement that a guard RAN. Core calls it unconditionally, before any
+  `up` reaches a server, and a backend cannot opt out.
+
+**Moves to the backend crate:**
+
+- the parser and the deny-list implementation. `libpg_query` moves with
+  `PgGuard`, which is a concrete win: a SQLite-only or DuckDB-only build stops
+  carrying a C dependency it never uses. The guard crate's own manifest already
+  calls itself "the ONLY owner of that C dep on the non-SQLite path", so the
+  dependency is already understood to be vendor-scoped.
+- the dialect's posture on raw SQL. MySQL rejecting raw SQL outright is a
+  legitimate posture, not a missing guard, and it should be declared as such
+  rather than read as absence.
+
+**The rule that keeps this from weakening security:** a backend does not get to
+be trusted about its own guard. NO GUARD MEANS NO SHIP - a backend without one
+fails conformance and cannot be registered. Conformance runs a corpus of
+known-hostile statements against every backend's guard and requires denial;
+this is the same "a declaration must be proven honest rather than trusted" rule
+`backend-conformance.md` applies to capabilities.
+
+**Two more `pg_query` users sit in core and must move with it.**
+`apply/precondition.rs` is already documented as the Postgres precondition
+implementation and is reached through the backend seam, so it moves as-is.
+`apply/plan_precondition.rs` is harder: it holds a PostgreSQL parser with no
+dialect gate of its own, protected only by a check about 5,000 lines away in
+`render/lower.rs`. See `single-fold-and-effects.md`, which argues that a real
+effect model retires that parser entirely rather than relocating it - the fact
+it recovers by parsing rendered SQL (whether a view is `CREATE OR REPLACE`) is
+already a named field on the op, `Op::CreateView.replace`. Retiring beats
+moving. If the effect model does not land, the parser moves to
+`zero-migrate-pg` and core keeps only the verdict.
+
 ## Vendor facts
 
 `ColumnSnapshot` today carries `sqlite_rowid` and three `mysql_*` fields, and its
