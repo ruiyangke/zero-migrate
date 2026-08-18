@@ -33051,3 +33051,313 @@ suite (`allowlist_pg_*`, `conroutes_*`, `guardfold_adopt_pg_*`, `f662_*`); 4 mat
 prefixes predate this session. This change adds no live test, so its own prefix is empty
 by construction. The MySQL client is not in the devShell, so MySQL was counted only by
 the suite's own guards - `ZERO_MIGRATE_MYSQL_URL` was set and the MySQL legs ran.
+
+## Step 4, consumer 2: `env.db.ts` is a projection now, and the op it had no arm for was wrong five ways
+
+`docs/proposals/single-fold-and-effects.md` section G step 4 moves the artifact
+consumers off their private walkers one at a time, blast radius ascending.
+`authoring_tables_from_ops` is the second, and it has the smallest blast radius of the
+four - measured, not assumed: the map is produced in ONE place in `render_artifacts` and
+read in ONE place, `render_env_db_ts`. So this move can move bytes in `env.db.ts` and in
+no other artifact, where consumer 1 could move two.
+
+`render_artifacts` now builds it from `FoldedSchema::project_authoring_tables`, and the
+walker is DELETED - 333 lines. `git grep authoring_tables_from_ops` returns prose only,
+and every remaining mention was re-read and put in the past tense; the sweep found one
+that mattered, a rustdoc INTRA-DOC LINK in `differential_corpus.rs`'s module header,
+which `rustdoc::broken_intra_doc_links` would have flagged and which no gate in this
+repo's pipeline runs. `cargo doc` is not in `gate-main.sh` and `cargo clippy` does not
+evaluate rustdoc lints, so a dangling link ships green. Measured: the crate emits 14 such
+warnings at `38f9abc6` and 13 here.
+
+### The defect the walker had, measured through the artifact
+
+`authoring_tables_from_ops` had NO `Op::AlterPrimaryKey` arm at all - the op fell through
+its `_ => {}`. The step 3 gate recorded that as ONE divergence on one stream and one
+action shape (`v_primary_key|*|authoring_tables`, `line 45: fold "legacy_id," walker
+"id,"`). Driven through the real artifact path it is FIVE wrong artifacts, one per
+`AlterPrimaryKeyAction` shape plus the identity facet the same op clears:
+
+| stream | `env.db.ts` said | the server holds |
+|---|---|---|
+| `replace` -> single column | `id: t.text().primaryKey()` | the key is on `legacy_id` |
+| `replace` -> composite | `id: t.text().primaryKey()`, no clause | `primaryKey: ["tenant", "legacy_id"]` |
+| `drop` | `id: t.text().primaryKey()` | no primary key at all |
+| `add` | `primaryKey: null` | the key is on `legacy_id` |
+| `replace` + `dropIdentityFrom` | `id: t.int().primaryKey().autoIncrement()` | `id` generates nothing |
+
+Regenerating an app from that artifact reinstates a key the migration removed, or drops
+one it installed, or keeps a sequence the server no longer has.
+
+### Which side is right was decided by a server, not by this file
+
+`tests/env_db_ts_matches_the_server_pg.rs` is new and is the adjudication. Each case
+APPLIES the migration to a real PostgreSQL through `MigrationEngine::apply_plan`, reads
+the ordered key out of `pg_index.indkey` (not `information_schema`, whose ordering is by
+the column's position in the table rather than in the key), reads `pg_attribute.attidentity`
+and `pg_class`, and only then asserts that `env.db.ts` - rendered from the SAME resolved
+ops through `render_artifacts` - declares what the server holds. The SERVER assertion
+comes first in every case, so a case whose DDL silently did nothing reports a setup
+failure rather than an artifact defect.
+
+Deliberately NOT a comparison against `fold_ops`: that is the offline model whose own
+agreement with the server the test would then be inheriting. One throwaway schema per
+case removes the inheritance.
+
+Before the switch: **6 of 7 failed, all at the artifact assertion, all after the server
+assertion passed.** After: 7 of 7 pass. The seventh is the control and passed throughout.
+
+### The second divergence was a CHOICE, and it stopped being allowed to stay one
+
+`AuthoredState::advance` removes a table on `Op::DropPartition`; the walker had no arm.
+`single_fold.rs` recorded this at step 3 as "UNMEASURED by the gate and recorded as a
+choice rather than presented as proven". Making it live in a shipped artifact is what
+ends that grace period, so it is now measured three ways: against the live server (the
+relation is gone from `pg_class`, and `par` survives it); against `Op::DetachPartition`
+as the CONTROL, which has no arm because a detached partition survives as a standalone
+table under the same name - the rule `partition_claims_the_relation_namespace_pg.rs`
+enforces; and offline on all three dialects.
+
+The reachability is narrow and stated rather than glossed: only `createTable` +
+`attachPartition` + `dropPartition` reaches it, and `attachPartition` is PostgreSQL-only
+at lowering (`render/lower.rs`: "attachPartition is PostgreSQL-only"), so off Postgres the
+artifact describes a migration that cannot be applied there either way.
+
+### What the recorded corpus could not see, measured
+
+The 27 op fixtures contain exactly one `alterPrimaryKey` stream, and it is REFUSED on all
+three dialects (`fold: table \`orders\` does not exist` - it is a standalone migration
+whose table lives in an earlier one). So the recorded corpus renders ZERO artifacts
+carrying the op this move is about. A behaviour-preservation gate built only on it would
+have been green and blind, which is the same shape consumer 1 hit with implicit unique
+indexes. Twenty carrier streams were written to cover the field, and
+`the_corpus_golden_actually_covers_the_map_that_moved` counts, in the golden file,
+the primary-key spellings (single 59, composite 9, null 27), the constraint rows (19),
+the index rows (66), the partition rows (13) and the schema row (1). The constraint floor
+came from that count: the first capture had TEN constraint rows, because a single-column
+FK is LIFTED onto the column as `.references(...)` and never reaches a `foreignKeys:`
+block, so three streams were ADDED to cover the field rather than the floor lowered to
+match it.
+
+### The blast radius, hashed
+
+`tests/goldens/authoring_tables_artifacts.txt` was captured from the OLD path before the
+switch and then hand-edited: **81 lines removed, 72 added, net -9.** Every one of the 153
+belongs to one of eight carrier streams, all listed in the golden's own header with the
+adjudication for each. The -9 is 3 dialects x 3 lines: table `p1` leaving
+`attached_partition_dropped`, the one table this move removes from an artifact.
+
+What did NOT move is the load-bearing half:
+
+- all 27 recorded op fixtures, byte-identical under all three dialects;
+- every `sha|runtime.json` line - `schema.runtime.json` is rendered by
+  `fold_to_field_defs` and the runtime-metadata projection, neither of which this move
+  touches, and the hash says so rather than the argument;
+- every `constraint`, `index`, `partition_by`, `schema` and `options` line on every
+  stream.
+
+Per-field AND whole-artifact, because neither substitutes for the other: the per-field
+lines say WHICH field moved, the two hashes say nothing else did.
+
+### The frozen constants, and the one that fell
+
+`fold_projection_equality` retires the `authoring_tables` leg with the walker it compared
+against, exactly as consumer 1 retired `runtime_metadata`: comparing the projection to
+itself is not evidence. `PROJECTIONS` goes 3 -> 2.
+
+    EQUAL_COMPARISONS       2037 -> 1360   (-677)
+    DIFFERING_COMPARISONS     12 -> 6      (-6)
+    BOTH_REFUSED             392 -> 392    (unchanged)
+    FOLD_REFUSED             196 -> 0
+
+Every leg measures the same 879 prefixes, so a leg's four counters always sum to 879:
+
+    snapshot          683 equal    0 differ   196 both-refused    0 fold-refused
+    field_defs        677 equal    6 differ   196 both-refused    0 fold-refused
+    authoring_tables  677 equal    6 differ     0 both-refused  196 fold-refused   RETIRED
+    runtime_metadata  683 equal    0 differ     0 both-refused  196 fold-refused   RETIRED (consumer 1)
+
+That accounts for the fall exactly: -677 is this leg's equal share, -6 is its three
+`DIVERGENCES` keys at two comparisons each, and the 196 leaves `FOLD_REFUSED` rather than
+moving into `BOTH_REFUSED` - which is why `BOTH_REFUSED` does not move. A leg that had
+contributed there would have shown up as a fall in that number too.
+
+**`FOLD_REFUSED` reaching 0 is not evidence that the fold refuses less.** It is evidence
+that the last walker whose answer could contradict a refusal is gone. Those are different
+claims and the constants cannot tell them apart, so the constant is PINNED at zero rather
+than deleted - a return to non-zero means the fold started refusing something a surviving
+walker still answers - and a new leg-independent test states the thing the counters only
+imply: `the_folds_refusal_set_is_the_catalog_replays_refusal_set` asserts, per prefix and
+per dialect over the whole corpus, that `single_fold::fold` errors exactly when
+`fold_ops` errors. `fold` calls `fold_ops_onto` first, so its refusal set is a superset by
+construction; equality is the assertion that `AuthoredState::advance`'s three fallible
+sites add nothing. Measured: 196 refused, both sides, with a floor of 500 accepted so the
+check cannot pass by refusing everything.
+
+The corpus itself did not narrow, and that is checked rather than argued: `STEMS`,
+`STREAMS` and `CASES` are untouched, `measured.len()` is still asserted equal to
+`(STEMS + STREAMS + CASES) * DIALECTS * PROJECTIONS`, and `TABLES_PROBED_PER_FIELD` -
+which sweeps `corpus_streams()` and does not read `PROJECTIONS` at all - is still 97.
+
+### The differential corpus: the last answer with no coherence gate is gone
+
+`Walker::Ato` is now driven through `FoldedSchema::project_authoring_tables`, one fold
+feeding it and `Rmo` together. Two consequences, both recorded in the file:
+
+- **18 REACH cells move `S` -> `R`**, six variants across three dialects:
+  `alterPrimaryKey`, `attachPartition`, `dropPartition`, `dropSequence`, `dropView`,
+  `synchronizeIdentity`. Two of them have arms in `AuthoredState::advance`; the other
+  four can make the catalog replay refuse, and a refusal is a changed answer. The ATO
+  column is now identical to the RMO column, which is what "two projections of one
+  traversal" predicts.
+- **13 ROWS move `DIVERGENT ... ATO={...}` -> `AGREED refused`**, and the three constants
+  that named them (`ONLY_THE_FOLD_BACKED_WALKERS_FAIL_CLOSED`, `PG_ONLY_TABLE_LEVEL_CHECK`,
+  `MYSQL_HAS_NO_EXPRESSION_OR_PARTIAL_INDEX`) are gone with them. `ROWS.len()` is
+  UNCHANGED at 114, which is the check that this was a reclassification and not a corpus
+  that lost 13 cases; `AGREED` 76 -> 89 and `DIVERGENT` 35 -> 22 are pinned with that
+  reasoning written into the assertion message.
+
+Be honest about what that cost. An `AGREED refused` row cross-checks NOTHING about
+content, and the ATO answer those rows carried was the only content evidence this corpus
+had on those streams off PostgreSQL. It was evidence about an answer no artifact ever
+used - `render_artifacts` returned the fold's error and emitted neither file for exactly
+those streams, before and after - so the corpus lost a measurement of dead output. That is
+a real loss of cross-check and a defensible one, and both halves are in the file so the
+next reader can disagree with the second.
+
+### The over-refusal control, and what it is worth HERE
+
+An equality gate is structurally blind to a refusal change: a stream that starts erroring
+leaves the sample rather than failing a comparison. So `render_artifacts` accepting a
+stream is asserted as a BICONDITIONAL against `fold_to_field_defs` over 59 streams
+(27 fixtures, 20 carriers, 12 refusal probes) x 3 dialects with TWO-SIDED floors -
+`refused >= 20` AND `accepted >= 20`, so refusing everything and accepting everything
+both fail - and both directions panic by name (OVER-REFUSAL and UNDER-REFUSAL).
+Measured and PINNED as well as floored, because a case that quietly stopped being a
+refusal case would still clear a floor: **73 refusals and 104 acceptances** across the
+177 stream/dialect pairs, less the 4 the policy resolution rejects before either side is
+reached.
+
+It is worth LESS for this move than it was for consumer 1, and saying so is the point.
+Consumer 1 introduced the `single_fold::fold` call into `render_artifacts`, so its control
+measured a genuinely new failure surface. That call is already there; this move only
+changes which value is read from it, and `project_authoring_tables` is infallible. The
+expected refusal delta is zero BY CONSTRUCTION. What the control still catches, and no
+other gate here can: the deletion removing the walker's own `flatten_dialectal_ops`
+refusal in a stream where the fold does not make the same call, which reads as
+UNDER-REFUSAL.
+
+### Neuters
+
+Six, each naming what it proves. Every one was applied, measured, and reverted.
+
+- **N1 - the switch itself.** Both arms `AuthoredState::advance` gained over the walker
+  (`Op::AlterPrimaryKey`, `Op::DropPartition`) neutered together, which is what the
+  deleted walker did. Offline gate 10 of 18 RED; live gate 6 of 7 RED. The golden diff
+  came back as EXACTLY the inverse of the hand edit - 72 missing, 81 unexpected against 81
+  removed, 72 added - which proves two things at once: those two arms are the ENTIRE
+  behavioural delta of the move, and the golden's hand edit is exactly that delta and
+  nothing more.
+- **N2 - `Op::AlterPrimaryKey` alone.** The 7 primary-key probes, the two-artifact
+  agreement probe and the golden go RED; both partition probes stay GREEN.
+- **N3 - `Op::DropPartition` alone.** The partition probe and the golden go RED offline;
+  the live partition case goes RED; all five primary-key cases stay GREEN. N2 and N3
+  together separate the two claims.
+- **N4 - the over-refusal control's right-hand side** forced to `Ok`. Reports
+  `fixture:alter_primary_key/Postgres: OVER-REFUSAL`, so the control can fail.
+- **N5 - the per-field reader** made blind (`table_blocks` sees an empty artifact). 14 of
+  18 RED including `the_per_field_reader_is_not_a_broken_instrument`, so every per-field
+  assertion in the file is load-bearing rather than vacuous.
+- **N6 - one carrier stream deleted from the corpus.** The golden's set-and-length
+  comparison goes RED, so a narrowed corpus is a failure rather than a smaller green run.
+
+### What this does NOT prove
+
+- **The composite and drop legs on SQLite and MySQL are pinned, not adjudicated.** Only
+  PostgreSQL runs live here. `alterPrimaryKey` is a dialect-neutral rule in the fold and
+  the offline probes assert all three, which is a consistency argument and not a
+  measurement. No MySQL or SQLite server saw an `alterPrimaryKey` in this change.
+- **Two of the eight moved carrier streams are adjudicated by COMPOSITION, not directly.**
+  `pk_replace_then_renamed` and `pk_replace_then_drop` are compositions of ops each of
+  which IS live-adjudicated; the composed streams themselves were not applied.
+- **The `dropPartition` answer off PostgreSQL is asserted, not measured.** The stream
+  cannot lower off Postgres, so there is no server to ask. The artifact still emits on
+  SQLite and MySQL and this change removes `p1` there too.
+- **Nothing here measures the cost.** `render_artifacts` still runs the structural catalog
+  replay TWICE - once in `single_fold::fold`, once under `fold_to_field_defs`. Consumer 1
+  introduced that and this move does not remove it; collapsing the two is the
+  `fold_ops_onto` extraction the proposal assigns to the LAST consumer.
+- **`AuthoredState::advance`'s remaining arms inherit their coverage.** This move measured
+  the two arms that DIFFER from the deleted walker. The other fifteen are covered by the
+  step 3 byte-for-byte gate on the recorded corpus, which is inherited evidence, not
+  evidence produced here.
+- **The over-refusal control is a regression guard, not a discovery instrument**, for the
+  reason above.
+- **`Status::Consistent` on the 13 reclassified rows means "all four refuse", not "all
+  four agree about content".** Stated in the file; repeated here because the verdict
+  string reads stronger than the fact.
+
+### Gates
+
+fmt 0. clippy `--workspace --all-targets -- -D warnings` 0. `cargo test --workspace
+--exclude zero-migrate-node`: **227 suites, 3,287 passed, 0 failed, 11 ignored**.
+`cargo test -p zero-migrate-node --no-default-features`: 10 suites, 91 passed, 0 failed.
+`pnpm -w build` 0. `pnpm --filter zero-migrate check` 0. `pnpm --filter zero-migrate
+test`: 327 tests, 326 pass, 0 fail, 1 skipped. `pnpm --filter zero-migrate-cli typecheck`
+0. `pnpm --filter zero-migrate-cli test:docs`: 6 tests, 6 pass, 0 skipped. `pnpm --filter
+zero-migrate-node build` 0, rebuilt BEFORE the host suite. `pnpm --filter zero-migrate-cli
+test:host`: 458 tests, 458 pass, 0 fail, **0 skipped**. `FAILED_GATES: none`.
+`checksum_corpus_stability` green, both tests - the wire format did not move.
+
+BASELINE RE-MEASURED on `38f9abc6` in this worktree, with the branch work stashed, and
+run SEQUENTIALLY before the treatment so the two never shared the PostgreSQL instance:
+**225 suites, 3,261 passed, 0 failed, 11 ignored**; node crate 10/91/0/0; `test:host`
+458/458 with 0 skipped; `FAILED_GATES: none`. The brief's `225/3261/0/11` was accurate.
+
+The delta is +2 suites and +26 passed, and it is accounted for EXACTLY rather than
+plausibly: `gen_types_authoring_tables_from_the_fold` contributes 18, 
+`env_db_ts_matches_the_server_pg` contributes 7, and
+`the_folds_refusal_set_is_the_catalog_replays_refusal_set` contributes 1 inside the
+existing lib-test suite. 18 + 7 + 1 = 26. `ignored` is 11 on both sides. The counting
+parser was demonstrated to return nonzero before it was trusted (it reported
+`ignored=7` on a partial baseline log while the run was still going), which is the guard
+against the `test result: ok.` field-offset bug that has produced two plausible zeros in
+this session.
+
+### Instrument failures of my own, all three caught, all three failing toward green
+
+1. **The gate script ran outside the devShell.** `cargo` is not on the ambient PATH here;
+   `pnpm` is. The first invocation of the worktree-local gate runner reported `EXIT=127`
+   on all four cargo gates and went on to run the JS half normally. Read only at the tail,
+   that is a run where the Rust suite silently did not execute. Fixed by wrapping the
+   whole script in `nix develop --command bash ...`, which is what the second and third
+   runs did.
+2. **A capture harness left in the same test binary as the golden comparison.** The golden
+   was captured from the old path by a temporary `zz_capture_golden` test in the gate
+   file. After the production switch, `cargo test` ran that test AGAIN in the same binary,
+   it rewrote the golden from the NEW path, and the comparison then passed against it:
+   19 of 19 green, self-blessed, and green for exactly the wrong reason. Caught by reading
+   the pass list rather than the summary line - `zz_capture_golden ... ok` should not have
+   been in it. The harness is deleted, the pre-switch capture was restored from a copy
+   made before the switch, and the committed golden was rebuilt by applying the
+   adjudicated diff to it. There is deliberately no re-bless affordance in the shipped
+   file.
+3. **Placeholder numbers written into a file whose job is to state measured ones.** The
+   four `fold_projection_equality` constants were filled in with guesses before the
+   measurement was run. A reviewer read the file in that state and built a blocking
+   argument on a `BOTH_REFUSED` rise (392 -> 588) that never existed in any run - the
+   measured value is 392, unchanged. The guesses were individually plausible and jointly
+   impossible, which is the tell. Cost: one round trip. A constant that is going to be
+   measured should be left obviously wrong (or absent) until it is.
+
+### Servers left as found
+
+PostgreSQL `pg_postmaster_start_time()` = `2026-08-17 11:43:42.89391+00`, unchanged across
+this session and identical to the value the previous entry recorded, so the shared
+instance never restarted and never entered recovery. This change ADDS a live test file
+that creates and drops a schema per case (`env_db_ts_pg_<pid>_<n>` plus its meta schema,
+armed with `support::SchemaGuard` so an unwind still drops them): 128 non-system schemas
+remain and NONE matches `env_db_ts` or `project_env`, so all 7 cases cleaned up after
+themselves across the RED run, the three neuter runs and the GREEN run. `ZERO_MIGRATE_MYSQL_URL`
+was set for every gate run and the MySQL legs ran; no MySQL client is in the devShell, so
+MySQL was counted only by the suite's own guards.
