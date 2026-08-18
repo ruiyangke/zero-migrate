@@ -29268,3 +29268,286 @@ concurrently running agents. A backup of `fold.rs` written there was overwritten
 another agent's file of the same name between the copy and the diff, which would have
 read as "my edits vanished" if it had been trusted. Backups taken for a self-check need
 an agent-unique name, and `git diff` is the reliable check.
+
+## A rename moved the column and left its indexes and triggers naming the old one
+
+### The lead, and the part of it that was wrong
+
+Handed over: the fourth carrier of one bug shape. The 12-step rebuild captures a table's
+dependents from `sqlite_master` and replays them VERBATIM; the only replay-skip is for
+columns the rebuild DROPS; a rename's `from` is not a drop; so on the fold-seeded leg a
+captured index naming the old column is replayed against the rebuilt table and the
+migration fails closed. All of that holds and was re-measured rather than read. Through
+the real lowering of a real `renameColumn` against the live shape
+`engine::refresh_historical_live` builds, applied through `SqliteBackend`:
+
+```text
+sqlite rebuild of 'parts' aborted: the dependent index 'parts_qty_idx' could not be
+  recreated after the rebuild (no such column: "qty" ... in CREATE INDEX
+  "parts_qty_idx" ON "parts" ("qty") at offset 41); the original table and its
+  dependents are intact
+```
+
+What was wrong is the brief's second instruction: "Triggers too, or an explicit statement
+of why not. A trigger body naming the renamed column has the same problem and a much
+harder parse." The parse IS harder. The PROBLEM is not the same, and the difference runs
+the opposite way from the one the instruction assumes.
+
+### The two halves are not the same failure, and only one of them is loud
+
+Measured on the hardened connection this crate ships, in
+`sqlite_refuses_a_stale_index_and_silently_stores_a_stale_trigger`, by standing the
+rebuild's own sequence up by hand (drop the table, recreate it with the column renamed,
+replay the captured DDL):
+
+```text
+CREATE INDEX "t_qty_idx" ON t (qty)              -> REFUSED: no such column: qty
+CREATE TRIGGER t_qty_audit AFTER UPDATE OF qty   -> ACCEPTED. Stored. Nothing reported.
+  ON t WHEN NEW.qty > OLD.qty BEGIN ... END
+UPDATE t SET amount = 5 WHERE id = 'x'           -> ACCEPTED, and the audit table is EMPTY
+```
+
+SQLite resolves an index's key list against the table at CREATE INDEX time. It resolves
+NOTHING in a trigger - not the `UPDATE OF` list, not the `WHEN` clause, not the body -
+until the trigger fires. So the index half fails closed, which is the abort the report
+recorded, and the trigger half is a silently WRONG dependent: it is stored under the
+right name, it looks correct in `sqlite_schema` at a glance, and it can never match
+again. The update it was written to observe succeeds and writes nothing.
+
+That is the answer to the brief's fifth instruction, which asked whether any path can
+produce a wrong result rather than an error, and pointed at UNIQUE indexes. The unique
+index is not where it was. A UNIQUE index over the wrong column would be silent IF a text
+rewrite produced one, but nothing in the shipped code rewrites index text, so the shipped
+defect on that path is the loud one. The silent path is the trigger, and it was already
+shipping.
+
+And the stale trigger does not stay local. `ALTER TABLE ... RENAME COLUMN` makes SQLite
+reparse the WHOLE schema, so one staled trigger refuses that statement for every table in
+the database:
+
+```text
+ALTER TABLE unrelated RENAME COLUMN m TO n  -> error in trigger t_qty_audit:
+                                                no such column: NEW.qty
+```
+
+`unrelated` shares nothing with the rebuilt table. That is the CATALOG rename leg -
+`SqliteRebuildSpec::column_renames` - disabled wholesale by one earlier fold-seeded
+rename that appeared to succeed. The two defects compound: the loud one blocks a rename
+today, the silent one poisons every rename afterwards. (This also cost a measurement: the
+first probe run left the stale trigger in the schema and every later probe in the same
+database reported `error in trigger tg` instead of its own answer. Each question needed
+its own database.)
+
+### Why there is no third rewrite helper
+
+The three earlier fixes each rewrote rendered SQL with a helper chosen for that text's
+grammar: `rename_quoted_column_in_sql` walks quoted runs, `rename_constraint_definition_column`
+re-renders only a leading column group. The brief asked which of the two fits a captured
+`CREATE INDEX`, or whether to write a third. Neither, and no.
+
+A captured `CREATE INDEX` is a third grammar - keys bare or quoted, keys that are
+EXPRESSIONS, `COLLATE`, `ASC`/`DESC`, and a trailing partial `WHERE` that names the column
+outside the key list entirely. A captured `CREATE TRIGGER` is a fourth, and it is a whole
+statement body with `OLD.`/`NEW.` references. Writing both correctly is a parser; writing
+either almost correctly is the silent failure measured above. The brief's fourth
+instruction - "handle or refuse explicitly, a silently un-renamed predicate is a wrong
+index" - is exactly right, and it applies to a rewrite that this fix therefore does not
+perform.
+
+The repair delegates to SQLite's own parser, at the one point in the rebuild where the
+whole schema is still self-consistent: BEFORE the capture, and before anything is
+dropped, `run_rebuild_steps` runs `ALTER TABLE <t> RENAME COLUMN <from> TO <to>` on the
+LIVE table. SQLite then rewrites the table body, every index, every trigger, every view,
+and every OTHER table's `REFERENCES` clause in one consistent step. The capture reads DDL
+that already names the new column and the replay stays VERBATIM - which is the property
+the module was built around and which a rewrite would have spent.
+
+Two facts about that rewrite were measured rather than assumed, because the rebuild runs
+it inside its own `foreign_keys = OFF` window:
+
+```text
+PRAGMA foreign_keys = OFF; ALTER TABLE p RENAME COLUMN v TO w
+  -> child DDL becomes: CREATE TABLE c (..., fk TEXT REFERENCES p(w))
+PRAGMA foreign_keys = ON;  same rename
+  -> identical
+CREATE VIEW vv AS SELECT a FROM v1; ALTER TABLE v1 RENAME COLUMN a TO z
+  -> view DDL becomes: CREATE VIEW vv AS SELECT z FROM v1
+```
+
+So the FK-off window does not narrow the rewrite, and views - which the rebuild never
+captures because they are not dropped with the table - follow the rename too. That is
+strictly more than the old path did: before this change a view over a renamed column was
+left pointing at a name that no longer existed, silently.
+
+This is the SAME delegation the stored-shape leg already makes, at the other end of the
+rebuild. That leg creates the table under the OLD name and renames LAST, after the
+replay; this leg has the new name baked into `new_table_create` and must rename FIRST.
+The module header now says so in one place.
+
+### Where the rename is read from, and why the other legs are inert
+
+`SqliteRebuildSpec` states a rename in one place the executor can read on EVERY leg: the
+copy mapping. `copy_columns` is `(dest, src)`, and the planner emits a pair whose `dest`
+differs from its `src` for exactly one reason - the data is moving from an old column
+name into a new one (`declarative.rs`, the `else` branch that pushes `(dest, from)` for a
+`rename_to_from` hit). `implied_column_renames` reads that and nothing else.
+
+No field was added to the spec, and `column_renames` is deliberately NOT the source: it is
+populated as `pure_rename.filter(|_| preserve_stored_shape)`, and that leg's copy mapping
+is pure identity because the stored body still carries the pre-rename column. The two are
+complementary and never both armed - which is also why this step is inert on the
+constraint rebuild and the primary-key rebuild, whose copy mappings are identity as well.
+Three unit tests pin the derivation, including that a pair differing only in ASCII case is
+NOT a rename (SQLite resolves identifiers case-insensitively, so the captured DDL replays
+fine and a `RENAME COLUMN` would be churn).
+
+### The one thing the pre-rename must decline
+
+SQLite refuses a rename onto a name the table still carries, measured:
+
+```text
+CREATE TABLE probe (qty INTEGER, amount INTEGER);
+ALTER TABLE probe RENAME COLUMN qty TO amount
+  -> error in table probe after rename: duplicate column name: amount
+```
+
+A rebuild MAY legitimately move a column onto the name of one it discards, and such a
+rebuild applies today. Issuing the pre-rename blindly would have turned a working
+migration into a failure - a regression introduced by the fix, on a shape the brief did
+not name. So `rename_live_columns` reads `PRAGMA main.table_info` first and applies a
+rename only when the live table still has the `from` column and does NOT already have the
+`to` column; a declined pair leaves the rebuild behaving exactly as it did before this
+step existed (the copy still reads the original source column, and a dependent naming it
+still fails closed). Declines are re-tried while any rename makes progress, so an ordering
+that frees a name for a later pair resolves rather than being declined for good.
+`a_rename_onto_a_name_the_live_table_still_carries_is_declined_not_forced` measures both
+the raw SQLite refusal and the rebuild that would have hit it, and asserts the data still
+lands: the surviving `amount` holds the old `qty` value, 7, not the discarded 99.
+
+`a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_survivor` pins the
+interaction with the existing replay-skip: the renamed column's index survives over the
+new name, the dropped column's index is skipped rather than replayed into a failure. That
+ordering is sound because `dropped_columns` is matched against post-rename DDL and a
+dropped column's name is not one the rename is allowed to move ONTO - the decline above is
+what makes that true rather than lucky.
+
+### The catalog leg, pinned
+
+`a_catalog_sourced_rename_of_an_indexed_column_still_replays_the_stored_body` lowers the
+same rename against a real `snapshot_schema_sqlite()` read and asserts three things
+before applying: `column_renames` is still `[("qty","amount")]`, the copy mapping is
+still pure identity (so `implied_column_renames` derives nothing from it), and the emitted
+CREATE is still the stored body naming the PRE-rename column. Then it applies and checks
+`PRAGMA index_info` for both the plain and the unique index. It passes identically with
+the fix on and off, which is what makes it a boundary pin rather than a second copy of the
+fix's own test. The fixture carries all four indexes, so a pre-rename leaking into this leg
+would surface as a duplicate-column error or a stale index, not as an argument.
+
+### Behaviour, not spelling
+
+Every green assertion is a database answer:
+
+- `PRAGMA index_info(parts_qty_idx)` reports `amount`.
+- The rebuilt UNIQUE index REJECTS a duplicate written to `amount`, ACCEPTS a distinct
+  value, and ACCEPTS a duplicate `label` - the third is what pins WHICH column the
+  uniqueness is on, since an index quietly rebuilt over `label` would have inverted the
+  last two.
+- `EXPLAIN QUERY PLAN` uses the rebuilt partial index for a query matching its predicate
+  over the post-rename column, and the query returns exactly the row inside `amount > 0`.
+- The expression index is still an EXPRESSION key (`index_info` reports a NULL name, not a
+  flattened column reference).
+- The rebuilt trigger FIRES on `UPDATE ... SET amount = 5` and writes 5 to the audit
+  table, the same trigger that wrote nothing before the fix.
+
+DDL text is compared only where the text is the point, and then only from the first `ON`
+onwards. The index NAME is excluded on purpose: it was derived from the pre-rename column
+(`parts_qty_idx`) and SQLite does not rename an index when a column moves, so it
+legitimately keeps saying `qty`. Asserting on the whole statement caught that and reported
+it as a failure at first - a false refutation from a broken instrument, and the third
+assertion in this session that had to be narrowed to what it actually measures (the other
+two: an index-name ordering taken from `ORDER BY name` without checking what `ORDER BY
+name` returns, and a cross-dialect test that asserted MySQL lowers a live rename).
+
+### The fixture correction the brief did not have: an injected table cannot get here
+
+The first fixture copied the FK fix's charter, which carries a mandatory `[[inject]]`, and
+the rename would not lower at all:
+
+```text
+invalid descriptor: sqlite rebuild emit for 'parts': reserved system field name:
+  Field name 'id' is reserved by the active table-injection policy.
+```
+
+That is a SEPARATE defect, in `render_create_table_sqlite_rebuild`, not in the executor
+this work owns. The function has two arms. A table with a generated column, an inline
+CHECK or a case-insensitive text column goes through the SNAPSHOT renderer; an ordinary
+table goes through the SDK-VALUE arm, which re-emits from `LiveSchema::sqlite_schemas` -
+the map `fold_to_field_defs` builds, exactly as `engine::refresh_historical_live` does in
+production - and the emitter rejects its own input because that map contains the injected
+columns.
+
+It narrows the reported blast radius, so it is recorded rather than left as fixture
+trivia. A fold-seeded rename of an INJECTED, ordinary table never reaches the executor at
+all: it fails at LOWERING, before any index replay. The index defect is reachable on
+exactly two shapes - an injected table carrying one of the three snapshot-arm facets
+(which is what all three earlier fixtures happened to have, by way of an enum, a generated
+expression, an inline CHECK), and an un-injected table, which is what this file's fixture
+is. `an_injected_table_cannot_reach_the_sdk_value_rebuild_arm_at_all` asserts the CURRENT
+refusal so the pin inverts when someone fixes the emit.
+
+### The other dialects
+
+`neither_postgres_nor_mysql_lowers_a_rename_into_a_sqlite_rebuild` lowers the SAME rename
+IR under each dialect. PostgreSQL lowers it natively and emits no rebuild. MySQL declines
+to lower a live rename at all (`renameColumn is render-only for MySQL, not live-rendered`)
+- measured, not assumed; the first version of the test asserted a successful lowering and
+was wrong. Both backends' `rebuild_one` then refuses a rebuild outright as a routing bug,
+so the changed code is unreachable from either. The live-PostgreSQL rename tests
+(`fold_rename_column_index_cascade_pg`, `fold_rename_column_stale_index_body_pg`) were run
+against the server and pass.
+
+### Neuter
+
+With `rename_live_columns` returning `Ok(Vec::new())` and nothing else changed:
+
+```text
+  rename_column_indexed_sqlite.rs
+      a_fold_seeded_rename_of_an_indexed_column_applies                        FAILED
+          the dependent index 'parts_qty_idx' could not be recreated
+      the_rebuilt_unique_index_still_enforces_over_the_renamed_column          FAILED
+          same abort
+      a_partial_predicate_and_an_expression_key_follow_the_rename              FAILED
+          same abort
+      a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_survivor FAILED
+          same abort
+      a_trigger_body_follows_the_rename_too                                    FAILED
+          CREATE TRIGGER ... AFTER UPDATE OF qty ... NEW.qty  -- applied, and stale
+```
+
+Five of ten. The other five - the catalog-leg replay, the decline, the SQLite semantics
+pin, the dialect routing, and the injected-table pin - pass with the fix on and off, which
+is what they are for. The trigger arm is the informative one: it is the only neutered
+failure whose migration SUCCEEDS.
+
+### Gates
+
+```text
+cargo fmt --all -- --check                                    0
+cargo clippy --workspace --all-targets -- -D warnings         0
+cargo test --workspace --exclude zero-migrate-node            0
+cargo test -p zero-migrate-node --no-default-features         0
+pnpm -w build                                                 0
+pnpm --filter zero-migrate check                              0
+pnpm --filter zero-migrate test                               0   (326 pass, 1 skip)
+pnpm --filter zero-migrate-cli typecheck                      0
+pnpm --filter zero-migrate-cli test:docs                      0
+pnpm --filter zero-migrate-node build                         0   (rebuilt before the host run)
+pnpm --filter zero-migrate-cli test:host                      0   (458 pass, 0 SKIPPED)
+```
+
+Both DSNs were exported for the workspace and the host gates, and the host skip count is
+0. `f664_scaling` did NOT fire this session - it passed in the workspace run at ordinary
+load, so there is no flake to attribute.
+
+Disk was checked before each gate run: 144G free at the start, 92G before the host suite,
+never near the 15G stop-line.
