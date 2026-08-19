@@ -34764,3 +34764,149 @@ that neuter would have read as "caught".
   leaked schema was found on the server afterwards. Recorded rather than dismissed,
   because an intermittent red here is either a real race in the apply/introspect
   sequence or an artifact of that one run, and the evidence does not separate them.
+
+## The dialect table now answers a THIRD server, and MySQL's 92 rows disagree eight times
+
+`dialect_matrix/dialect_conformance_live.rs` covered PostgreSQL and SQLite. This entry
+records the MySQL leg: what it measured, which disagreements were the FIXTURE and which
+were the ENGINE, the one `ServerError` it found and the gate that answers it, and the
+two false claims in the file's own `MYSQL_TODO` that a MySQL author would have read first.
+
+### The brief's first item was already done, and the file said the opposite
+
+`MYSQL_TODO` item 1 and the module doc both asserted that `ZERO_MIGRATE_MYSQL_URL`
+"occurs in exactly one file in `crates/`, and it is `src/apply/backend/mysql/mod.rs`, not
+a test", and that a MySQL author would have to build a DSN env var, a skip macro and a
+`MysqlDevSession` from scratch. MEASURED at 9f65095a: it occurs in NINE files under
+`crates/`, SEVEN of them under `tests/` (six once the stale sentence itself is
+discounted), and `tests/support/mysql.rs` already ships `MYSQL_URL_ENV`,
+`mysql_url()`, `skip_if_no_mysql!`, `quote_ident`, `database_token`, `DatabaseGuard` and a
+`MysqlDevSession` that implements `driver::SqlSession`. Three live MySQL suites already
+ride it. Item 1 was DONE and item 4 ("`expected_outcome` needs nothing") was free; only
+items 2 and 3 were work.
+
+A doc asserting a false world-state on the very constant its reader opens sends that
+reader to rebuild infrastructure that exists, so the correction ships in the same commit
+as the leg, and the constant is renamed `MYSQL_LEG` because a TODO list whose items are
+done is not a TODO list.
+
+### What was measured
+
+Every one of the 92 `(op-kind, variant)` rows on **MySQL 8.4.11** (127.0.0.1:3306),
+driven through the same production path as the other two columns, with engine-emitted
+SQL only. The per-row isolation unit is a throwaway DATABASE plus the `_migrations` meta
+database the engine creates beside it, both reclaimed by `support::mysql::DatabaseGuard`;
+the `pg_namespace` census becomes an `information_schema.SCHEMATA` census sorted by the
+SAME `probe_owner`, so a sibling agent's live probe on the shared MySQL instance still
+reads as in-flight rather than as a leak.
+
+```text
+                Applied  RefusedByCapability  RefusedByPolicy  ServerError  EngineError
+  postgres         73            14                  0              0            5
+  sqlite           30            58                  0              0            4
+  mysql            28            61                  0              0            3
+```
+
+**276 of 276 rows executed. Zero were inexecutable**, so `NOT_EXECUTABLE` stays empty
+across three dialects. The MySQL leg takes ~81s wall clock, one database round-trip per
+row, against a server shared with two other agents and the TypeScript host suite.
+
+The PostgreSQL and SQLite rows above are NOT the ones quoted in the earlier entry
+(`72/14/1/0/5` and `29/58/0/1/4`). Measured on a PRISTINE 9f65095a with the MySQL work
+stashed, they are already `73/14/0/0/5` and `30/58/0/0/4`: the PostgreSQL
+`RefusedByPolicy` and the SQLite `ServerError` are both gone, fixed by the fold and lower
+commits that landed between the two runs. The older table is stale, not contradicted, and
+the MySQL work moves neither column - the stash comparison is what establishes that.
+
+### 28 Applied, against a prior of 16
+
+`docs/proposals/backend-conformance.md` predicts "roughly 16/36 MySQL reaching `Applied`"
+and warns that anything better means the instrument is wrong. 28 is better, and the gap
+has the SAME cause already recorded for PostgreSQL's 73-against-67: F877 counted tokens
+observed executing across the EXISTING suites, while this layer drives every token
+deliberately with a prelude built for it. Note also that the proposal's denominators
+(80 PG, 43 SQLite, 36 MySQL) are F877's token inventory, not this corpus - every column
+here has 92 rows. The `36` that does appear in the sidecar is a coincidence: 34 `portable`
+plus 2 `transparentDegradable` MySQL cells are exactly the 36 rows REQUIRED to apply, and
+28 of those 36 do.
+
+### The prelude review was the work, and it found no new class of problem
+
+Eight rows demoted to `NotExecutable` on the first run and two more died on the server.
+Every one was the FIXTURE naming a referent in a shape MySQL cannot build, and all were
+repaired in `prelude` rather than pinned:
+
+1. **MySQL cannot key a TEXT column without a prefix length** (error 1170), and the
+   fixture's `a` was `text`. Seven preludes key it - `alterPrimaryKey`'s `id`, the unique
+   constraint `dropConstraint` drops, the index `dropIndex` drops, the `other_col` the
+   three FK rows reference, and the unique index `insert/onConflictDoUpdate` needs. On
+   MySQL those columns are now a bounded `string({length: 24})`. This is the same class
+   of choice the SQLite leg already makes when it types `alterPrimaryKey`'s `id` as TEXT
+   to avoid provoking the rowid-alias refusal: pick the type that does not provoke a
+   refusal the row is not asking about.
+2. **MySQL forbids a trigger body that returns a result set**, and the SQLite prelude's
+   trigger body is a bare `SELECT x`. `dropTrigger`'s MySQL prelude now builds a second
+   table and a `DELETE`-bodied trigger, which is legal because a MySQL trigger may not
+   touch the table it is attached to. This is the third leg of the axis the file already
+   split two ways (a PostgreSQL trigger EXECUTES A FUNCTION; a SQLite trigger has a BODY).
+
+Nothing else was needed. In particular MySQL has **no** analogue of the SQLite
+`sqlite_schemas` requirement: `engine::refresh_historical_live` special-cases SQLite only,
+and a catalog-only `LiveSchema` is sufficient on MySQL. That was checked before any row
+was called a disagreement.
+
+### An engine finding: a MySQL trigger body that returns a result set died mid-apply
+
+`createTrigger/bodySimple` declares `portable` on MySQL. Its representative's body is one
+`SELECT <expr>` statement. The plan cleared validate, cleared the guard, cleared lower,
+and MySQL answered `[0A000] Not allowed to return a result set from a trigger` DURING
+apply. That is `Outcome::ServerError`, the one class this layer exists to catch, and it
+is a conformance failure on every disposition - so it was not absorbed by an allowance.
+
+`render/renderer.rs` now refuses `TriggerStmt::Select` on MySQL at lower, beside
+`RAISE IGNORE`, the other trigger statement MySQL cannot render. The refusal is NOT a
+`dialect-support.toml` cell, and that distinction is the `dropConstraint/base` lesson
+applied a second time: MySQL body triggers WORK - an `INSERT`/`UPDATE`/`DELETE` body
+applies and fires - so declaring the `bodySimple` cell unsupported would refuse all of
+them to reject the one statement MySQL cannot host. A refusal measured from ONE
+representative bounds what that SHAPE does, not what the OP does.
+
+`tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs` pins it with two
+over-refusal controls: a `DELETE`-bodied MySQL trigger applies AND is proven to FIRE (the
+insert into `t` empties `audit`), and SQLite still accepts a `SELECT` body. Its RED, before
+the gate, was the live server's own sentence.
+
+### An engine finding NOT acted on: the TEXT-key gate covers one lane and not its sibling
+
+Measured while the fixture still typed `a` as `text`. The engine REFUSES a key over a
+MySQL TEXT column at lower when the key is written inside `createTable.indexes` or a
+`createTable` constraint - "createTable.indexes keys t.id, which renders as MySQL TEXT
+storage; MySQL refuses a key over a TEXT or BLOB column with no prefix length". It does
+NOT refuse the same key from a STANDALONE `createIndex` or `addConstraint(unique)`. Those
+two reached the server and died there with `[42000] BLOB/TEXT column 'a' used in key
+specification without a key length`.
+
+Bounding the fixture's column is the FIXTURE half of the answer and is what the rows were
+actually asking about, so it was done. The ungated standalone lane is an engine hole with
+the same shape as the trigger one and is recorded here rather than fixed: it is a second
+capability gate, not part of building the instrument, and it deserves its own RED against
+a live server plus its own over-refusal control.
+
+### Eight allowances, seven of them shapes the other two columns already record
+
+`dropIndex/base` (representative omits its owning table), `createPartition/base`,
+`dropPartition/base` and `createTable/partitionedCollapse` (partition collapse is a
+whole-recording property a single-op representative cannot satisfy), `insert/base` and
+`insert/onConflictDoUpdate` (`rows: []`), plus `createTrigger/bodySimple` above. The third
+dialect found no NEW family of degenerate representative, which is itself a result about
+the corpus rather than about MySQL.
+
+The eighth is the one **(B) DECLARATION ERROR** this column found. `setColumnType/base`
+declares `portable` on MySQL and `render/lower.rs`'s `refuse_mysql_alter_column` refuses
+it UNCONDITIONALLY - no payload reaches the renderer. Its siblings on the same gate
+(`setColumnNotNull`, `dropColumnNotNull`) are already declared `unsupported`, and
+`op_support.rs::alter_column_reason` already returns the MySQL arm, so the flip would not
+ship the internal placeholder either. Unconditional is exactly the criterion
+`expectations.rs` sets for a SAFE flip. It is recorded rather than performed because a
+cell flip means regenerating the Rust AND the TypeScript dialect tables and re-gating the
+host suite - a change to the engine's declared capability, not to this instrument.
