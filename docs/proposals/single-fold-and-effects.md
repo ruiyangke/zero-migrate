@@ -490,9 +490,64 @@ the model carries" (a property of the model's closure). Concretely:
 
 | variant | today | with effects |
 |---|---|---|
-| `TableExists` and four siblings | never hoisted | answered exactly at `state_at(N)` |
+| `TableExists`, `ColumnExists` | never hoisted | answered exactly at `state_at(N)` |
+| `TableNotExists`, `ColumnNotExists` | never hoisted | **NOT answerable — see the correction below** |
+| `RowCount` | never hoisted | UNRESOLVED — see the correction below |
 | the two obstruction variants | hoisted behind a SQL-parse whitelist | hoisted behind an op-derived effect test, live query still required |
 | `SqlBoolean` | never hoisted | never hoisted |
+
+#### CORRECTION: two of the five fail in the direction this section never considers
+
+The row above originally read "`TableExists` and four siblings … answered exactly
+at `state_at(N)`". That is wrong for the two NEGATIVE variants, and the argument
+against it is one this same section already makes two bullets earlier.
+
+The justification given for all five — repeated verbatim in the shipped module at
+`apply/plan_precondition.rs:57-61` — is that they "range over objects the model
+NAMES". That holds for `TableExists` and `ColumnExists`: the named object is
+either in the model or it is not, and the prefix delta is exact.
+
+It does NOT hold for `TableNotExists` and `ColumnNotExists`. A non-existence
+claim does not range over an object the model names; it ranges over the model's
+COMPLEMENT — over everything the model does not carry. And this section has
+already established that the model's complement is unbounded, in its own
+treatment of the obstruction assertions: the relevant objects "include objects
+the engine never created: a DBA's view, another application's foreign key, an
+inheritance child." The same objects that make a blocker set unenumerable make
+an absence claim unverifiable. `live_at_0` records what introspection FOUND, and
+absence from an introspection is not absence from a database.
+
+So `state_at(N)` will report `TableNotExists` SATISFIED for a table that exists.
+That is a WRONG ACCEPT: a precondition met at preflight against a database where
+it is false.
+
+**Why this matters more than it first appears.** Every risk this proposal
+attaches to step 6 runs in one direction — over-refusal. Step 6 is "the only step
+that … can refuse a plan that previously applied", which is why it is last and
+behind a flag. Under-refusal is not discussed anywhere. But under-refusal is the
+direction these two variants fail in, and it is strictly worse than the status
+quo: today the assertion is checked at its own step and the plan stops cleanly;
+hoisted and wrongly satisfied, the plan is ACCEPTED at preflight and then dies
+partway through applying. That is precisely the failure shape
+`backend-conformance.md` classifies as `ServerError` and calls a conformance
+failure on every disposition — "a migration that clears validate and preview and
+then dies partway through applying". Step 6 as specified would manufacture that
+shape from a case the engine currently refuses cleanly.
+
+**`RowCount` is a third candidate and is left UNRESOLVED here rather than
+asserted.** It ranges over ROWS, which a schema model does not carry at all, and
+which application traffic changes without any op the fold can see. The two
+negative variants above are settled; this one needs its own measurement before
+anyone claims either way. Recording the question rather than guessing the answer.
+
+**What this does not change.** `state_at(N)` itself is not impugned — the fold
+and the prefix delta are exact over what the model carries. What is wrong is the
+inference from "exact over the model" to "exact over the database", for the two
+assertions whose subject is the part of the database the model omits. Step 6
+remains possible for `TableExists` and `ColumnExists`. For the negative variants
+it needs either a live query (which is what step 0 already does) or an explicit,
+declared scope in which absence-from-model is DEFINED to mean absence-in-database
+— and that scope would be a new guarantee the engine does not currently make.
 
 So the honest answer to the brief is: the effect model does not let you delete
 `answerability()`. It lets you delete `sql_clears_no_obstruction`, the
