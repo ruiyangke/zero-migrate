@@ -34661,7 +34661,22 @@ residue the fold does not model.
 
 So the finding is about the PROPOSAL, not about a component. The identity
 `state_at(N) = live_at_0 (+) fold(effects[0..N])` is not universal, and section G's check
-would fail on any plan containing a PostgreSQL column rename. That had never surfaced
+would fail on any plan containing a PostgreSQL column rename.
+
+**And the consequence is not confined to the check.** Section E promises that the five
+existence assertions - `TableExists`, `TableNotExists`, `ColumnExists`,
+`ColumnNotExists`, `RowCount` - "range over objects the model NAMES... `state_at(N)`
+answers them precisely", and the table at line 493 flips all five from "never hoisted" to
+"answered exactly at `state_at(N)`". Across a PostgreSQL column rename two of those five
+answer WRONG, and in the unsafe direction. At prefix 1 of the case measured here,
+`state_at` says `person.nick` does not exist and the server still has it. A hoisted
+`ColumnNotExists("nick")` would therefore be SATISFIED at preflight against a database
+where it is false - a wrong ACCEPT, not the wrong refusal the effect model's refusal
+direction is tuned to avoid. `ColumnExists("nick")` fails the mirror way. Anything built
+on step 6 needs to either exclude renamed columns from the hoist or wait for the contract
+deploy; this file is the measurement, not the fix.
+
+That had never surfaced
 because every existing live rename test drives the rename with native
 `ALTER TABLE ... RENAME COLUMN` specifically to avoid it - `fold_rename_column_index_cascade_pg.rs:75-84`
 says so in as many words. Routing around it again would have left a reader believing the
