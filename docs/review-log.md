@@ -34602,3 +34602,150 @@ measured it. It must not move, and it did not.
   from `mysql_collation_clause`, which this change made the single source of it. Whether
   accent-sensitivity is the right default for a case-sensitivity promise is a question
   this entry did not open.
+## `state_at(N)` meets a server for the first time, and the identity turns out to have an op-shaped exception
+
+`single-fold-and-effects.md:611-615` names this check itself: "For a plan of N steps,
+apply steps 0..N-1 for real, introspect, and assert the introspected model equals
+`state_at(N)`. This is the only check that proves the effect model rather than asserting
+it." `crates/zero-migrate/tests/fold_live/state_at_matches_the_server_pg.rs` does that.
+
+### What was actually missing, after two corrections to the brief and one to my own doc
+
+`state_at` was NOT unexercised - `render::fold::effects` carries two unit tests pinning
+`state_at(0) = live_at_0` and the prefix property. What it had was no caller. Verified by
+grep over the whole repo: `state_at` appears in `src/` only inside its own module (the
+two other hits are prose in `zero-migrate-ir/src/effect.rs`), and `ir_state_at`'s ONLY
+occurrence anywhere in the tree - `src`, `tests`, `docs`, TypeScript - is its own
+definition at `effects.rs:98`.
+
+I also had to correct my own first draft. I wrote that "every live test to date pinned
+`live_at_0 = {}`", which is false: `fold_retype_physical_type_mysql.rs:480` snapshots a
+live MySQL server and folds onto it. The accurate statement is narrower and is what the
+module doc now says. This file is the first caller of `state_at` outside its own module;
+the first PostgreSQL live test to fold onto an introspected base; the first on ANY
+dialect whose base objects were made by RAW SQL rather than by an earlier engine deploy;
+and the first to compare at every PREFIX rather than only at the end. The raw-SQL part is
+the load-bearing one - `fold_ops` is `fold_ops_onto(&SchemaSnapshot::default(), ..)`, so
+a base whose every object the fold could have emitted itself is a much weaker base than
+one carrying a `CREATE INDEX` and a `CHECK` it has never seen.
+
+### The RED, and it is not a bug in the component showing the symptom
+
+Five shapes, all seeded by raw SQL and then mutated by an engine plan applied one op at a
+time. Four agree at every prefix. The fifth does not, and the first run said so:
+
+```text
+prefix 1: state_at(1) and the server disagree after applying 1 of 1 ops: StructuralDrift {
+    missing_objects: [],
+    unexpected_objects: [
+        "function state_at_pg_2327220_1.zsdw_person_nick_handle_fn()",
+        "person.nick",
+        "trigger zsdw_person_nick_handle_trg on state_at_pg_2327220_1.person",
+    ],
+    altered_objects: [
+        AlteredObject { table: "person", object: "index person_nick_idx",
+                        field: "columns", expected: "handle", actual: "nick" },
+        ...
+    ],
+}
+```
+
+Which carrier decides: none of the three. `render/fold.rs`, at the `Op::RenameColumn`
+arm, already documents it - "the IR rename lowers to an online expand-contract whose
+CONTRACT (drop the `from` column) is a SEPARATE later deploy... That divergence is
+correctly EXCLUDED from the fold==live equality oracle." The fold is deliberately AHEAD
+of the server, reporting the collapsed post-contract shape while PostgreSQL is
+mid-expand, still carrying both columns plus the `zsdw_` sync trigger and function.
+`missing_objects` is empty, which is the tell: the fold lost nothing, the server has
+residue the fold does not model.
+
+So the finding is about the PROPOSAL, not about a component. The identity
+`state_at(N) = live_at_0 (+) fold(effects[0..N])` is not universal, and section G's check
+would fail on any plan containing a PostgreSQL column rename. That had never surfaced
+because every existing live rename test drives the rename with native
+`ALTER TABLE ... RENAME COLUMN` specifically to avoid it - `fold_rename_column_index_cascade_pg.rs:75-84`
+says so in as many words. Routing around it again would have left a reader believing the
+identity is total, so `the_identity_does_not_hold_across_an_online_rename` pins the
+disagreement IN SHAPE: which residue, which index key, and that the fold lost nothing.
+If the contract phase ever joins the same deploy, that test fails and should - it then
+becomes an agreement case.
+
+### The comparator is blind to the shape that motivated the effect model
+
+`diff_snapshots(..).is_clean()` is the verdict, and for views it compares `materialized`
+and `comment` and NOTHING else - not `definition`, not `columns`, not `authored_query`.
+The live and folded producers do not even populate the same fields: introspection fills
+`definition` from `pg_get_viewdef` and leaves `authored_query` empty, the fold does the
+reverse.
+
+Measured rather than reasoned: neutering `Op::CreateView` so a `replace` keeps the
+PRE-EXISTING body left **all 2988 tests in the `zero-migrate` crate green**, live
+PostgreSQL suites included. A fold that silently ignores `CREATE OR REPLACE VIEW` - the
+exact shape `effects.rs`'s own module doc names as the reason the effect model reads the
+op instead of the SQL - was caught by nothing in the crate.
+
+The case now reads both bodies itself, off fields the differ ignores, and asserts them
+SEPARATELY against the column the body must read rather than against each other: the
+live one from `ViewSnapshot::definition`, the predicted one from
+`ViewSnapshot::authored_query`. Deparsed SQL and an authored AST are different
+representations of one claim, and normalising either into the other is precisely how a
+comparison erases the difference it is hunting. Two independent readings landing on `b`
+is the evidence. With that assertion the neuter is caught; this file is the only thing in
+the crate that catches it.
+
+### Neuters
+
+Six, each with a PATCH GATE (`git diff --stat` non-empty) and a BUILD GATE, run against
+a COMMITTED tree so a restore could not delete the work. `python3` is absent from both
+the ambient shell AND the dev shell here, which is the same missing interpreter that
+silently no-op'd an earlier session's harness - so the patches were applied by editor and
+the gates checked explicitly rather than scripted around it.
+
+```text
+N1  state_at folds onto SchemaSnapshot::default(), ignoring live_at_0   CAUGHT (5/5)
+N2  state_at takes the (n+1) prefix                                     CAUGHT (5/5)
+N3  fold stops cascading indexes on dropColumn                          CAUGHT (drop case only)
+N4  attachPartition leaves the child in `tables`                        CAUGHT (partition case only)
+N5  fold's column rename is a no-op                                     CAUGHT (rename case only)
+N6  fold keeps the stale view body on replace                           NOT CAUGHT -> fixed -> CAUGHT
+```
+
+The BUILD GATE earned its place on the first attempt at N6, which used a `continue`
+outside a loop: `E0268`, reported as INVALID rather than as a test failure. Without it
+that neuter would have read as "caught".
+
+### What this does NOT prove
+
+- **The comparator's blind spots are the reach limit.** `diff_snapshots` does not compare
+  a CHECK or EXCLUDE constraint BODY; an index's `opclass`, `nulls_not_distinct`, `only`
+  or `expr_cascade_columns`; an index expression or partial-predicate body at all once
+  the live side filled `expr_cascade_columns`, which the PostgreSQL introspector always
+  does; a generated column's expression; column ORDER; `partition_by`; or the authored
+  `functions`/`policies`/`triggers` maps. A clean prefix is not a claim that the two
+  snapshots are equal. `PREFIX 0` bounds this from below - every seeded object is
+  asserted present BY NAME before any op runs - so a later clean prefix cannot be clean
+  because the object stopped being compared, but that is a floor, not equality.
+- **Five shapes is five shapes.** A drop cascading into a raw index and CHECK, a
+  `CREATE OR REPLACE VIEW` plus the drop it unblocks, a table rename followed into a raw
+  view, an attach/detach relocating a raw relation between the `tables` and `partitions`
+  maps, and the online rename. Everything else is uncovered, and the value of this check
+  is exactly the op variety behind it.
+- **Comparing `state_at` to `fold_ops_onto` would prove only that it delegates.** Only
+  the server breaks that circle, which is why the whole file is live. But the same point
+  cuts the other way for the view case: the server proved the EDGE moved (it accepted a
+  `DROP COLUMN` it refuses while a view depends on the column), and that is a fact about
+  PostgreSQL, not about what `state_at` predicted. Those are two assertions because they
+  are two claims.
+- **`state_at`'s refold cost is still unmeasured** (`decision 8`). Plans here are one or
+  two ops and the whole file runs in ~2.3s, so nothing about the cost of a refold at
+  every prefix is visible at this scale. Not optimised, not measured.
+- **Still no production caller.** `state_at` now has a live test; it has no caller in
+  `src/`. `ir_state_at` has neither, in the entire tree, and is reported here as dead
+  rather than given a manufactured one - adding a call site purely to create coverage
+  would leave it just as unused in production while making it look exercised.
+- **One unexplained red, unreproduced.** A single run of the drop-cascade case failed
+  with a non-empty `missing_objects` before the strengthening commit. It has not
+  recurred in 17 subsequent runs (14 filtered serial, 3 full-theme parallel) and no
+  leaked schema was found on the server afterwards. Recorded rather than dismissed,
+  because an intermittent red here is either a real race in the apply/introspect
+  sequence or an artifact of that one run, and the evidence does not separate them.
