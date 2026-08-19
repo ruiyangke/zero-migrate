@@ -133,6 +133,21 @@ ZERO_MIGRATE_MYSQL_URL=mysql://... \
 pnpm --filter zero-migrate-cli test:host
 ```
 
+The script carries `--test-timeout=600000`. That bound exists because a test file
+which PASSES every assertion and then leaks a handle - an unclosed socket, a live
+`setInterval`, a surviving child process - never lets the runner exit, and a hang
+yields neither an exit code nor test counts, so the gate waits forever instead of
+going red. Without the flag Node's default is `Infinity`, and nothing else bounds
+it: the CI workflow sets no `timeout-minutes`.
+
+The number is measured, not guessed. `--import tsx` collapses Node's per-file
+process isolation, so all files share one process and a file's timeout budget runs
+from suite start rather than from its own first test. The long pole is
+`killed-backfill-resumes.test.ts` at ~187s of test time in a ~214s suite; a full
+run at `--test-timeout=300000` is green with zero timeouts, and one at `60000`
+cancels that file and only that file. 600000 is therefore ~2x the proven ceiling
+and ~3x the slowest real file. Re-measure before lowering it.
+
 ## Commit messages
 
 This repo uses Conventional Commits. Keep `git log` a readable, greppable
