@@ -34180,3 +34180,270 @@ and 1 live PostgreSQL arm. No section count moved, so no binary vanished.
   re-open detectably if a future edit re-introduces SQL parsing here. The
   `the_stamp_decides_and_the_rendered_sql_does_not` test is the closest guard and it
   covers one shape, not five.
+
+## `genArtifacts` exports the schema as structure, and the wire it was told to reuse turned out to be a strict subset
+
+`env.db.ts` and `schema.runtime.json` are consumed downstream by the zeroship platform,
+which wants to render its own files. The ask was to export the metadata over the API.
+The addition is `GenArtifactsReply.collections` — the folded schema as typed
+`CollectionDescriptorDto`s — plus `GenArtifactsReply.dialect`, the target it was folded
+under.
+
+Generation is NOT removed. It is load-bearing for two checks nothing else replaces: the
+`satisfies Record<string, CreateTableArgs>` typecheck (`gen_types.rs`), which is the
+only mechanism tying emitted columns to the real published package, and the `--check`
+drift gate. Deleting either in the same change that introduces the replacement would
+remove both with no evidence the replacement works. Removal is a separate decision,
+after downstream actually consumes this.
+
+### The wire was already agreed. It was also incomplete, and only outward
+
+`FieldDescriptorDto` was `#[napi(object)]` and documented as mirroring the `@zeroship/db`
+`FieldDef` shape, and grep confirmed it was inbound-only: `field_dto_to_engine` was the
+sole conversion and nothing anywhere CONSTRUCTED one. So the shape was agreed and the
+missing half looked like plumbing.
+
+It was not a mirror. `FieldDescriptor` has six fields the DTO had no slot for:
+`reference_column`, `reference_name`, `literal_value`, `char_len`, `max_length`, and
+`unbounded_text`. Four of those are populated by `ir_column_to_field`, which is what the
+fold's export runs through — so the DTO as it stood would have silently dropped a
+`VARCHAR` width, a `CHAR` width, an explicit FK target column, and an explicit FK
+constraint name on the way out.
+
+The absences were not sloppiness. `bridge.rs` documented the width pair as deliberately
+unset, and the reason it gave was correct: "the descriptor source only ever reaches
+`gen_artifacts_from_descriptors`, which renders TypeScript types and runtime JSON;
+`gen_types` reads neither." That argument is INBOUND. It says nothing about a direction
+that did not exist, and it stopped holding the moment one did.
+
+`tests/collection_export_round_trip.rs` is what found this. It was RED on
+`facets.owner_id` (`reference_column`/`reference_name` gone) and on
+`widths.first_name` (`max_length: Some(64)` in, `None` out).
+
+### Not the derive
+
+The obvious mechanic was to add `Serialize` to `FieldDescriptor` — it is `pub` and
+already derives `Deserialize`, so it is one line. That is declined.
+
+`FieldDescriptor` is the ENGINE's internal descriptor. `project_field_defs` also feeds
+`live.sqlite_schemas` and the SQLite rebuild path, so its vocabulary is a live deploy
+concern; making the struct itself serializable is the first step toward it being a
+contract downstream owns and evolves. The DTO is the boundary type and already exists
+for exactly this. Two further facts decide it rather than taste: the derive would
+export `unbounded_text` as `#[serde(skip)]`, silently, with no test able to notice; and
+it would have said nothing about the four fields the wire was actually missing, because
+serde symmetry with oneself is not an oracle.
+
+### The trap that shaped the engine seam
+
+`GeneratedArtifacts` derives `Eq` and is what the drift gate compares. `FieldDescriptor`
+is `PartialEq` but NOT `Eq` — `min`/`max` are `f64`. Widening `GeneratedArtifacts` with
+the collections would have forced `Eq` off it and moved the drift gate's comparison out
+from under it. So `render_schema_export` returns a new `SchemaExport { artifacts,
+collections }` wrapper and `render_artifacts` is `.map(|e| e.artifacts)` over it;
+`check_artifacts` takes exactly the value it took before.
+
+The same comment warns that descriptor equality is test-only ("the differ compares
+SNAPSHOTS, not descriptors"). The round trip IS that use and nothing else is built on
+it; no gate compares descriptors.
+
+### The fifth projection, and why it moves no artifact byte
+
+`project_field_defs` already built an `IndexMap<String, FieldDescriptor>` and a
+`CollectionDescriptor` and then serialized the types away. That intermediate is now
+`FoldedSchema::project_collection_descriptors`, a `pub` projection, and
+`project_field_defs` is a map over it through `descriptor_to_sdk_schema`. One recovery,
+two readers — the export can never describe a different schema from the artifact
+shipped beside it.
+
+The intermediate left `indexes` empty and `runtime_options` default; the real projection
+merges `project_runtime_metadata` rather than re-deriving them, because that projection's
+own doc records what a second derivation costs (implicit unique index names are frozen at
+`createTable` and survive renames). The merge cannot move a runtime-JSON byte:
+`descriptor_to_sdk_schema` reads `fields` alone. That is also why the merge needed its
+own test — see N6 below.
+
+### The instruments, and which of them are circular
+
+- `collection_export_round_trip.rs` (8 tests) — `engine -> dto -> engine` over a folded
+  corpus, at the FIELD level and again at the COLLECTION level. GENUINE DISCOVERY: both
+  directions are independent hand-written conversions, and it is the thing that was RED.
+  It is the addon's real conversions, not test copies, which is why they moved out of
+  the napi-gated `bridge.rs` into `descriptors.rs`. The collection arm is separate
+  because the field arm would pass with every collection-level facet dropped, and it
+  drives all three `strictness` tokens because that facet crosses as a STRING through a
+  hand-written match per direction.
+- `gen_artifacts_exports_collections.rs` (6 tests) — the REPLY WIRING. A separate binary
+  on purpose: the round trip calls `field_to_dto` directly and would pass unchanged if
+  the verb never called it.
+- `gen-artifacts-exports-collections.test.ts` (3 host tests, DB-free) — the only thing
+  that proves the fields CROSS napi. Both Rust suites run on `--no-default-features`,
+  where there is no `.node` and no JS object.
+- `the_corpus_exercises_every_facet_it_claims_to` — the round trip's own floor, and it
+  is TWO-SIDED: an exact set equality over 17 named facets, plus `(masked, encrypted,
+  generated, identity) == (2, 1, 1, 1)` and a corpus size of 20. Measured against the
+  folded output, not the seeds — the mask count is 2 rather than 1 because the fold
+  synthesises the fail-safe `{ full, pii }` auto-mask for the encrypted column. A
+  REGRESSION GUARD, not a discovery instrument.
+- `the_check_bearing_corpus_is_postgres_only`, `a_literal_field_is_unreachable_from_both_
+  gen_artifacts_sources`, `the_producer_not_the_wire_is_where_a_varchar_width_dies`,
+  `unbounded_text_is_re_derived_rather_than_carried` — four scope exclusions written as
+  measurements, so each turns red when its premise stops holding.
+
+Nothing here is a serde round trip, and nothing compares an artifact against a value
+derived from that artifact.
+
+One doc correction rides along, in the same file the change already touches. The
+`gen_types` module header said `check_artifacts` "regenerates in memory and diffs";
+it does not — it takes a `&GeneratedArtifacts` the CALLER produced and delegates to
+`diff_artifacts`. The line had already misled one reviewer into repeating it, which is
+what a doc describing a function's job rather than its inputs costs.
+
+### Two facets deliberately NOT on the wire, both measured
+
+`unbounded_text` — `#[serde(skip)]` in the engine and documented render-only. It is
+DERIVED by `ir_column_to_field` from `ColType::Text` plus the absence of a value-format
+or id-prefix facet, so a wire slot would let a host set the MySQL unbounded-TEXT
+spelling independently of the type that implies it. The round trip normalises it on both
+sides rather than comparing around it, and a separate test crosses a `t.text()` column,
+watches the wire drop it, re-folds, and observes it back.
+
+`literal_value` — no slot, because it is UNREACHABLE from both `genArtifacts` sources.
+No `ColType` carries a literal so the fold never writes one, and `token_to_col_type` has
+no `"literal"` arm so the producer refuses the token outright. Both halves are asserted;
+if either changes, the slot becomes worth adding.
+
+### What the RED found beyond the four fields
+
+**A `VARCHAR(n)` width dies at the PRODUCER, not the wire.** `token_to_col_type` maps
+every `"string"` token to `ColType::Text` without consulting `max_length`, so exporting a
+`VARCHAR(64)` and feeding it back as a manual source yields `TEXT`. The export half now
+works; the re-import half does not, and fixing it is a producer change with its own
+artifact-drift blast radius. Pinned so the boundary is a measured fact rather than an
+inference from "maxLength was added".
+
+**The CHECK-bearing corpus is PostgreSQL-only.** Written as a three-dialect loop, the
+round trip refused under MySQL and SQLite with `createTable table-level CHECK is
+PostgreSQL-only` — `min`/`max`/`enum` lower to table-level CHECKs. The full corpus
+therefore runs on Postgres and a portable arm runs on all three; the refusal is pinned.
+
+**The descriptor lexicon has no `"text"` token.** The corpus first spelled the unbounded
+column `ty: "text"` and the producer refused it (`UnknownType`). `"string"` with no width
+IS `ColType::Text`. A broken instrument, caught by reading the failure KIND.
+
+### Neuters — nine, one of which catches nothing
+
+| # | neuter | caught |
+|---|---|---|
+| N1 | `field_to_dto` drops `reference_column`/`reference_name` | 1 test |
+| N2 | drops `max_length` | 3 tests |
+| N3 | drops `char_len` | 2 tests |
+| N4 | the verb reports `collections: None` on success | 4 tests |
+| N4b | the verb reports an EMPTY collection list | 3 tests |
+| N5 | the verb reports no `dialect` | 2 tests |
+| N6 | the fifth projection stops merging the runtime metadata | 1 test |
+| N7 | the wire collapses `Some(false)` to absent | **NOTHING** |
+| N8 | the real `.node`, rebuilt with the export withheld | 1 host test |
+| N9 | `descriptor_to_dto` mis-spells the `off` strictness token | 1 test |
+
+N4 and N6 REPORTED "caught nothing" on their first run and both were lying: the seds
+produced code that did not compile, and a build failure and a passing suite look
+identical through a `grep -c FAILED`. The measure step now records whether the tree
+built at all.
+
+N7 genuinely catches nothing, and the reason is structural rather than an oversight.
+`field_to_dto` emits `Some(false)` for `required`/`unique` where the engine holds a plain
+`bool`; collapsing those to absent is lossless for the round trip BY CONSTRUCTION,
+because `field_dto_to_engine` reads absent as false. The explicitness is there for a
+CONSUMER — `required: undefined` invites the reading "unknown" for a column the fold
+knows is nullable — and no test in this change can distinguish it. Anyone tempted to
+tidy those into `then_some(true)` will find every gate still green.
+
+N6 is the one worth keeping in mind: merging the runtime metadata into the fifth
+projection changes no artifact byte and no drift gate, so before
+`the_export_carries_indexes_and_runtime_options_not_only_fields` existed, that half of
+the export was entirely unmeasured.
+
+### The gate
+
+Twelve gates on `agent-a6a2c747580de611e @ 6d0d2bca`, `FAILED_GATES: none`.
+
+The baseline had to be taken TWICE. The first run overlapped with editing, and three
+gates failed on the half-written tree — rustdoc on a doc link that did not exist yet,
+the addon build on `GenArtifactsReply` missing its new fields, and the whole host suite
+on the addon that therefore did not build. Re-run on a clean checkout, all three are
+green. A baseline measured against a tree that is being edited is not a baseline.
+
+Baseline reproduced the brief exactly: workspace 3310 / 0 / 11 over 37 sections, node 10
+sections / 91 / 0 / 0, host 458 / 458 / 0 / 0, DSL 327 / 326 / 0 / 1 skipped, docs
+6/6/0/0, rustdoc 6 against the pin of 6. (The clean re-run of the host arm alone read
+`458 / 305 / 0 fail / 153 skipped` — the same suite without `ZERO_MIGRATE_TEST_PG_URL` /
+`ZERO_MIGRATE_MYSQL_URL`, which the gate script exports and a bare invocation does not.
+The 153 are the live-DB arms.)
+
+After: workspace 3310 / 0 / 11 over 37 sections (UNCHANGED — the new Rust tests are all
+in `zero-migrate-node`), node 12 sections / 105 / 0 / 0 (+2 binaries, +14 tests), host
+461 / 461 / 0 / 0 (+3), DSL and docs byte-identical, rustdoc 6 against the pin of 6.
+
+**The rustdoc gate caught this change, and two earlier standalone runs of it did not.**
+The `descriptors.rs` module header opened with `[`field_dto_to_engine`]`, which is the
+`//!`-resolves-in-the-PARENT-scope trap `single_fold.rs` documents at length — a `//!`
+link does not see an item two screens below it in the same file, and the fix is the
+absolute `crate::descriptors::` path. It has now caught three agents.
+
+What is worth recording is not the warning but why two hand-runs missed it. Both
+reported `warnings=6 pin=6 OK` and both were measuring the MAIN CHECKOUT, because
+`rustdoc-gate.sh` defaults `ZM_REPO` to `/home/ruiyang/Projects/zero-migrate` and a bare
+`nix develop --command rustdoc-gate.sh …` does not set it. The script's own header warns
+about exactly this ("a doc gate hard-wired to the main checkout would document the WRONG
+TREE while reporting cleanly") and the default is still there, so the warning is
+load-bearing rather than historical. The tell is one line: a run that really covered
+this worktree logs `Documenting zero-migrate-node`, and the two false greens did not —
+they had nothing to re-document, because the new file was not in the tree they read. The
+gate's vacuity check asserts `zero_migrate/index.html` was emitted, which is true of main
+too, so it cannot catch this. The full gate script DOES export `ZM_REPO`, which is why
+the twelve-gate run found the warning the hand-runs could not.
+
+`index.d.ts` is regenerated and committed: the three new `FieldDescriptorDto` fields and
+the two new `GenArtifactsReply` fields are all additive and optional, so no existing
+caller's types move.
+
+### What the gate does NOT prove
+
+- **Nothing downstream consumes this yet.** The export is measured against the engine's
+  own answer and against the artifact emitted beside it. Whether zeroship can render
+  `env.db.ts` from it is untested here, and the honest answer is that it CANNOT: that
+  artifact is rendered from `project_authoring_tables`, the richer authoring IR, for the
+  documented reason that the `FieldDef` vocabulary collapses physical types, value
+  formats and keys. This change exports the runtime-descriptor half. A structured
+  export capable of replacing `env.db.ts` is a different and much larger surface.
+- **The round trip does not prove the export is CORRECT.** It compares the export
+  against the fold's own recovery, so a facet the fold recovers WRONGLY round-trips
+  perfectly. Fold correctness is adjudicated by the artifact goldens and the live-server
+  suites, neither of which this change touches.
+- **No live server sees the export.** The host arm is DB-free by design — `genArtifacts`
+  touches no database — so nothing here reads a real catalog back. `gen-artifacts-
+  dialect.test.ts` does that for the artifacts, and was not extended to the export.
+- **`collections` and `runtime_json` are not compared field-for-field.** Only the
+  collection SET and (in the host arm) one table's field-name set. Deeper agreement is
+  structural — one recovery, `project_field_defs` mapped over it — rather than asserted,
+  and a bug inside `descriptor_to_sdk_schema` would move both together undetected.
+- **The dialect echo proves the fold's target, not that the caller wanted it.** It
+  closes the "which target is this export for?" hole, and nothing more; a caller that
+  hardcodes the wrong dialect still gets a self-consistent export of the wrong schema,
+  exactly as `has_dialectal_ops` already warns.
+- **The corpus is authored, not recorded.** It exercises 17 named facets plus four
+  sub-object ones, chosen because they are easy to lose. A facet nobody thought of is
+  not covered, and the two-sided floor makes that visible only once someone adds it.
+- **`fts` / `ftsLanguage` are on the wire and always answer `false`.** Both had DTO
+  slots before this change and both still do, so an export LOOKS able to report
+  full-text participation. It cannot: `IrColumn` has no `fts` field anywhere in
+  `zero-migrate-ir`, so `descriptors_to_create_ops` drops the facet on the way in and
+  `ir_column_to_field` has nothing to recover on the way out. A downstream renderer
+  reading `fts: false` off this export is reading a constant, not a schema fact. NOT a
+  regression — it is the pre-existing shape — and worse than `literal_value`'s dead end
+  precisely because the slot exists and looks answerable. Closing it means adding the
+  facet to the IR, which is an `ir_version` question and not this change's. The round
+  trip cannot see it either: no corpus reachable through `genArtifacts` can produce a
+  folded field with `fts` set, so the facet is carried by the wire and exercised by
+  nothing.
