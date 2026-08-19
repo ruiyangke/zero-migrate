@@ -23,14 +23,28 @@ Working notes; not staged.
   and a `createTable` inline index are all refused with "MySQL refuses a key over
   a TEXT or BLOB column with no prefix length" plus the `t.string({ length })`
   suggestion.
-- [ ] Close the residual half: a key over a `t.text()` column an EARLIER migration
-  created is still not refused, because validation is offline and reads only the
-  migration in front of it. Measured live: it reaches the server and fails
-  mid-deploy with MySQL `ERROR 1170`. The information needed to close it exists at
-  lower time, where the apply path already carries a live catalog snapshot, so the
-  gate belongs there rather than in `validate`. That is a new gate with its own
-  failure modes (preview lowers with an empty snapshot and must not refuse what it
-  cannot see) and wants its own decision.
+- [x] Residual half closed: a key over a `t.text()` column an EARLIER migration
+  created is now refused too, by `validate_mysql_key_storage_for_lower` at LOWER
+  time, where the apply path has already introspected the live catalog. Before
+  this it cleared validate AND preview and died mid-deploy with MySQL `ERROR
+  1170`; measured on live MySQL 8.4.11 both ways, including with the gate
+  deliberately removed. The offline rule above is NOT superseded and must stay:
+  it needs no connection, so it is the one that turns `lint` red in CI. The same
+  refusal also now covers a key over a TEXT column of an UNMANAGED table, which
+  no authored history describes either.
+  Fail-open where the catalog is silent, deliberately: preview lowers against an
+  empty snapshot, so an absent table, an absent column or an unpopulated
+  `mysql_physical_type` all refuse nothing. The over-refusal risk was real and
+  is pinned - the check reads `ColumnSnapshot::mysql_physical_type` and NOT the
+  neighbouring `data_type`, because `mysql_canonical_type` folds `varchar(n)`
+  into `"text"` and classifying that refuses every bounded `t.string({ length })`
+  key in the project. A build that made exactly that mistake was run against live
+  MySQL and is what the host test's bounded control was rewritten to catch.
+  NOT closed by this: an explicit prefix length is still unauthorable
+  (`IndexElement::Column` has no prefix field), and a MySQL `FULLTEXT` key - the
+  one kind that takes a TEXT column whole - is still unreachable, because
+  `IndexMethod::Fts5` classifies as a PostgreSQL-only feature and is refused on
+  MySQL upstream of both gates.
 - [ ] Case-collation parity: `caseSensitive` should pin an explicit collation on
   MySQL (default is case-insensitive there; `caseSensitive: true` is currently
   ignored), so string equality/uniqueness matches Postgres/SQLite.

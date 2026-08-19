@@ -255,16 +255,28 @@ respectively.
 > without a prefix length). Use `t.string({ length })` for any column you key or
 > index.
 >
-> Validation refuses this before the deploy starts **when the column is declared
-> in the same migration as the key** — a `createTable` that indexes its own
-> `t.text()` column, or an `addIndex` alongside the `addColumn` that created it.
-> The error names the column and suggests `t.string({ length })`.
+> The engine refuses this before the deploy starts, and nothing is applied. The
+> error names the column and suggests `t.string({ length })`. Two gates share
+> that one rule, because they see different things:
 >
-> It does **not** yet refuse a key over a `t.text()` column that an **earlier**
-> migration created. Validation is offline and reads only the migration in front
-> of it, so a column it never saw declared carries no type to judge. That case
-> still surfaces as MySQL's own apply-time `ERROR 1170: BLOB/TEXT column used in
-> key specification without a key length`, mid-deploy.
+> - **Validation**, offline, covers a column declared in the **same** migration
+>   as the key — a `createTable` that indexes its own `t.text()` column, or an
+>   `addIndex` alongside the `addColumn` that created it. It needs no database,
+>   so `lint` catches this shape in CI.
+> - **Lowering**, at deploy, covers a column an **earlier** migration created,
+>   and a column of a table the engine never authored. Validation is offline and
+>   reads only the migration in front of it, so a column it never saw declared
+>   carries no type to judge; by lowering time the apply path has already read
+>   the live catalog, which does know. Until this gate existed that case cleared
+>   validate and preview and then surfaced as MySQL's own `ERROR 1170: BLOB/TEXT
+>   column used in key specification without a key length`, mid-deploy.
+>
+> A **bounded** `t.string({ length })` column is unaffected by either gate and
+> stays fully index-able, whichever migration declared it.
+>
+> The deploy-time gate only ever refuses what the live catalog positively shows
+> to be `TEXT`/`BLOB`. A preview, which lowers with no catalog at all, refuses
+> nothing on this rule.
 
 ## Indexes
 
