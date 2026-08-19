@@ -33914,3 +33914,269 @@ two-sided `(ok|FAILED)` parser.
 - N5's hole is open. The two partition accumulators are correct in this change by
   construction and unpinned by any test.
 - The MySQL enum collation defect is recorded, not fixed.
+
+## Step 5: the prefix test reads the op, and the SQL parser it replaces was wrong about five shapes the engine really emits
+
+Step 5 of `single-fold-and-effects.md` section G. `Effect` per step, `state_at(N)`, and
+`sql_clears_no_obstruction` deleted. `answerability()` KEPT, redrawn per section E.
+
+### What the whitelist was actually costing, measured before anything changed
+
+The proposal justifies deleting the SQL parse on ALTITUDE - a parse tree cannot tell
+`CREATE VIEW` from `CREATE OR REPLACE VIEW`, so the whitelist exists to avoid guessing.
+True, but it undersells the case, because the whitelist ALSO answered `_ => false` for
+shapes nobody had listed, and that direction has a cost nobody had counted.
+
+Counted, on the unchanged tree at `839b9aca`, by running `sql_clears_no_obstruction`
+over statements the PostgreSQL renderer emits. FIVE answered "may clear an
+obstruction" and cannot:
+
+```text
+  CREATE MATERIALIZED VIEW ...            false   (CreateTableAsStmt, outside the list)
+  ALTER TABLE ... SET (fillfactor = 70)   false   (AtSetRelOptions)
+  CREATE ROLE ...                         false   (CreateRoleStmt)
+  ALTER ROLE ... SET ...                  false   (AlterRoleSetStmt)
+  ALTER SEQUENCE ... RESTART WITH 5       false   (AlterSeqStmt)
+```
+
+Each one silently DISARMED the hoist. A plan `[<one of these>, dropColumn]` therefore
+committed its first step and then had the drop refused at the per-migration seam -
+the exact half-migration the whole phase exists to prevent. This is not a
+hypothetical: `CREATE MATERIALIZED VIEW` is emitted by `renderer.rs:162`, and
+`materialized + replace` is refused fail-closed at `renderer.rs:154`, so a matview is
+ALWAYS the purely additive leg. It is the strongest possible case and the whitelist
+got it backwards.
+
+Four of the five are now closed. `ALTER SEQUENCE` is NOT, and deliberately:
+`ALTER SEQUENCE ... OWNED BY NONE` really does remove the `pg_depend` edge between a
+sequence and its owning column, which is exactly the fact an obstruction assertion
+reads. `Op::AlterSequence` stays `MayRemove`. The op model is more precise than the
+parser on four shapes and agrees with it on the fifth for a reason the parser never
+had.
+
+### The server answered first
+
+`a_drop_behind_a_created_matview_leaves_nothing_behind` runs in two stages, and stage
+1 is raw SQL on a live PostgreSQL with no engine in it. It builds a table, an ordinary
+view over the doomed column, and a matview over a DIFFERENT column; asserts the drop
+is still refused; and then reads the blocker set straight out of `pg_depend`/
+`pg_rewrite` - a query written for this test, not the engine's own predicate, because
+an engine-authored query there would be the artifact grading its own homework. The
+set is `{reader}`. The matview is not in it.
+
+Only after that does stage 2 ask the engine anything.
+
+### The instrument that would have failed toward a false green
+
+The residue probe in that file was `information_schema.tables`. PostgreSQL OMITS
+materialized views from `information_schema` entirely, so a committed matview reads as
+ABSENT - a half-migration probe that fails toward "nothing was left behind". Measured
+on the live server before changing it: `information_schema.tables` = 0, `pg_class` = 1
+for the same relation. `relation_exists` now reads `pg_class`.
+
+Had this not been caught, the new test would have passed on the UNCHANGED code and
+proved nothing at all.
+
+### The neuters
+
+N6 is new and is the RED. N1-N5 are the shipped five, re-run against the op-derived
+test.
+
+```text
+  N6  materialized createView classified MayRemove (the whitelist's verdict)
+        a_drop_behind_a_created_matview_leaves_nothing_behind          FAILED
+            "THE HALF MIGRATION THIS CLOSES: the matview must NOT have committed"
+        the other eight                                                ok
+
+  N3  createView additive regardless of `replace`
+        a_drop_behind_a_replaced_view_still_applies                    FAILED
+        the other eight                                                ok
+
+  N4  journal-satisfied steps judged anyway
+        a_replayed_plan_is_not_re_judged_against_a_world_that_moved    FAILED
+        the other eight                                                ok
+
+  N5  the online rename's dependents check asked unconditionally
+        a_rename_whose_blocker_the_same_plan_removes_still_applies     FAILED
+        the other eight                                                ok
+
+  N1  the whole phase returns Ok immediately
+        a_blocked_drop_behind_a_committing_op_leaves_nothing_behind    FAILED
+        a_drop_behind_a_created_matview_leaves_nothing_behind          FAILED
+        the other seven                                                ok
+
+  N2  the prefix test ignored (hoist regardless of earlier steps)
+        a_drop_whose_blocker_the_same_plan_removes_still_applies       FAILED
+        a_drop_behind_a_replaced_view_still_applies                    FAILED
+        a_retype_whose_blocker_the_same_plan_removes_still_applies     FAILED
+        a_rename_whose_blocker_the_same_plan_removes_still_applies     FAILED
+        the other five                                                 ok
+```
+
+N3 is the one that matters most, and it reproduces EXACTLY. Decision 7's claim was
+that an op-derived test gets `CREATE OR REPLACE VIEW` right by construction; N3 is the
+control that would catch it getting the case wrong, and it still fails exactly one
+test. The proposal said "if the op-derived test cannot reproduce N3's control,
+decision 7 is wrong and this proposal is wrong with it". It reproduces it.
+
+TWO ROWS ABOVE DISAGREE WITH THE SHIPPED RECORD, and neither is a regression.
+
+- N2 fails FOUR tests, not the three recorded at `docs/review-log.md:28830`. The
+  fourth is the online-rename control, and it fails because `clears_no_obstruction`
+  has TWO consumers - `engine.rs:1865` as well as the precondition phase - so
+  neutering the shared function necessarily hits both. That was true before this
+  change too; the recorded row was written when the rename control did not yet exist.
+- N1 fails two, the second being the new test. That is the new test being a second
+  instance of N1's claim, which is what says it exercises the phase rather than
+  asserting around it.
+
+The stale counts in that block are now visible: N1-N4 say "the other six" (7 tests),
+N5 says "the other seven" (8). The file holds 9 since this change.
+
+N7 was run on `state_at` itself - ignore `n` and fold the whole stream. It fails two
+of the three `state_at` tests. THE THIRD CATCHES NOTHING, and it is worth saying why:
+`state_at_carries_the_base_it_did_not_create` uses a one-op stream at `n = 1`, so the
+prefix is the whole stream either way. It pins base carry-through, not prefixing. It
+is a correct test of a different property, not a second guard on this one.
+
+### Which instruments are circular
+
+Most of them. Being explicit rather than counting them all as evidence:
+
+- The `effect_of` classification tests are CIRCULAR. They assert the table in the
+  function beside them. They catch a future edit that changes a verdict; they cannot
+  tell anyone the verdict was right in the first place.
+- The `state_at` tests are NEARLY circular. `state_at` delegates to `fold_ops_onto`,
+  so those three tests mostly re-pin a function with its own large corpus. N7 shows
+  two of them do constrain the prefix arithmetic, which is the only part that is new.
+- The step-kind agreement test is a DRIFT GUARD on a deliberate duplication, not a
+  discovery instrument.
+- ONE instrument is a genuine discovery instrument: the whitelist-gap measurement
+  that produced the five-shape table above. It was run against the UNCHANGED tree,
+  and it is what found the defect. It is also the one thing here that does not
+  survive as a test - it was a throwaway probe, and the five shapes it found live on
+  only as fixtures in `the_additive_ops_clear_nothing`.
+- The live matview test is genuine, because its oracle is the server and the server
+  can contradict it.
+
+### The mechanic, and the one it did not use
+
+The effect is stamped on `Migration.effect: Option<Effect>` at IR-lower time, in
+`lower_one_op` - the only place holding an op and the units it produced at once.
+Everything downstream sees `&[PlanStep]` and nothing else, which is precisely WHY the
+phase reached for a parser: it had rendered statements and no ops.
+
+The alternative was threading effects through the four public `apply_plan*` entry
+points. Rejected, and not on taste: those entry points would have to default to "no
+effects", which reads as "no provenance", which disarms every hoist. The phase would
+have become OPT-IN, and every caller that did not opt in would silently lose a safety
+gate. A field that travels with the step cannot be forgotten by a caller.
+
+`existence_guard` on the same struct is the exact precedent, including the
+checksum-exclusion reasoning: the field is derived from the op list, which
+`Checksum::of_ir` already folds, so folding it again would change every golden while
+adding no tamper evidence. `skip_serializing_if = "Option::is_none"` keeps the on-disk
+wire byte-identical. Cost: 49 struct literals gain `effect: None`. The compiler
+enumerated all 49 - it is the completeness oracle for that edit, and the loop ran
+until `cargo check --workspace --all-targets` reported no `E0063`.
+
+One vacuity trap on the way, worth recording because it is the same shape as the
+rustdoc gate's: the first insertion pass reported ZERO missing fields and was
+believed for a moment. The lib had failed to compile on an unrelated import error, so
+the test targets were never built and `E0063` could not appear. An unfinished check
+reports clean.
+
+### Four claims in the brief that are false, measured
+
+1. **`pg_query` is not deleted, and does not leave `apply/`.** The proposal says
+   "`pg_query` leaves `apply/` entirely" (section F). It does not. `crates/zero-migrate/src`
+   holds SIX real use sites, FOUR of them under `apply/`:
+   `apply/backend/postgres/session.rs` (:25,:26,:543,:565,:576,:1336,:1406),
+   `apply/precondition.rs` (:69,:493), `apply/plan_precondition.rs` (deleted here),
+   `apply/backend/postgres/backfill_sql.rs` (:523), plus `model/validate.rs`
+   (:58,:7580). `zero-migrate-guard` depends on it throughout. The dependency stays in
+   both `Cargo.toml`s. The proposal contradicts itself here: `apply/precondition.rs`
+   parses SQL to evaluate `Precondition::SqlBoolean`, which section E calls
+   "Undecidable, permanently" - so a parser under `apply/` is not removable while
+   `SqlBoolean` exists. What this change deletes is the parse from the PLAN-PREFIX
+   test, which is the part that was dialect-blind core code.
+2. **The rustdoc pin does not move.** The prediction was that it would drop, because
+   step 5 "replaces that very function". It replaces the BODY, not the NAME:
+   `clears_no_obstruction` is still a private function the public module doc still
+   links, so the warning survives and the count is 6 against a pin of 6. Moving the
+   pin would have FAILED the gate in the downward direction. Measured both before and
+   after.
+3. **Two of the "three preview `advance_*` helpers" are neither preview-only nor
+   collapsible.** `advance_logical_columns` (`lower.rs:865`) returns
+   `Result<(), AuthoringError>` and runs three validators - it is a VALIDATOR, not a
+   state advance, and it has four production callers (`engine.rs:386`, `engine.rs:605`,
+   `node/lower.rs:764`, `sql_preview.rs:511`). `advance_declared_column_generation`
+   (`lower.rs:770`) is the FIRST statement of `lower_one_op` (`lower.rs:4725`), i.e.
+   the real lowering path, not preview. Exactly ONE - `advance_preview_table_presence`
+   (`sql_preview.rs:525`) - is a preview-only degenerate state advance. It is NOT
+   collapsed here: it is the one with a real `_ => {}` that swallows `dropTable` and
+   `renameTable`, so collapsing it CHANGES preview output for those streams, and that
+   is a preview behaviour change that deserves its own commit and its own controls
+   rather than riding along behind a precondition change.
+4. The classification table's framing that the five existence variants are "repaired
+   by the ordinary additive work a plan does" is the OLD axis and is now wrong in the
+   docs' own terms. They are excluded because hoisting them is a NEW GATE (step 6),
+   not because they are unanswerable. `state_at(N)` answers them; this module does
+   not ask.
+
+### On the identity, without overselling it
+
+`state_at(N) = live_at_0 (+) fold(effects[0..N])` is realized as
+`fold_ops_onto(live_at_0, &ops[..n])`. Being exact: `Effect` is a TWO-VALUED
+classification, so folding a run of `Effect`s does not reconstruct a schema. The op
+stream is the effect stream, and `Effect` is the answer to one question asked of each
+element of it. Both come from the same op vocabulary - which is the whole of decision
+1, and the answer to the shipped module's objection: there is no second ledger to keep
+correct, because if the effect model is wrong about what an op removes, `fold_ops` is
+wrong about it too.
+
+The proposal's disagreement with the shipped reasoning is upheld, narrowly. The
+shipped argument - a ledger "would have to be right about creation, deletion, column
+addition, column removal and row counts independently" - is an argument against a
+SECOND ledger. Nothing here maintains one.
+
+### The gate
+
+Twelve gates on `agent-a4cceee575fddedcd @ 839b9aca`, `FAILED_GATES: none`. Baseline
+taken on the SAME tree before the change and reproduced exactly: workspace 3301 passed
+/ 0 failed / 11 ignored across 37 sections, node 10 sections / 91 / 0 / 0, host
+458/458/0/0, DSL 327/326/0/1 skipped, docs 6/6/0/0, rustdoc 6 against the pin of 6.
+
+After: workspace 3310 / 0 / 11 across 37 sections; every other counter byte-identical.
+The +9 is exactly the new tests - 7 in `render::fold::effects`, a net +1 in
+`apply::plan_precondition` (two SQL-shape tests deleted, three step-level tests added),
+and 1 live PostgreSQL arm. No section count moved, so no binary vanished.
+
+### What the gate does NOT prove
+
+- **Nothing measures `state_at(N)` against a live server.** Section H asks for
+  exactly that - apply steps 0..N-1 for real, introspect, assert equality - and it is
+  NOT here. `state_at` is pinned only offline, against `fold_ops_onto`, whose live
+  agreement is proven elsewhere for the WHOLE stream but not per prefix. The function
+  also has no production caller yet: step 5 makes the existence assertions answerable
+  and step 6 is what asks them. So `state_at` ships correct-by-delegation and
+  unexercised, which is the weakest part of this change.
+- **The four newly-additive classifications are not all adjudicated by a server.**
+  Only `CREATE MATERIALIZED VIEW` is. `setTableOptions`, `createRole` and `alterRole`
+  are argued from what a `pg_depend` edge is, and pinned by a test that asserts the
+  argument. If one of them is wrong, the failure direction is a WRONG REFUSAL of a
+  plan that would have applied - the direction this phase is supposed to be safe in,
+  and the direction an operator experiences as an outage.
+- **`Op::PgRaw` is classified, not understood.** It is `MayRemove` because its SQL is
+  opaque, which is right, and it means a plan carrying one op of raw SQL disarms every
+  hoist behind it. That is today's behaviour and no worse, but the effect model does
+  not improve it and cannot.
+- Nothing here exercises the SQLite or MySQL legs of the stamp. Both refuse a
+  non-empty precondition list, so the phase is unreachable there - which means the
+  stamp is carried and never read on two of three dialects, and a defect in it would
+  be invisible until a second backend stamps an obstruction precondition.
+- The five-shape gap measurement was a throwaway probe against the unchanged tree. It
+  is reproducible from the log above but is not a standing test, so the gap cannot
+  re-open detectably if a future edit re-introduces SQL parsing here. The
+  `the_stamp_decides_and_the_rendered_sql_does_not` test is the closest guard and it
+  covers one shape, not five.
