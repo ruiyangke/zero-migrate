@@ -142,24 +142,24 @@ generalizes that pattern rather than introducing a new one.
 ```
               +--------------------------------------------------+
               |              zero-migrate (facade)                |
-              |   #[cfg(feature = "pg")]      register(pg)        |
+              |   #[cfg(feature = "postgres")] register(postgres) |
               |   #[cfg(feature = "mysql")]   register(mysql)     |
               |   knows WHICH backends exist, nothing about them  |
               +------------------------+-------------------------+
                                        | selects at compile time
-     +--------------+--------------+---+----------+--------------+
-     v              v                          v                v
- +---------+   +---------+              +----------+   +-------------+
- |   -pg   |   | -mysql  |              | -sqlite  |   |  -duckdb    |
- |         |   |         |              |          |   |             |
- | render  |   | render  |              | render   |   | render      |
- | introsp |   | introsp |              | introsp  |   | introsp     |
- | execute |   | execute |              | execute  |   | execute     |
- +----+----+   +----+----+              +-----+----+   +------+------+
-      |             |                         |               |
-      +-------------+------------+------------+---------------+
-                                 | implements
-                                 v
+       +-------------+-------------+---+---------+
+       v             v             v             v
+ +-----------+ +-----------+ +-----------+ +-----------+
+ | -postgres | |  -mysql   | |  -sqlite  | |  -duckdb  |
+ |           | |           | |           | |           |
+ |  render   | |  render   | |  render   | |  render   |
+ |  introsp  | |  introsp  | |  introsp  | |  introsp  |
+ |  execute  | |  execute  | |  execute  | |  execute  |
+ +-----+-----+ +-----+-----+ +-----+-----+ +-----+-----+
+       |             |             |             |
+       +-------------+------+------+-------------+
+                            | implements
+                            v
               +--------------------------------------------------+
               |             zero-migrate-backend                 |
               |   trait Backend                                  |
@@ -309,7 +309,7 @@ a core change and should be rare; adding a backend is not a core change at all.
 ## The guard
 
 The SQL security guard is `pg_query`-backed, which makes it PostgreSQL-specific
-machinery. It moves into `zero-migrate-pg`. The seam it moves behind ALREADY
+machinery. It moves into `zero-migrate-postgres`. The seam it moves behind ALREADY
 EXISTS: `apply/executor.rs:1118` calls
 `guard::guard_for(&cfg.guard_config().for_dialect(backend.dialect()))`, and the
 crate already ships `PgGuard`, `SqliteDescriptorGuard` and a MySQL posture that
@@ -364,7 +364,7 @@ effect model retires that parser entirely rather than relocating it - the fact
 it recovers by parsing rendered SQL (whether a view is `CREATE OR REPLACE`) is
 already a named field on the op, `Op::CreateView.replace`. Retiring beats
 moving. If the effect model does not land, the parser moves to
-`zero-migrate-pg` and core keeps only the verdict.
+`zero-migrate-postgres` and core keeps only the verdict.
 
 ## Vendor facts
 
