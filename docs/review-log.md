@@ -34447,3 +34447,158 @@ caller's types move.
   trip cannot see it either: no corpus reachable through `genArtifacts` can produce a
   folded field with `fts` set, so the facet is carried by the wire and exercised by
   nothing.
+
+## The second MySQL renderer pinned no collation, and the first question was whether anything reaches it
+
+`render::declarative::mysql_type_override_with_collation` carries the engine's promise
+in its own doc: *"every character type pins an explicit collation so string comparison
+is case-SENSITIVE by default (matching Postgres/SQLite)"*. A SECOND renderer answers the
+same question - `schema::query::renderer(SqlDialect::Mysql).column_type`, which maps a
+raw SDK field def rather than a `FieldDescriptor` - and it pinned nothing at all. Not on
+`VARCHAR(n)`, not on `VARCHAR(191)`, not on `LONGTEXT`, not on `CHAR(n)`, not on the
+`ref` / `inet` fallbacks, not on a string `literal`, not on the unknown-token fallback,
+and not on the native `ENUM(...)`.
+
+### Reachability first, and it was measured twice
+
+The brief's own instruction was not to manufacture a fix for dead code, so nothing was
+changed until the question was answered.
+
+**Statically:** the only production caller of the dialect-generic emitter
+(`build_create_table_with_fks_for_dialect_scoped_statements`) is
+`render::declarative`'s SQLite 12-step rebuild, at a hardcoded `SqlDialect::Sqlite`. The
+three `def_to_column_type_for_dialect` call sites in `render::declarative` (`2505`,
+`7917`, `7928`) and the one in `schema::diff` (`1449`) all pass a hardcoded
+`SqlDialect::Postgres`. `build_add_column` takes no dialect at all and calls
+`def_to_pg_type`. MySQL column DDL is produced by
+`render::declarative::column_type_for_render` instead, from a PostgreSQL-spelled
+`data_type` that `field_data_type` produced - so on the MySQL path `schema::query`'s type
+map IS consulted, but always through its POSTGRES arm.
+
+**Dynamically**, because a call-graph reading is a claim and not a measurement. A
+tripwire that panics on entry to `MysqlSchemaRenderer::column_type` was compiled in and
+the whole Rust suite run against live PostgreSQL, MySQL and SQLite: **37 sections, 3333
+tests, exactly EIGHT tripped, and all eight are `#[cfg(test)]` unit tests inside
+`schema/query.rs` itself.** Not one integration test, not one live-server leg. The same
+tripwire was then carried through `pnpm --filter zero-migrate-node build` into the full
+TypeScript host suite - the real CLI driving the real addon, across the 63 host test
+files that name MySQL - and that run came back **461 tests, 461 pass, 0 fail, 0 skipped, and ZERO
+tripwire hits**. That is the production path, and it does not go through this arm.
+
+So the answer is **latent**: no deployment can hit this today. It was fixed anyway, and
+the reason is narrow rather than speculative - `schema::query` is a `pub mod` of the
+library crate and `def_to_column_type_for_dialect` is `pub` and takes the dialect as a
+PARAMETER. The first caller that passes `Mysql` gets whatever this arm says. The same
+call was made once before in this file, for the decimal arm, and is recorded in the doc
+on `a_number_field_carrying_precision_renders_as_a_decimal_on_every_dialect`.
+
+### What that spelling costs, on a real server
+
+Measured on MySQL 8.4.11 with `@@collation_server = utf8mb4_0900_ai_ci`, by handing the
+server the statements this arm renders (the test IS the only caller that passes `Mysql`,
+which is stated in the file rather than glossed):
+
+- All SEVEN character columns compared `'Active'` EQUAL to a stored `'active'`. Through
+  the same emitter's PostgreSQL arm, PostgreSQL separated them.
+- A `UNIQUE` index over `VARCHAR(64)` refused `'Active'` beside `'active'` -
+  `ERROR 1062 Duplicate entry 'Active' for key 'probe.probe_bounded_uq'`. That is the
+  half that loses DATA rather than a comparison.
+- `information_schema.COLUMNS` reported `utf8mb4_0900_ai_ci`, and `SHOW CREATE TABLE`
+  carried **no `COLLATE` clause on any column** - the table default leaked in. The
+  catalog read alone could not have said that; only the table text distinguishes a pin
+  from an inheritance.
+
+`information_schema.COLUMNS` was chosen because it is the relation the SHIPPED drift path
+reads (`apply/backend/mysql/drift_sql.rs`), so the test measures the surface the engine
+measures. A missing row is treated as an ERROR, never as "no collation": the view is
+privilege-filtered and an absent row and an invisible one are indistinguishable.
+
+### The affected type set, by name and by label
+
+**(a) Fixed and MEASURED on the server** - rendered, executed, and read back:
+`VARCHAR(64)` (`string` + `maxLength`), `VARCHAR(191)` (`string` with no bound),
+`LONGTEXT` (`string` bounded past the row limit), `CHAR(8)` (`char` + `charLen`),
+`VARCHAR(191)` (`ref`), `VARCHAR(43)` (`inet`), `VARCHAR(191)` (the unknown-token
+fallback). Plus the opposite direction: a `caseSensitive: false` `VARCHAR(64)` reached
+`utf8mb4_0900_ai_ci` and the server then DID match `'Active'`.
+
+**(b) Correct as-is, deliberately left bare**, because MySQL assigns them no collation and
+`JSON COLLATE ...` is a parse error rather than a redundancy: `LONGBLOB` (encrypted /
+`bytes`), `BLOB` (`vector`), `POINT SRID 4326` (`geoPoint`), `JSON`
+(`json`/`object`/`array`/`union`/`textArray`), `DECIMAL(p, s)`, `DECIMAL(65, 30)`,
+`DOUBLE`, `FLOAT`, `TINYINT(1)`, `DATETIME(6)`, `DATE`, `BIGINT`, `INT`, `SMALLINT`. Of
+these, `INT`, `JSON` and `DOUBLE` were measured live to carry `COLLATION_NAME` NULL; the
+rest are pinned offline only.
+
+**(c) Changed but NOT executed against a server** - offline pins are their whole
+coverage: `CHAR(1)` (`char` with no `charLen`), `VARCHAR(191)` (a string-valued
+`literal`), the native `ENUM(X'…', X'…')` this arm builds from `def["enum"]`, and a
+`caseSensitive: false` `CHAR(8)`.
+
+### The neuters - five, and every one of them caught something
+
+Run against the COMMITTED fix, through a harness with a PATCH GATE (`git diff --numstat`
+must be non-empty), a BUILD GATE (the neutered tree must compile) and a RESTORE GATE
+(refuses to run on a dirty tree, so `git checkout --` can never delete an uncommitted
+fix). The gates are not decoration: **N3's first perl expression matched nothing and the
+PATCH GATE caught it** - without the gate it would have run five tests against an
+unpatched tree and reported a green neuter.
+
+| # | neuter | caught |
+|---|---|---|
+| N1 | drop the pin entirely | 3 live + 3 offline |
+| N2 | pin, but ignore the `caseSensitive` facet | 1 live + 2 offline |
+| N3 | pin onto EVERY spelling, `JSON` included | 5 live + 1 offline |
+| N4 | flip the engine-wide default to `_ai_ci` | 7 live + 5 offline |
+| N5 | take `ENUM` back out of the character family | 4 live + 1 offline |
+
+N4 and N5 are the interesting ones. Both reach tests this change did not write -
+`mysql_enum_collation`, `injected_column_collation`, `generated_identity_columns` - which
+is the evidence that the two renderers really do share ONE collation decision now rather
+than agreeing by coincidence.
+
+### The golden that did not move, and why its silence is the finding
+
+`tests/goldens/field_defs_artifacts.txt` carries `Mysql` rows but ZERO `sqlite_create|`
+lines for them. That is not blindness: `support/field_defs_corpus.rs` says in its own doc
+that the DDL line is *"emitted for the SQLite dialect only, because that is the only
+dialect on which this map reaches a `CREATE TABLE`"*. The golden's silence about MySQL
+DDL is the reachability fact this entry measured, recorded three months before anyone
+measured it. It must not move, and it did not.
+
+### Which instruments are circular
+
+- `tests/column_shapes/mysql_field_def_carrier_collation.rs` compares one function in
+  this repo against literals in this repo. It proves the SURFACE is covered - every token
+  named rather than counted - and nothing about a server.
+- `both_mysql_carriers_pin_the_same_collation_for_the_same_column` compares two renderers
+  that now literally share `mysql_pin_collation` and `mysql_collation_clause`. It cannot
+  detect a collation choice that is wrong but consistent; it can only detect the two
+  drifting apart. The live file is the only thing that adjudicates the choice, and only
+  for the case-sensitivity property.
+- The tripwire proves no TEST reaches the arm. That is evidence about production only
+  insofar as the suite covers production, which is why the static trace is reported
+  beside it rather than instead of it.
+
+### What the gate does NOT prove
+
+- **No deployment is fixed by this.** Nothing routes here. This is a latency closed and a
+  regression fenced, not a defect a user can hit.
+- **The live route is a test-only route.** The test constructs the only caller that
+  passes `Mysql`. If a production caller is wired later, nothing here proves it will pass
+  the right `caseSensitive` intent, or the right `app_id`, or `FkEmission`.
+- **Already-deployed tables are untouched.** This changes what is EMITTED. A table
+  created before it keeps its inherited `_ai_ci` columns - the same caveat
+  `mysql_pin_enum_collation` documents, and the same manual `ALTER ... MODIFY` repair.
+  Nothing here would have anything to repair, because nothing deployed through this arm.
+- **The two carriers still disagree on BASE spelling.** A `caseSensitive: false` bounded
+  string is `TEXT` on the snapshot carrier (`mysql_base_column_type` routes it through the
+  PostgreSQL `citext`/`text` mapping and LOSES the bound) and `VARCHAR(n)` here. That
+  predates this change, it is a storage decision rather than a comparison one, and it is
+  recorded in the test rather than closed.
+- **`SET(...)` is named in the predicate and emitted by nothing.** It is there because it
+  is the same shape as `ENUM`, and it is exercised by no test at all.
+- **The `_as_cs` / `_ai_ci` choice itself is not re-adjudicated here.** It is inherited
+  from `mysql_collation_clause`, which this change made the single source of it. Whether
+  accent-sensitivity is the right default for a case-sensitivity promise is a question
+  this entry did not open.
