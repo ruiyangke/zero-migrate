@@ -1527,17 +1527,42 @@ mismatch.
 
 ### Exact compositional core
 
-- Add exact UUIDv4 and UUIDv7 expression variants.
-- Add exact SQLite UUIDv4 version and variant bits.
-- Ensure the MySQL lowerer never uses UUIDv1 for a UUIDv4 contract.
-- Add target/version/replication validation for database UUID defaults.
-- Remove `t.id()` and migrate source, fixtures, and documentation to explicit
-  primitive composition.
-- Keep `t.bigInt().primaryKey().autoIncrement()` as the portable integer form.
-- Enforce explicit ordered table-level composite primary keys and portable
-  generation rules.
-- Add exact signed 64-bit JavaScript and wire values.
-- Add end-to-end PostgreSQL, MySQL, and SQLite DDL tests.
+**Status, measured at `6b92afa6`.** Eight of nine are done; the ninth is done on two
+of its three targets. Verified by ARTIFACT — searching this document's own wording
+instead of the code's names produced a false "not built" on one of these (see the
+fourth bullet).
+
+- ~~Add exact UUIDv4 and UUIDv7 expression variants.~~ **DONE** —
+  `zero-migrate-ir/src/expr.rs:360` and `:364`.
+- ~~Add exact SQLite UUIDv4 version and variant bits.~~ **DONE** —
+  `tests/column_shapes/uuid_generation.rs` asserts `bytes[14] == b'4'` and
+  `bytes[19] ∈ {8,9,a,b}` on a GENERATED value, so it is two-sided rather than a
+  spelling check.
+- ~~Ensure the MySQL lowerer never uses UUIDv1 for a UUIDv4 contract.~~ **DONE and
+  guarded both ways** — `render/dml.rs:3706` asserts the emitted template does NOT
+  contain `UUID()`, with the reason in the message: MySQL's `UUID()` is UUIDv1.
+- ~~Add target/version/replication validation for database UUID defaults.~~ **DONE**
+  — `model/validate.rs:564-567,590,594`. **A grep for "replication" returns
+  nothing**, which reads exactly like "not built"; the code does not use that word.
+  It validates per target instead: PostgreSQL's native `uuid` type is its own
+  contract so no CHECK is emitted, while MySQL and SQLite get the engine's exact
+  UUID spelling CHECK via `ColumnSnapshot::catalog_uuid_format_check`.
+- ~~Remove `t.id()`.~~ **DONE** — zero occurrences in the TypeScript DSL source.
+- ~~Keep `t.bigInt().primaryKey().autoIncrement()`.~~ **DONE** — present in the DSL.
+- ~~Enforce explicit ordered table-level composite primary keys.~~ **DONE** —
+  covered by `tests/pg_engine/pg_primary_key.rs` plus the IR checksum and wire
+  contract tests.
+- ~~Add exact signed 64-bit JavaScript and wire values.~~ **DONE** —
+  `packages/zero-migrate/src/db-lexicon.ts`, `ops.ts`.
+- **Add end-to-end PostgreSQL, MySQL, and SQLite DDL tests.** **TWO OF THREE.**
+  `tests/column_shapes/synchronize_identity_pg.rs` and
+  `synchronize_identity_sqlite.rs` exist; **there is no MySQL equivalent.** MySQL is
+  not unimplemented — `apply/backend/mysql/identity_sql.rs` ships, and the op is
+  driven live on MySQL through the conformance corpus, which answers "did it reach
+  `Applied`". What is missing is the DDL-SHAPE assertion the other two targets have.
+  This is the same asymmetry `backend-conformance.md` was written about: an outcome
+  check and a shape check answer different questions, and only PostgreSQL and SQLite
+  have both.
 
 ### Textual formats
 
