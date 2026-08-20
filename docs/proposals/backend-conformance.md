@@ -547,17 +547,48 @@ job in their own CI and publish a ledger.
 Each step is independently valuable at THREE backends and leaves the tree green.
 Nothing here waits on `DialectId` or on crate extraction.
 
-1. **Move `f664_scaling` and `f665_scaling` off the shared runner.** A CI-only
-   change. Do it first, because every later step raises the load that flakes
-   them, and a suite landing next to a known flake gets blamed for it.
-2. **Layer 0, offline, three backends.** Extract the 92-op corpus from
-   `dialect_table_faithfulness.rs` into `zero-migrate-conformance`; the existing
-   test imports it back unchanged. Add the no-blank-cells rule. Fix the stale
-   `transparentDegradable` comment. No database, no CI cost.
-3. **Give the `rust` job a MySQL service and write `fold_roundtrip_mysql.rs`.**
-   Five lines of YAML plus the third leg of an oracle whose other two legs are
-   written. This closes the largest measured asymmetry in the tree and needs no
-   conformance machinery at all, so it lands even if the rest slips.
+1. ~~**Move `f664_scaling` and `f665_scaling` off the shared runner.**~~ **DONE** —
+   they run in their own `scaling:` job, separate from `rust:`. One footnote worth
+   keeping: that job invoked `--test f664_scaling --test f665_scaling`, and
+   consolidating the tests into themed subdirectories turned those binaries into
+   MODULES under `authoring_surface`. The invocation had been exiting **101** with
+   `error: no test target named f664_scaling` — the job had timed nothing since the
+   move. Fixed to name `authoring_surface`, whose ignored set is exactly these five
+   guards. The job's own anti-silence check did not catch it: that check watches for
+   a run that SUCCEEDS while measuring nothing, and a missing target fails loudly
+   just outside its aim.
+2. ~~**Layer 0, offline, three backends.**~~ **DONE, with one deliberate
+   deviation.** All three sub-items, measured:
+   - *Corpus lift* — DONE, but into `tests/dialect_corpus/mod.rs`, **not** a
+     `zero-migrate-conformance` crate. That is decision 7 at the smallest scope
+     that buys it, and the module says why in its own header: a crate is only
+     needed once a backend lives outside this repo, which is `pluggable-backends.md`
+     step 4 / this document's step 7. The 92 rows are byte-identical to the ones
+     the faithfulness test built, and it now has FOUR consumers —
+     `dialect_table_faithfulness.rs`, `dialect_conformance_live.rs`,
+     `checksum_corpus_stability.rs`, `unsupported_reason_is_operator_facing.rs`.
+     **Do not create the crate to tick this box.** Its absence is the design.
+   - *No-blank-cells rule* — **ALREADY ENFORCED, so nothing was added.** Proven by
+     counterfactual rather than by reading: blanking one cell (`pg = ""` on
+     `alterPrimaryKey/base`) fails
+     `op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar`,
+     because the sidecar⟷table bijection compares against a generated disposition
+     token that the empty string matches none of. A dedicated rule would be
+     redundant coverage.
+   - *Stale `transparentDegradable` comment* — FIXED, and it was staler than
+     described. The legend claimed the token was "NOT produced by the current
+     engine; reserved, and no row in this file uses it"; **both halves were false.**
+     Two rows use it on both non-PostgreSQL dialects, the generated table carries
+     it, `op_support.rs` treats it as SUPPORTED, and lowering collapses a partition
+     child into its parent because of it.
+3. ~~**Give the `rust` job a MySQL service and write `fold_roundtrip_mysql.rs`.**~~
+   **DONE.** `crates/zero-migrate/tests/fold_live/fold_roundtrip_mysql.rs` exists
+   and CI carries the MySQL service. The oracle has all three legs, so the largest
+   measured asymmetry in the tree is closed.
+
+**Steps 1, 2 and 3 are complete. 4, 5 and 6 are open** — measured: no outcome
+ledger exists anywhere in `crates/`, and CI has no differential job. Step 7 is
+deferred by design (see step 2).
 4. **Layer 1, outcome ledger, three backends.** Expected first result is known
    from F877: roughly 67/80 PG, 23/43 SQLite, 16/36 MySQL reaching `Applied`.
    Anything better than that means the instrument is wrong.
