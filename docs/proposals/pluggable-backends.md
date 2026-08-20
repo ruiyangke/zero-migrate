@@ -563,18 +563,73 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
    | `impl DdlEmitter for MysqlEmitter` (9918-10004) | 7 |
    | elsewhere | 1 |
 
-   **The contract carries 23 of 57 — about 40% of its own module's DDL.**
-   `DeclarativeAuthor` emits the other 33 through three parallel surfaces that
-   never reach `DdlEmitter` at all: twelve `render_*` methods (create-table per
-   dialect, FKs, column type/nullability/default, the four partition ops), five
-   `lower_*` methods (create-table, add/drop constraint, drop FK, validate
-   constraint), and the SQLite rebuild builders. That is category (iii) UNROUTED
-   EMISSION at scale.
+   **CORRECTION: the numbers above were produced by a BLIND INSTRUMENT.** They
+   came from matching string literals that begin with a two-word DDL prefix
+   (`CREATE TABLE`, `ALTER TABLE`, …). That pattern cannot see a literal whose
+   keyword pair is split by an interpolation — **`"CREATE {unique}INDEX …"` is
+   invisible to it** — and its keyword list omitted `RENAME TABLE` and
+   `COMMENT ON COLUMN` entirely. Seven real emission sites were missed. This is
+   the THIRD wrong DDL number this document has carried, and the third time the
+   cause was a keyword list rather than a boundary: the same failure produced the
+   "`render/backends/` contains ZERO DDL" blocker above.
 
-   So the real prerequisite is a CONTRACT-DESIGN question, not a move: the trait
-   has six methods and no `CREATE TABLE`, while the bypassing surfaces cover
-   create-table, partitions, constraints, FKs, defaults and nullability. Those 33
-   need somewhere to go before anything can be relocated.
+   Use a **verb-anchored** pattern instead — a literal beginning with
+   `CREATE|ALTER|DROP|RENAME|COMMENT|TRUNCATE`, interpolation tolerated anywhere
+   after — and subtract ALTER-clause fragments (`"SET NOT NULL"`,
+   `"DROP NOT NULL"`), which a verb anchor cannot distinguish from statements.
+   Measured that way at `069d419a`, after `CREATE TABLE` moved into the contract:
+
+   | block | sites |
+   |---|---|
+   | `impl DeclarativeAuthor` | **23** |
+   | the three `DdlEmitter` impls | **31** (PG 10, SQLite 10, MySQL 11) |
+
+   **The contract now carries 57%**, not the 40% first reported.
+
+   ### The 33 were never one problem — five classes, and only 12 want a contract
+
+   Measured by reading every site and tracing its gate:
+
+   | class | sites | what it actually needs |
+   |---|---|---|
+   | **A. already covered** | 6 | nothing — call `drop_table_up`, which existed |
+   | **B. genuine three-way statement** | 12 | the contract |
+   | **C. statement identical, identifiers differ** | 3 | one helper, not a method |
+   | **D. PostgreSQL-only, already gated** | 11 | a file |
+   | **E. SQLite rebuild, no analogue** | 3 | a file, plus a public-API decision |
+
+   Class A is done: six sites spelling `DROP TABLE` for a create-table `down` were
+   byte-identical to a method that already existed. Class B is a third done
+   (`CREATE TABLE` landed). **So prerequisite 1 is roughly a third the size this
+   document claimed, and "contract-design question" is true of only 12 of the 33.**
+
+   A contract covering all 33 was considered and REJECTED: it grows the trait to
+   ~18 methods of which 11 could only be answered by `unreachable!()` on two of
+   three impls, and it makes step 4 *harder* — `zero-migrate-mysql` would have to
+   depend on `PartitionBounds` and `SqliteRebuild` to compile a trait it never
+   uses. A contract whose implementors mostly panic is a dialect match with
+   ceremony.
+
+   ### The two long poles are DECISIONS, and they do not block on the contract
+
+   Classes D and E are pure relocation. Neither needs design work; each needs one
+   decision, and both can be taken in parallel with Class B:
+
+   1. **The four partition renderers gate on a raw
+      `matches!(self.dialect, SqlDialect::Postgres)` in core.** Moving them to
+      `backends/postgres.rs` needs either a new `Capability::DeclarativePartitioning`
+      — and `Capability`'s own doc says "keep this enum CLOSED… adding a capability
+      is a core change and should be rare" — or leaving raw dialect matches in
+      core, which contradicts `backend.rs`'s opening line, "Core never asks 'which
+      dialect is this'."
+   2. **Three `pub` vendor-named types force the Class E question:**
+      `render::declarative::SqliteRebuild`, `render::plan::SqliteRebuildSpec`,
+      `render::plan::SqliteSequencePolicy`. They are the ONLY vendor-named public
+      items under `render/`. Step 4 either moves them into `zero-migrate-sqlite`,
+      breaking every `zero_migrate::render::…` path that names them, or leaves a
+      SQLite-shaped type in core's public API permanently.
+
+   Both are cheap to move and expensive to move twice, so decide before moving.
 2. ~~Stop `render_sqlite_trigger_op` resolving to the PostgreSQL renderer (6 sites,
    1 function).~~ **DONE.** Those six now say
    `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)` (20 uses of the const
