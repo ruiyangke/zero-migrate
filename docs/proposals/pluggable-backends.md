@@ -83,7 +83,8 @@ so the record shows what moved rather than quietly rewriting itself.
 | **core looks vendors up BY DIALECT, from inside core** | ~55 call sites resolve `renderer(dialect)` within `render/` and `schema/` (dml 24, schema/query 21, lower 7, value_format 2, existence_probe 1). Core depends on the backend registry while backends depend on core: a CYCLE. An extraction spike compiled only by stubbing that arm with `panic!`. |
 | **the "neutral" plan vocabulary carries vendor names** | `render/step.rs:51,53` — `RenameStep::PgExpandContract` and `RenameStep::SqliteRebuild`, matched at 203/204/234, with `step.rs:8` importing `SqliteRebuild` from the declarative renderer. `apply/backend/mod.rs:751` takes `spec: &SqliteRebuildSpec`. **The would-be CONTRACT crate carries SQLite types.** |
 | **there are FIVE per-dialect stacks, not one** | `DmlRenderer` (26 methods), `DdlEmitter` (6, inside `declarative.rs`), `schema::query::SchemaRenderer` (10), `MigrationBackend` (41), `CrossDeployObligations` (8). Only the first is guarded by the one-dialect test. |
-| **`render/backends/` contains ZERO DDL** | `grep -c 'CREATE TABLE\|ALTER TABLE\|ADD COLUMN\|CREATE INDEX'` returns 0 in all four files. The DDL half of step 3 has no destination module today. |
+| **CORRECTED: `render/backends/` holds VIEW and TRIGGER DDL, but no TABLE/COLUMN/INDEX DDL** | The original row said "contains ZERO DDL", from `grep -c 'CREATE TABLE\|ALTER TABLE\|ADD COLUMN\|CREATE INDEX'` returning 0 in all four files. That count is right and the conclusion drawn from it is wrong: **the keyword list omitted VIEW and TRIGGER.** `backends/sqlite.rs:234` emits `DROP VIEW IF EXISTS {qname}`; `backends/mysql.rs` emits `CREATE TRIGGER` (:393), `DROP TRIGGER` (:275) and `DROP TRIGGER IF EXISTS` (:408). So the destination is **not** a void, and the DDL half of step 3 has a **precedent inside its own target directory** rather than no home at all. What is genuinely absent is table/column/index DDL. |
+| **the DDL contract already exists — privately, in the wrong module** | `declarative.rs:9442` declares `trait DdlEmitter` (NOT `pub`) with six methods — `add_column`, `create_index`, `drop_table_up`, `rename_table`, `drop_column_up`, `drop_index_up` — and three impls: `PgEmitter` (:9508), `SqliteEmitter` (:9731), `MysqlEmitter` (:9875). Every reference to it outside `declarative.rs` is a DOC COMMENT (`lower.rs:16`, `fold.rs:4398`, one test comment); **no code outside that module uses it.** So "moving DDL means designing a DDL backend contract" overstates the work: a six-method contract with three vendor impls is already written and already self-contained. It is missing `CREATE TABLE`, which is emitted outside the trait. |
 | **the fold is dialect-aware throughout, not at five SQLite sites** | This proposal places the fold in core with "NO dialect knowledge". That is categorically false, not five sites off. `render/fold.rs` **production** code (lines 1-5798) carries **27 `SqlDialect::` occurrences over 26 lines** — 12 `Postgres`, 8 `Sqlite`, 7 `Mysql` — and **7 vendor-named production functions**: `reusable_postgres_primary_index` (919), `sqlite_integer_storage_for_rowid` (958), `sqlite_folded_rowid_generation` (969), `restamp_mysql_physical_types` (3403), `renders_the_same_mysql_type` (3442), `apply_fold_sqlite_rowid_metadata` (3448), `pg_type_data_type` (3983). It also calls per-vendor `declarative::` helpers for **all three** vendors: `sqlite_create_is_without_rowid` ×3 (988, 1091, 3472), `sqlite_inline_primary_key_is_desc` ×2 (989, 3473), and `stamp_mysql_physical_type` ×2 — so the earlier "reads SQLite DDL text" heading named the wrong scope as well as the wrong size. **Two measurement traps here, both of which produced wrong numbers first.** (1) A raw grep reports **59** occurrences / **54** lines; 32 of those occurrences are in the test module and are not refactor work — occurrences and lines are different numbers and were once conflated. (2) The first `#[cfg(test)]` in the file is at **line 93, sitting on a `use`**, not on the test module, which starts at **5799**. Truncating the file at the first `#[cfg(test)]` measures 92 lines and reports ZERO vendor-named functions. |
 | **line 1 exists only for PostgreSQL** | `guard_for` maps BOTH `Sqlite` and `Mysql` to `SqliteDescriptorGuard`, whose `check` returns the EMPTY outcome by design — those engines are descriptor-only and their whole enforcement is line 2. The architecture diagram's uniform per-backend shape does not hold for the guard. |
 
@@ -473,6 +474,39 @@ census that greps a whole file overstates the work by multiples. And **density,
 not file size, is what matters**: `lower.rs` is 44% larger than `declarative.rs`
 and carries only 8 more production literals, so `declarative.rs` is the denser
 target despite being the smaller file.
+
+#### The DDL half of step 3, sized
+
+Same discipline, different pattern: string literals that **begin** with a DDL
+keyword (`CREATE TABLE`, `ALTER TABLE`, `CREATE INDEX`, `DROP TABLE`, `DROP INDEX`,
+`CREATE VIEW`, `DROP VIEW`, `CREATE TRIGGER`, `DROP TRIGGER`), counted outside test
+modules, measured at `7255bd3c`.
+
+| zone | production DDL emission sites |
+|---|---|
+| `render/backends/` — the step-3 destination | **4** (view + trigger, all three vendors) |
+| `apply/backend/<vendor>/` — already correctly partitioned | **51** |
+| **core — the actual step-3 work** | **103** |
+
+Of the 103 in core, **`render/declarative.rs` holds 57 (55%)**. `render/lower.rs`
+holds **2** — despite being the largest file in the tree at 16,996 lines and
+carrying the most dialect literals. **Size and dialect-literal density do not
+predict DDL emission**, so the DDL half must be sequenced by this census and not by
+either of the other two.
+
+Four files are EXCLUDED because the instrument refused them rather than guessing
+(`guard_vendor_lower_tests.rs`, `support_matrix.rs`, `fold_projection_equality.rs`,
+`differential_corpus.rs` — each has `#[test]` outside any detected test module).
+They are named here rather than silently dropped; the 103 is a floor.
+
+**Two rounds of this measurement were wrong before it settled, both overstating.**
+A raw keyword grep across `src/` gave 315 core sites; excluding test modules cut it
+to 85, because toy fixtures like `"CREATE TABLE a()"` in test code counted as
+emission — `plan/manifest.rs` alone contributed 28 fixtures and **zero** real sites.
+Requiring the literal to BEGIN with the keyword then corrected the other direction's
+error: most remaining `declarative.rs` hits were ERROR MESSAGES that merely mention
+DDL (`"SQLite primary-key rebuild of '{table}' could not parse its stored CREATE
+TABLE body"`). Both mistakes inflated the apparent work, and both looked plausible.
 
 #### The census instrument failed twice before it was believed, both times silently
 
