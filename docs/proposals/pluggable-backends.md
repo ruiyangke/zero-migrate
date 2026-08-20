@@ -551,18 +551,39 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
 1. Finish step 3's DDL half. Extraction CANNOT REVEAL this coupling — the spike's
    crate left 47 SQLite-named items in core, including a 155-line `SqliteEmitter`
    and a 128-line `SqliteSchemaRenderer`. A `zero-migrate-sqlite` that does not
-   contain SQLite.
-2. Stop `render_sqlite_trigger_op` resolving to the PostgreSQL renderer (6 sites,
-   1 function). Cheapest item, and the one that makes the premise false.
+   contain SQLite. **NOW SIZED** (see the DDL census above): 103 production
+   emission sites in core, 57 of them in `declarative.rs`, and the destination is
+   not a void — `render/backends/` already owns view and trigger DDL, and a
+   private six-method `DdlEmitter` with three vendor impls already exists inside
+   `declarative.rs`.
+2. ~~Stop `render_sqlite_trigger_op` resolving to the PostgreSQL renderer (6 sites,
+   1 function).~~ **DONE.** Those six now say
+   `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)` (20 uses of the const
+   in `lower.rs`), the PG-pinned wrapper is deleted rather than merely bypassed,
+   and `sqlite_trigger_quoting_reaches_postgres.rs` pins the count at **zero**
+   across all of `src/` — a ratchet at its stop, not a claim in prose. Note the
+   obvious proof of this LIED: the neuter that should have caught it stayed GREEN
+   at the commit where the reach was live, because the chosen binary never renders
+   a trigger. `sqlite_trigger_render_bytes.rs` exists to be an instrument that can
+   see the path.
 3. Fold or explicitly separate `schema::query::SchemaRenderer`. It is LIVE —
    5,555 calls in one SQLite run, reached from the apply backends, every
    live-database binary and the real CLI — and it is a fully public path, so
    deleting it is a semver break.
 4. Invert the ~55 core sites that look a vendor up by dialect.
 5. De-vendor the plan vocabulary and the `MigrationBackend` signatures.
-6. Resolve `quote_ident_if_needed`, whose bare-vs-quoted decision is gated on
-   the PostgreSQL reserved-keyword list and is consumed by the SQLite drift
-   comparator.
+6. **RECLASSIFIED, and it will never be "resolved".** `quote_ident_if_needed`'s
+   bare-vs-quoted decision is gated on the PostgreSQL reserved-keyword list and is
+   consumed by the SQLite drift comparator. That is a **deliberate canonical
+   normal form**, not a defect: it builds and parses the `pg_get_constraintdef`
+   shape, which the SQLite and MySQL comparators read ON PURPOSE, and
+   re-dialecting it would break the round-trip. It now sits behind a named door
+   (`dml::pg_canonical_ident`) precisely because a red-count neuter cannot tell it
+   apart from an unrouted emission.
+   **The extraction consequence stands and is the real prerequisite:** a shared
+   PostgreSQL-shaped normal form that every backend reads needs a home all backend
+   crates can reach. Deciding where that lives is step 4 work; changing the
+   normal form is not.
 
 **One guard extraction silently kills:** `backend_modules_name_one_dialect.rs`
 reads the backend modules via `include_str!` at paths extraction deletes. It must
