@@ -603,6 +603,48 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
    (`CREATE TABLE` landed). **So prerequisite 1 is roughly a third the size this
    document claimed, and "contract-design question" is true of only 12 of the 33.**
 
+   #### CORRECTION: Class B was 12 by a REACHABILITY assumption, and it is 9
+
+   The class table above was built by reading each site's `match self.dialect` and
+   counting its arms. THREE ARMS IS NOT THREE DIALECTS. Re-measured site by site,
+   nine of the twelve are not what the row says:
+
+   | site | census said | measured |
+   |---|---|---|
+   | `lower_add_constraint` (2) | B — three-way | **C** — `ADD`/`DROP CONSTRAINT` is the identical keyword string on all three; only the two identifiers vary |
+   | `lower_drop_constraint` (1) | B — three-way | **C** — same, and it held the SAME `match` as the add path, VERBATIM including comments |
+   | `render_add_fk` (4) | B — three-way | **two-way**; the SQLite arm is DEAD |
+   | `lower_drop_fk` (2) | B — three-way | **two-way**; the SQLite arm is already `unreachable!()` in the source |
+
+   The three Class-C sites are now one `constraint_refs` + one
+   `drop_constraint_stmt`, exactly as the Class C row prescribes.
+
+   The six FK sites are NOT the contract's, and the reason is already written down
+   elsewhere in this tree: `DeclarativeAuthor::qualified`'s header records a
+   CONTROLLED measurement at `7ca23cdc` (assert-not-Postgres ⇒ 45 failures, the
+   instrument fires; assert-Postgres ⇒ 3372 pass) proving no non-PostgreSQL dialect
+   reaches it, and it names these very sites as the SQLite legs that would land
+   there "if it were not for a capability gate several frames up"
+   (`AlterTableAddConstraint` / `AlterTableDropConstraint` are both false for
+   SQLite). `render_add_fk`'s SQLite `up` is not merely dead, it is INCOHERENT: the
+   table reference is unqualified `sqlite_ident`, but `fk_clause` routes SQLite to
+   `PgEmitter::fk_clause`, so the `REFERENCES` target comes back schema-qualified.
+
+   So a `DdlEmitter::add_fk` / `drop_fk_up` pair grows the trait 7 → 9 with BOTH
+   new methods answerable on `SqliteEmitter` only by `unreachable!()` — the same
+   species as the all-33 contract this document rejected two paragraphs down, and
+   the first break in the invariant that every one of the seven existing methods is
+   genuinely answered by all three impls. **This is a decision, not a refactor**, and
+   it belongs beside the two below rather than inside a routing change:
+
+   3. **Does a `DdlEmitter` method get to be `unreachable!()` on an impl?** If yes,
+      the six FK sites move behind the contract and step 4 gets six fewer dialect
+      matches in core. If no, they stay as explicit `match self.dialect` routing in
+      core, like `fk_clause` already is. Answering it also settles whether
+      `render_add_fk`'s dead SQLite `down` should become `unreachable!()` to match
+      `lower_drop_fk` — today it emits `"schema"."table"`, which on SQLite does not
+      error, it SILENTLY no-ops.
+
    A contract covering all 33 was considered and REJECTED: it grows the trait to
    ~18 methods of which 11 could only be answered by `unreachable!()` on two of
    three impls, and it makes step 4 *harder* — `zero-migrate-mysql` would have to
