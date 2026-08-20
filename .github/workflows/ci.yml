@@ -158,7 +158,7 @@ jobs:
   # and `-- --ignored` here is the only place they are timed. The threshold was NOT
   # relaxed to achieve this, and CPU time was measured against wall clock and
   # rejected as an instrument; both arguments live in the header of
-  # `crates/zero-migrate/tests/f664_scaling.rs`.
+  # `crates/zero-migrate/tests/authoring_surface/f664_scaling.rs`.
   # ---------------------------------------------------------------------------
   scaling:
     name: scaling (complexity guards, idle machine, no services)
@@ -178,19 +178,38 @@ jobs:
           restore-keys: |
             cargo-scaling-${{ runner.os }}-
 
-      # `--test-threads=1` so the two binaries' arms never time each other: these
-      # measure the machine, and libtest's default parallelism would have them
-      # competing for the cores whose availability is the whole measurement.
+      # `--test-threads=1` so the guards' arms never time each other: these measure
+      # the machine, and libtest's default parallelism would have them competing for
+      # the cores whose availability is the whole measurement.
       #
       # `tee` plus the check below because `--ignored` combined with a filter that
       # matched nothing exits 0 while running zero tests, which is exactly the
       # failure this job exists to prevent - a guard that silently stops guarding.
       # `(^| )0 passed` rather than a plain `0 passed` so a legitimate "10 passed"
       # does not trip it.
+      #
+      # THE TARGET IS `authoring_surface`, NOT `f664_scaling`/`f665_scaling`. Those
+      # were once their own test binaries; consolidating the tests into themed
+      # subdirectories made them MODULES inside `tests/authoring_surface/`, and no
+      # `[[test]]` targets are declared, so cargo auto-discovers one binary per
+      # `tests/*/main.rs`. The old invocation therefore died with
+      # `error: no test target named f664_scaling` (exit 101) and this job had not
+      # timed a guard since the move.
+      #
+      # Worth noting WHY the careful check below did not catch it: it guards against
+      # the filter matching nothing, which is a run that succeeds while measuring
+      # nothing. A target that does not exist is a different failure - cargo exits
+      # non-zero before any test runs, so `set -o pipefail` is what reddens the step,
+      # and `scaling.log` never gets a "0 passed" line for the grep to find. A guard
+      # aimed at one silent failure was defeated by a loud one it did not cover.
+      #
+      # The ignored set in `authoring_surface` is EXACTLY these five guards
+      # (`--list --ignored` confirms: four `f664_scaling::`, one `f665_scaling::`),
+      # so naming the binary runs precisely what naming the two old ones did.
       - name: cargo test (complexity guards only)
         run: |
           set -o pipefail
-          cargo test -p zero-migrate --test f664_scaling --test f665_scaling \
+          cargo test -p zero-migrate --test authoring_surface \
             -- --ignored --test-threads=1 2>&1 | tee scaling.log
       - name: the guards actually ran
         run: |
