@@ -647,6 +647,40 @@ is chosen so that the risky step is last and the safety net is first.
 
 Steps 1 through 3 change no behaviour at all. Step 4 is where value lands.
 
+### Status, measured at `9ae6e95c` — steps 1 through 5 are DONE
+
+Verified by ARTIFACT, not by this document's prose (searching a plan's phrasing
+instead of the code's names has twice made a finished step look unbuilt here):
+
+| step | artifact |
+|---|---|
+| 1 differential corpus | `src/render/gen_types/differential_corpus.rs` |
+| 2 `SchemaModel` + `VendorFacts` | `src/model/schema_model.rs:499` and `:204` |
+| 3/5 the fold, effects, `state_at(N)` | `src/render/fold/effects.rs:79 pub fn state_at`; `zero-migrate-ir/src/effect.rs:50 pub enum Effect` |
+
+Step 5's named sub-items, checked individually:
+
+- **`pg_query` deleted from `apply/plan_precondition.rs`** — DONE, zero references
+  remain in that file. Note this is NARROWER than "delete the `pg_query`
+  dependency", which was separately investigated and found NOT possible; the two
+  claims are easy to conflate.
+- **`sql_clears_no_obstruction` replaced by the op-derived test** — DONE. It is now
+  `clears_no_obstruction` at `plan_precondition.rs:265`, op-derived.
+- **The three preview `advance_*` helpers collapse into `state_at(N)`** — PARTLY
+  verified only. `advance_preview_table_presence` is gone. Three `advance_*`
+  functions remain (`advance_declared_column_generation` and
+  `advance_logical_columns` in `render/lower.rs`, `advance_referenceable_tables` in
+  `render/fold.rs`), and whether those are the same three this step meant is
+  UNVERIFIED — their names do not say "preview". Measure before claiming either way.
+
+**Step 6 is the only one left, and it is a decision rather than a task.** It is
+written up in `docs/open-decisions.md` as decision 1, because the proposal's own
+justification for hoisting all five existence assertions does not hold for the two
+NEGATIVE ones: `TableNotExists` / `ColumnNotExists` range over the model's
+COMPLEMENT, which this document elsewhere establishes is unbounded. Hoisting those
+two fails in the UNDER-refusal direction, which the step's risk analysis never
+considers.
+
 ## H. Required test matrix
 
 - **Differential replay.** The step 1 corpus, every stream through every
