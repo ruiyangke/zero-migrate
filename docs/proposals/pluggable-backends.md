@@ -63,16 +63,29 @@ kept in two places, and the seam between them is not the seam a plugin needs.
 
 ## What blocks this today, measured
 
-These are the concrete barriers, each verified against `main` at `01385061`.
+Originally verified against `main` at `01385061`. **RE-MEASURED since, and two rows
+have closed.** The status column is the current answer; the original claim is kept
+so the record shows what moved rather than quietly rewriting itself.
 
-| blocker | where | why it blocks |
+| blocker | where | status |
 |---|---|---|
-| four closed dialect enums | `ir/dialect.rs:21`, `ir/validate.rs:347`, `render/step.rs:12`, `node/verbs.rs:28` | a plugin cannot add a variant to a crate it does not own |
-| `DialectSet(u8)` | `model/support.rs:40` | cannot express a FOURTH backend at all (see note) |
-| spelling separated from execution | `render/` vs `apply/backend/` | `apply/backend/` references `crate::render` 137 times; extracting a backend crate would leave its SQL behind |
-| `Capability` is private | `render/renderer.rs:16` | 25 predicates exist but a plugin cannot answer or extend them |
-| vendor fields on shared structs | `ColumnSnapshot.sqlite_rowid`, three `mysql_*` fields | a new backend has nowhere to record its equivalent |
-| dialect names in the wire format | `Op::Dialectal`, `ir.rs:3385` | named legs `pg` / `sqlite` / `mysql` |
+| closed dialect enums | `ir/dialect.rs`, `ir/validate.rs`, `render/step.rs` | **THREE, not four.** `node/verbs.rs` no longer declares one. The rest still block a plugin from adding a variant to a crate it does not own. |
+| `DialectSet(u8)` | `ir/dialect.rs:162` | **CLOSED.** Now `DialectSet(Cow<'static, [DialectId]>)`. The fourth-backend cap is gone. |
+| spelling separated from execution | `render/` vs `apply/backend/` | **UNCHANGED, still exactly 137** `crate::render` references from `apply/backend/`. |
+| `Capability` is private | `zero-migrate-ir/src/backend.rs:44` | **CLOSED.** `pub enum Capability`, promoted to public vocabulary alongside `CapabilitySet(u64)` and `BackendDescriptor`. |
+| vendor fields on shared structs | `model/snapshot.rs:136,174,197,215` | **UNCHANGED.** `sqlite_rowid` plus three `mysql_*` fields, exactly as originally counted. |
+| dialect names in the wire format | `Op::Dialectal` | **UNCHANGED BY DESIGN.** Decision 7 freezes the `pg`/`sqlite`/`mysql` legs permanently; the `DialectId`-keyed variant is additive. |
+
+### Blockers this proposal did not know about, all measured since
+
+| blocker | evidence |
+|---|---|
+| **core looks vendors up BY DIALECT, from inside core** | ~55 call sites resolve `renderer(dialect)` within `render/` and `schema/` (dml 24, schema/query 21, lower 7, value_format 2, existence_probe 1). Core depends on the backend registry while backends depend on core: a CYCLE. An extraction spike compiled only by stubbing that arm with `panic!`. |
+| **the "neutral" plan vocabulary carries vendor names** | `render/step.rs:51,53` — `RenameStep::PgExpandContract` and `RenameStep::SqliteRebuild`, matched at 203/204/234, with `step.rs:8` importing `SqliteRebuild` from the declarative renderer. `apply/backend/mod.rs:751` takes `spec: &SqliteRebuildSpec`. **The would-be CONTRACT crate carries SQLite types.** |
+| **there are FIVE per-dialect stacks, not one** | `DmlRenderer` (26 methods), `DdlEmitter` (6, inside `declarative.rs`), `schema::query::SchemaRenderer` (10), `MigrationBackend` (41), `CrossDeployObligations` (8). Only the first is guarded by the one-dialect test. |
+| **`render/backends/` contains ZERO DDL** | `grep -c 'CREATE TABLE\|ALTER TABLE\|ADD COLUMN\|CREATE INDEX'` returns 0 in all four files. The DDL half of step 3 has no destination module today. |
+| **the fold reads SQLite DDL text** | `render/fold.rs` calls `declarative::sqlite_create_is_without_rowid` / `sqlite_inline_primary_key_is_desc` at five sites (988, 989, 1091, 3472, 3473). This proposal places the fold in core with "NO dialect knowledge". |
+| **line 1 exists only for PostgreSQL** | `guard_for` maps BOTH `Sqlite` and `Mysql` to `SqliteDescriptorGuard`, whose `check` returns the EMPTY outcome by design — those engines are descriptor-only and their whole enforcement is line 2. The architecture diagram's uniform per-backend shape does not hold for the guard. |
 
 There is one existing asset worth keeping: 99 `cfg(pg_seam)` gates already
 establish compile-time seam gating as a pattern in this codebase. This proposal
@@ -412,13 +425,70 @@ valuable and leaves the tree green.
    The existing enums become thin wrappers, so nothing breaks yet. Delete
    `DialectSet(u8)`'s cap. Promote `Capability`.
 3. **Move spelling into per-backend modules, inside the current crate.**
-   A directory move, not a crate boundary. This is the roughly 280 dialect
-   decision points in `render/` and the bulk of the work.
+   A directory move, not a crate boundary. **Move by MODULE, not by trait, into
+   `render/backends/<vendor>/` DIRECTORIES** — see the correction below.
 4. **Extract the crates.**
-   Mechanical once step 3 is done, because the coupling is already gone.
+   **NOT mechanical. Six prerequisites, listed below.**
 
 Doing 4 before 3 is the trap: crates that still reach into core for their own
-SQL are worse than one crate.
+SQL are worse than one crate. **Measured, that trap is worse than stated: an
+extraction can compile happily around vendor code that stayed in core, so
+extraction-first ships a FALSE GREEN rather than an obvious failure.**
+
+### CORRECTION: "roughly 280 dialect decision points" does not measure spelling
+
+That number counts how often code **names a vendor**. It is dominated by
+provenance (a `dialect:` field in an error), own-dialect arguments to core
+helpers, and capability self-queries. **It is not a measure of how much SQL
+spelling there is, and sequencing by it is wrong.** Measured per file:
+
+- `renderer.rs`: **0 of 42** production literals were spelling. 18 own-dialect
+  helper arguments, 14 provenance, 7 capability self-tautologies, 3 registry.
+  That file was a DESTINATION, not work.
+- `dml.rs`: **36 of 53** code literals WERE spelling (68%). Of 221 raw matches,
+  168 were in the test module.
+- `declarative.rs`: 96 executable literals, but the vendor knowledge lives in
+  **71 vendor-NAMED FUNCTIONS**, which a literal census cannot see at all.
+
+**Census each file before moving it.** A refutation of one file is not a
+refutation of the file set, and the headline number answers neither question.
+
+### CORRECTION: step 4's premise is false today
+
+*"Mechanical once step 3 is done, because the coupling is already gone"* was
+tested by extracting `zero-migrate-sqlite` (12,187 lines moved; both crates
+compiled) and then running, from inside the extracted crate:
+
+```text
+test extracted_sqlite_trigger_render_reaches_the_postgres_renderer ... ok
+```
+
+with the extracted crate's trigger output containing `<<PG_RENDERER_WAS_HERE>>`.
+**If `-postgres` were a crate, `-sqlite` would need it at runtime to quote a
+trigger identifier.**
+
+Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
+
+1. Finish step 3's DDL half. Extraction CANNOT REVEAL this coupling — the spike's
+   crate left 47 SQLite-named items in core, including a 155-line `SqliteEmitter`
+   and a 128-line `SqliteSchemaRenderer`. A `zero-migrate-sqlite` that does not
+   contain SQLite.
+2. Stop `render_sqlite_trigger_op` resolving to the PostgreSQL renderer (6 sites,
+   1 function). Cheapest item, and the one that makes the premise false.
+3. Fold or explicitly separate `schema::query::SchemaRenderer`. It is LIVE —
+   5,555 calls in one SQLite run, reached from the apply backends, every
+   live-database binary and the real CLI — and it is a fully public path, so
+   deleting it is a semver break.
+4. Invert the ~55 core sites that look a vendor up by dialect.
+5. De-vendor the plan vocabulary and the `MigrationBackend` signatures.
+6. Resolve `quote_ident_if_needed`, whose bare-vs-quoted decision is gated on
+   the PostgreSQL reserved-keyword list and is consumed by the SQLite drift
+   comparator.
+
+**One guard extraction silently kills:** `backend_modules_name_one_dialect.rs`
+reads the backend modules via `include_str!` at paths extraction deletes. It must
+be repointed across the crate boundary, never removed — deleting it retires the
+one-dialect rule at the exact moment the crate split makes it matter most.
 
 Step 3 shares a dependency with `single-fold-and-effects.md`. Both need dialect
 knowledge to stop being smeared. Sequence them together or the same code is
