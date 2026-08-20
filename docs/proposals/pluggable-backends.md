@@ -84,7 +84,7 @@ so the record shows what moved rather than quietly rewriting itself.
 | **the "neutral" plan vocabulary carries vendor names** | `render/step.rs:51,53` — `RenameStep::PgExpandContract` and `RenameStep::SqliteRebuild`, matched at 203/204/234, with `step.rs:8` importing `SqliteRebuild` from the declarative renderer. `apply/backend/mod.rs:751` takes `spec: &SqliteRebuildSpec`. **The would-be CONTRACT crate carries SQLite types.** |
 | **there are FIVE per-dialect stacks, not one** | `DmlRenderer` (26 methods), `DdlEmitter` (6, inside `declarative.rs`), `schema::query::SchemaRenderer` (10), `MigrationBackend` (41), `CrossDeployObligations` (8). Only the first is guarded by the one-dialect test. |
 | **`render/backends/` contains ZERO DDL** | `grep -c 'CREATE TABLE\|ALTER TABLE\|ADD COLUMN\|CREATE INDEX'` returns 0 in all four files. The DDL half of step 3 has no destination module today. |
-| **the fold reads SQLite DDL text** | `render/fold.rs` calls `declarative::sqlite_create_is_without_rowid` / `sqlite_inline_primary_key_is_desc` at five sites (988, 989, 1091, 3472, 3473). This proposal places the fold in core with "NO dialect knowledge". |
+| **the fold is dialect-aware throughout, not at five SQLite sites** | This proposal places the fold in core with "NO dialect knowledge". That is categorically false, not five sites off. `render/fold.rs` **production** code (lines 1-5798) carries **27 `SqlDialect::` occurrences over 26 lines** — 12 `Postgres`, 8 `Sqlite`, 7 `Mysql` — and **7 vendor-named production functions**: `reusable_postgres_primary_index` (919), `sqlite_integer_storage_for_rowid` (958), `sqlite_folded_rowid_generation` (969), `restamp_mysql_physical_types` (3403), `renders_the_same_mysql_type` (3442), `apply_fold_sqlite_rowid_metadata` (3448), `pg_type_data_type` (3983). It also calls per-vendor `declarative::` helpers for **all three** vendors: `sqlite_create_is_without_rowid` ×3 (988, 1091, 3472), `sqlite_inline_primary_key_is_desc` ×2 (989, 3473), and `stamp_mysql_physical_type` ×2 — so the earlier "reads SQLite DDL text" heading named the wrong scope as well as the wrong size. **Two measurement traps here, both of which produced wrong numbers first.** (1) A raw grep reports **59** occurrences / **54** lines; 32 of those occurrences are in the test module and are not refactor work — occurrences and lines are different numbers and were once conflated. (2) The first `#[cfg(test)]` in the file is at **line 93, sitting on a `use`**, not on the test module, which starts at **5799**. Truncating the file at the first `#[cfg(test)]` measures 92 lines and reports ZERO vendor-named functions. |
 | **line 1 exists only for PostgreSQL** | `guard_for` maps BOTH `Sqlite` and `Mysql` to `SqliteDescriptorGuard`, whose `check` returns the EMPTY outcome by design — those engines are descriptor-only and their whole enforcement is line 2. The architecture diagram's uniform per-backend shape does not hold for the guard. |
 
 There is one existing asset worth keeping: 99 `cfg(pg_seam)` gates already
@@ -452,6 +452,51 @@ spelling there is, and sequencing by it is wrong.** Measured per file:
 
 **Census each file before moving it.** A refutation of one file is not a
 refutation of the file set, and the headline number answers neither question.
+
+#### Whole-file census, measured at `7ca23cdc`
+
+Production means "outside every `#[cfg(test)] mod`". Every row was checked two
+ways: production + test must equal a raw `grep -o 'SqlDialect::' | wc -l`, and no
+`#[test]` attribute may fall outside a detected test module.
+
+| file | lines | **production** | of which PG / SQLite / MySQL | test-module |
+|---|---|---|---|---|
+| `render/lower.rs` | 16,996 | **111** (107 lines) | 40 / 32 / 39 | 156 |
+| `render/declarative.rs` | 11,773 | **103** (101 lines) | 32 / 35 / 36 | 35 |
+| `render/fold.rs` | 10,099 | **27** (26 lines) | 12 / 8 / 7 | 32 |
+| `schema/query.rs` | 6,112 | **25** (22 lines) | 8 / 8 / 9 | 60 |
+| `render/dml.rs` (step 3 DONE) | 4,620 | **23** (23 lines) | 7 / 6 / 10 | 176 |
+
+Two things fall out of this that change sequencing. **The test modules hold most
+of the raw matches** — `dml.rs` is 176 of 199 and `query.rs` 60 of 85 — so any
+census that greps a whole file overstates the work by multiples. And **density,
+not file size, is what matters**: `lower.rs` is 44% larger than `declarative.rs`
+and carries only 8 more production literals, so `declarative.rs` is the denser
+target despite being the smaller file.
+
+#### The census instrument failed twice before it was believed, both times silently
+
+Recorded because the failures are re-runnable by anyone who tries this again with
+the obvious method, and both moved the number without emitting any error.
+
+1. **"Production is everything before the first `#[cfg(test)]`" is wrong.** In
+   `fold.rs` the first one is at line **93, sitting on a `use`**; truncating there
+   measures 92 of 10,099 lines and reports ZERO vendor-named functions. In
+   `declarative.rs` there are **eleven** such attributes — ten scattered test
+   modules from 1971 to 11486 **and one on a function** (`fk_definition_pg`, 5292).
+   Test code is interleaved with production code; there is no single boundary.
+2. **Brace-depth counting is wrong**, because a per-line regex cannot lex Rust's
+   multi-line raw strings (`r#"...{...}..."#`). The depth desynchronised and closed
+   `lower.rs`'s test module 3,400 lines early, handing **62 of its 98 `#[test]`
+   functions to the production count** — inflating `lower.rs` from 111 to 189. A
+   patch to strip raw strings then made `query.rs` worse (105 stranded).
+
+What works is closing a block by **indentation** — under `rustfmt` a block opened
+at indent N closes at a line of exactly N spaces then `}` — which is safe here
+only because `cargo fmt --all -- --check` is already a gate. The check that made
+both failures visible is the cheap one: **assert no `#[test]` attribute lands
+outside a detected test module.** Neither failure was found by inspection; both
+were found by that assertion, and the first count in each case looked plausible.
 
 ### CORRECTION: step 4's premise is false today
 
