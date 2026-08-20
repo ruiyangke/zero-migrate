@@ -586,12 +586,28 @@ Nothing here waits on `DialectId` or on crate extraction.
    and CI carries the MySQL service. The oracle has all three legs, so the largest
    measured asymmetry in the tree is closed.
 
-**Steps 1, 2 and 3 are complete. 4, 5 and 6 are open** — measured: no outcome
-ledger exists anywhere in `crates/`, and CI has no differential job. Step 7 is
-deferred by design (see step 2).
-4. **Layer 1, outcome ledger, three backends.** Expected first result is known
-   from F877: roughly 67/80 PG, 23/43 SQLite, 16/36 MySQL reaching `Applied`.
-   Anything better than that means the instrument is wrong.
+**Steps 1, 2, 3 and 4 are complete. 5 and 6 are open**, measured by artifact
+rather than by phrase: `row_order` and `op_refused` have zero occurrences in
+`crates/`, and CI has no differential job. Step 7 is deferred by design (see
+step 2).
+
+An earlier revision of this line said 4 was open too. It was not — that came from
+grepping "outcome ledger", which is this document's name for the thing and not
+the code's.
+4. ~~**Layer 1, outcome ledger, three backends.**~~ **DONE**, on all three, in
+   `tests/dialect_matrix/dialect_conformance_live.rs` (2,131 lines). It carries the
+   five-outcome vocabulary, the disposition→required-outcome rule, `pg_verdict` /
+   `mysql_verdict` / `sqlite_verdict`, and one live entry point per dialect
+   (`every_{postgres,mysql,sqlite}_row_of_the_dialect_table_answers_to_a_live_*`).
+   The exception file exists too — `tests/dialect_conformance/expectations.rs`
+   `ALLOWANCES` — and a `ServerError` allowance fails the BUILD by const-eval
+   rather than being silently tolerated.
+
+   **Beware searching for this by the name used above.** The code calls it a
+   `Verdict`, not an "outcome ledger", so a grep for the proposal's phrase returns
+   zero and reads exactly like "not built". That mistake was made here and it is
+   the same shape as counting a symbol's mentions instead of its calls: **search
+   for the artifact, not for the prose that describes it.**
 5. **Layer 2, seeded with two defects.** `row_order` for the collation defect
    (including the live MySQL leg that has never existed) and `op_refused` for the
    destructive-ops parity defect. Two observations, two controls, one exception
