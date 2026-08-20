@@ -551,11 +551,30 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
 1. Finish step 3's DDL half. Extraction CANNOT REVEAL this coupling — the spike's
    crate left 47 SQLite-named items in core, including a 155-line `SqliteEmitter`
    and a 128-line `SqliteSchemaRenderer`. A `zero-migrate-sqlite` that does not
-   contain SQLite. **NOW SIZED** (see the DDL census above): 103 production
-   emission sites in core, 57 of them in `declarative.rs`, and the destination is
-   not a void — `render/backends/` already owns view and trigger DDL, and a
-   private six-method `DdlEmitter` with three vendor impls already exists inside
-   `declarative.rs`.
+   contain SQLite. **NOW SIZED, AND IT IS NOT "MOVE THREE IMPLS".** 103 production
+   emission sites in core, 57 in `declarative.rs`. Of those 57, measured against
+   real block boundaries (`^impl` to the next column-0 `}`):
+
+   | block | sites |
+   |---|---|
+   | `impl DeclarativeAuthor` (5991-9463) | **33** |
+   | `impl DdlEmitter for PgEmitter` (9551-9676) | 8 |
+   | `impl DdlEmitter for SqliteEmitter` (9774-9906) | 8 |
+   | `impl DdlEmitter for MysqlEmitter` (9918-10004) | 7 |
+   | elsewhere | 1 |
+
+   **The contract carries 23 of 57 — about 40% of its own module's DDL.**
+   `DeclarativeAuthor` emits the other 33 through three parallel surfaces that
+   never reach `DdlEmitter` at all: twelve `render_*` methods (create-table per
+   dialect, FKs, column type/nullability/default, the four partition ops), five
+   `lower_*` methods (create-table, add/drop constraint, drop FK, validate
+   constraint), and the SQLite rebuild builders. That is category (iii) UNROUTED
+   EMISSION at scale.
+
+   So the real prerequisite is a CONTRACT-DESIGN question, not a move: the trait
+   has six methods and no `CREATE TABLE`, while the bypassing surfaces cover
+   create-table, partitions, constraints, FKs, defaults and nullability. Those 33
+   need somewhere to go before anything can be relocated.
 2. ~~Stop `render_sqlite_trigger_op` resolving to the PostgreSQL renderer (6 sites,
    1 function).~~ **DONE.** Those six now say
    `quote_bare_ident_for_dialect(.., SQLITE_TRIGGER_DIALECT)` (20 uses of the const
