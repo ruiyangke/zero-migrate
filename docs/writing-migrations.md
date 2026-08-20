@@ -747,7 +747,7 @@ storage parameters, operator classes, collations, `only`, and
 
 Current unsupported index options:
 
-- Do not select `hash`, `spgist`, or `fts5` through this API.
+- Do not select `hash` or `spgist` through this API.
 - Do not rely on per-element `nulls`.
 - Expression elements do not support per-element ordering, operator class,
   collation, or null ordering.
