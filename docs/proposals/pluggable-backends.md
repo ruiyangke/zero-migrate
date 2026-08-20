@@ -212,6 +212,18 @@ generalizes that pattern rather than introducing a new one.
 
 ## `DialectId`
 
+> **STATUS: SHIPPED.** Measured at `6ef41290`. This whole section reads as future
+> tense for code that already exists, in `851066d9`, `1b19e647` and `0417c340`.
+> `DialectId` is at `zero-migrate-ir/src/dialect.rs:89` with exactly the shape below,
+> plus `is_well_formed()` — which this section's own validity rule requires and the
+> code block omits. `BackendDescriptor` is at `backend.rs:224` with exactly the four
+> proposed fields. `Capability` is promoted, same 25 predicates, with a re-export
+> shim at `render/renderer.rs:62` so in-crate uses needed no edit.
+>
+> **What actually remains of step 2 is ~40 sites, not the 108 the match census
+> suggests** — see the correction at the end of this section. The 108 is step 3 and
+> step 4's size, not step 2's.
+
 `DialectId` is an opaque, cheaply copyable identity with a stable string name.
 It is NOT an enum, and core code cannot exhaustively match it.
 
@@ -279,10 +291,91 @@ So the id carries a validity rule, enforced at registration rather than trusted:
 The registry check is cheap and runs once. Skipping it trades a compile-time
 guarantee for nothing.
 
+### SHIPPED — two of the three clauses. The third is not missing, it is NOT YET EXPRESSIBLE.
+
+`BackendRegistry` exists (`zero-migrate-ir/src/backend.rs:407`), built fallibly with
+**no `insert`** — deliberately, because a registry that could grow after validation
+would let a duplicate in behind the check. `RegistryError` carries both demanded
+arms: `MalformedId` (enforcing `[a-z][a-z0-9_]*` via `DialectId::is_well_formed`) and
+`DuplicateId`, which **names both registrants** rather than last-one-wins.
+`zero-migrate-ir/tests/backend_registry.rs` proves it with a nine-backend registry, a
+duplicate refusal, a malformed-id refusal, a prefix-collision over-refusal control,
+and a positive control that the shipping registry builds.
+
+**The third clause — "the conformance suite asserts that a backend's declared id
+matches the id its dialect-table rows are filed under" — has no target.**
+`model/dialect_table.rs` files rows as three STRUCT FIELDS (`postgres`, `sqlite`,
+`mysql` on `DispositionRow`), dispatched by a closed `Dialect` match. There is no
+id-keyed row to compare a declared id against. Both in-crate facades
+(`render/backends/mod.rs:205`, `schema/backends/mod.rs:114`) dispatch on `SqlDialect`,
+not `DialectId`, so neither can host the assertion until the table is re-keyed. That
+is step-3 work, and this document should stop presenting all three clauses as one
+deliverable.
+
+### TWO LIVE ALIAS HAZARDS THE RULE ALREADY FORBIDS
+
+**1. Two wire-spelling parsers in one crate, and only one goes through the registry.**
+`zero-migrate-node/src/verbs.rs:59` resolves via `BackendRegistry::shipping()`.
+`zero-migrate-node/src/api.rs:56 parse_dialect` matches **hardcoded string literals**
+`"postgres" | "sqlite" | "mysql"`. That is exactly the `"postgresql"`-vs-`"postgres"`
+divergence this section exists to prevent, sitting unenforced about 500 lines from
+the parser that does it correctly. Routing it through the registry is one function.
+
+**2. `pg` → `postgres` is a live alias in the generated pipeline.**
+`packages/zero-migrate/scripts/gen-dialect-table.mjs` reads sidecar keys
+`pg`/`sqlite`/`mysql` and emits Rust fields `postgres`/`sqlite`/`mysql`. The rule above
+says "no aliases and no display names"; the generator has one.
+
 The four existing enums are removed in this order: `DialectScope` and
 `ApplyDialect` are internal and go first; `Dialect` in `ir/validate.rs` folds
 into `SqlDialect`; `SqlDialect` becomes a deprecated alias for `DialectId`
 constants during migration and is deleted last.
+
+### CORRECTION, measured at `6ef41290`: this ordering is stale on every clause.
+
+**Neither `DialectScope` nor `ApplyDialect` was removed. Both were RESHAPED to carry
+a `DialectId`, and both are finished.** `DialectScope::PgOnly` became
+`Only(DialectId)` (`step.rs:19`), keeping `pg_only()` as a constructor; its one
+exhaustive match is over `Portable`/`Only`, which is not a vendor axis and never
+needs to change. `ApplyDialect` now carries a `DialectId` per variant and its
+`parse` resolves the wire spelling **through `BackendRegistry::shipping()`**. Its
+own doc records that the variants stay deliberately, because `bridge.rs` selects a
+concrete backend TYPE per arm and that dispatch must remain exhaustive until backend
+crates exist.
+
+Neither is "internal" either: `DialectScope` is re-exported at
+`zero-migrate/src/lib.rs:367` and `ApplyDialect` at `zero-migrate-node/src/lib.rs:60`.
+
+**The deprecated-alias step is UNNECESSARY and should not be done.** 0.1.0 was never
+published, so there is no semver obligation to alias through — and the tree has
+already chosen a better mechanism. `SqlDialect::id()` and `Dialect::id()` are `const`
+and documented as **one-way ON PURPOSE**: *"an id does NOT convert back to a variant,
+because that direction is exactly what a fourth backend cannot satisfy."* That is why
+adding `DialectId` broke nothing. A `#[deprecated]` alias would add ~797 warning sites
+and buy nothing; `SqlDialect` instead shrinks to a dispatch key and is deleted when
+the last exhaustive match moves into a backend module.
+
+**So the only live item in this sequence is `Dialect` → `SqlDialect`, and it is the
+highest-leverage move left.** Measured: 8 of the 72 production `SqlDialect` exhaustive
+matches are pure `SqlDialect` → `validate::Dialect` transliteration with identical
+three-arm bodies (`lower.rs` 877, 950, 3336, 3385, 3842, 6768, 9503 and
+`sql_preview.rs:412`). Folding deletes those 8 outright plus `Dialect`'s own 31, a net
+**−39 production exhaustive matches** for a mechanical rename. Both enums are already
+`{Postgres, Sqlite, Mysql}` with identical `.id()` bridges, and `Dialect::as_str()` is
+already *defined as* `self.id().as_str()`.
+
+### The 108 is not step 2's size
+
+Vendor-keyed exhaustive matches, production: `SqlDialect` 72, `Dialect` 31,
+`ApplyDialect` 5 — **108**, plus **156 boolean dialect gates**
+(`matches!(.., SqlDialect::X)`, `== SqlDialect::X`). Every one stops compiling the
+moment a fourth backend exists, because `DialectId` cannot be exhaustively matched.
+
+**But that is step 3 and step 4's size, not step 2's.** Those sites are dialect
+SPELLING and GATING, which this document already assigns to per-backend modules.
+What remains of step 2 proper is roughly 40 sites: the `Dialect` fold, deleting
+`DialectSet::contains(Dialect)` (**zero callers** — the last closed-enum tie on the
+type, free to remove), and routing one parser through the registry (below).
 
 ## `BackendDescriptor` and capability
 
