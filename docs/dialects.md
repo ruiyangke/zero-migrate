@@ -296,7 +296,7 @@ respectively.
 
 Use `btree` for portable migrations. Through the current API:
 
-- `hash`, `spgist`, and `fts5` are unsupported.
+- `hash` and `spgist` are unsupported.
 - Per-element `nulls` is unsupported.
 - Expression elements cannot carry their own order, operator class, collation,
   or null ordering.
@@ -304,6 +304,55 @@ Use `btree` for portable migrations. Through the current API:
 
 PostgreSQL vector index methods require the matching database extension and
 operator setup. Provision those prerequisites before apply.
+
+### Full-text search was removed, and existing databases are refused, not altered
+
+Full-text search is no longer a built-in. The `fts5` index method and the
+`t.string().fts()` column facet are both gone: the engine authors no full-text DDL
+on any target. It is intended to return as something composed from primitives
+rather than a builtin — see [the design record](proposals/fts-macro.md).
+
+**If your SQLite database already contains an FTS5 index, apply will now refuse
+rather than proceed.** Removing the feature did not remove the data. A database
+built by an earlier version — or by a data-plane runtime that manages its own
+indexes — still holds a `<collection>__fts` virtual table and the four shadow
+tables SQLite creates beside it. The engine no longer recognises those as anything
+it declared, so they read as undeclared tables.
+
+The engine will not drop them. A `DROP TABLE` on an FTS5 virtual table cascades its
+shadow tables away and destroys the index, so any plan that would drop a **virtual
+table** is refused outright, naming the table and its module:
+
+```
+refusing to drop live table 'posts__fts': it is a VIRTUAL TABLE (module 'fts5'),
+not an ordinary table. Dropping it would cascade away the module's backing shadow
+tables and destroy the index they hold.
+```
+
+This is fail-closed on purpose: a refused migration is recoverable, a dropped
+search index generally is not. The refusal covers every virtual-table module, not
+just `fts5`.
+
+**What to do.** Decide deliberately, outside the schema diff:
+
+- **Keep the index** — leave the objects in place and let whichever component
+  created them continue to own them. The engine's own migrations are blocked while
+  the vtable is undeclared, so this is only viable if that component also owns the
+  schema.
+- **Remove the index** — drop the virtual table yourself, with the component that
+  created it. Drop the `<collection>__fts_ai` / `_ad` / `_au` triggers first, then
+  the vtable; do **not** touch the `_data` / `_idx` / `_docsize` / `_config` shadow
+  tables, which go with it. Once the vtable is gone, migrations proceed normally.
+
+Ordinary writes to the base table keep working either way, including while the FTS
+triggers are still attached.
+
+PostgreSQL databases carry a generated `__fts` tsvector column and a
+`<collection>__fts_idx` GIN index instead. Those are ordinary columns and indexes,
+not virtual tables, so they are not covered by the refusal above — they will read
+as undeclared and be handled by the normal drop path once no descriptor declares
+them. Review a plan against a PostgreSQL database that used full-text search before
+approving it.
 
 The last row is the one index nobody writes: `t.vector` and `t.geoPoint` each
 derive one, to model what the PostgreSQL data plane creates. It is emitted only

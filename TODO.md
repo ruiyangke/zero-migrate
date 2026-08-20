@@ -43,8 +43,9 @@ Working notes; not staged.
   NOT closed by this: an explicit prefix length is still unauthorable
   (`IndexElement::Column` has no prefix field), and a MySQL `FULLTEXT` key - the
   one kind that takes a TEXT column whole - is still unreachable, because
-  `IndexMethod::Fts5` classifies as a PostgreSQL-only feature and is refused on
-  MySQL upstream of both gates.
+  `IndexMethod` carries no full-text member at all since full-text support was
+  removed. Reaching `FULLTEXT` now means adding a MySQL-native method, not
+  un-refusing an existing one.
 - [ ] Case-collation parity: `caseSensitive` should pin an explicit collation on
   MySQL (default is case-insensitive there; `caseSensitive: true` is currently
   ignored), so string equality/uniqueness matches Postgres/SQLite.
