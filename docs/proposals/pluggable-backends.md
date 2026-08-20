@@ -605,6 +605,50 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
    (`CREATE TABLE` landed). **So prerequisite 1 is roughly a third the size this
    document claimed, and "contract-design question" is true of only 12 of the 33.**
 
+   #### RE-MEASURED at `06b5aea8`: the contract work is DONE, and the census SCOPE is wrong
+
+   Class-by-class at HEAD, using this document's own verb-anchored instrument:
+
+   ```
+     A. already covered        0   CONFIRMED done
+     B. genuine three-way      0   NOT 12, NOT the corrected 9
+     C. one helper             3   consolidated, CONFIRMED
+     D. PostgreSQL-only       10   six of them are the out-of-scope partitions
+     E. SQLite rebuild         2
+     FK                        6   a DECISION, not a refactor
+   ```
+
+   **Class B is ZERO.** Four sites still carry a three-arm `match self.dialect`
+   (`declarative.rs` 8339, 8572, 9169, 9192) and **none has three REACHABLE arms**:
+   `SQLITE_CAPABILITIES` grants neither `AlterTableAddConstraint` nor
+   `AlterTableDropConstraint`, so the SQLite arm is unreachable in every one. Three
+   arms is not three dialects — the same reachability error this document already
+   corrected once, still present in the corrected number.
+
+   Class C also collapsed one site more than recorded: `alter_column_default_stmt`
+   (`declarative.rs:8514`), which is not mentioned anywhere above.
+
+   **But the census SCOPE is the real problem, and it under-counts by roughly 1,100
+   lines.** Prerequisite 1 scopes itself to `render/declarative.rs`. Two vendor
+   bodies live in core outside that file:
+
+   - **`render/vendor.rs` — 814 lines, 26 verb-anchored DDL sites, 100% PostgreSQL,
+     and ZERO `SqlDialect::` literals.** It is PostgreSQL by construction rather than
+     by gate, so every dialect-match census is blind to it by design.
+   - **`render/lower.rs:9681-9977` — ~297 lines of SQLite trigger spelling.**
+
+   The second is not a new discovery; **the codebase already recorded it**.
+   `render/backends/sqlite.rs:262-267` says so directly: the SQLite trigger spelling
+   "still lives in `render::lower::render_sqlite_trigger_op` … This delegation is a
+   POINTER to work that `lower.rs`'s own step-3 pass has to finish, not a boundary
+   that is done." The same note puts PostgreSQL in the same position via
+   `render::vendor`, and observes that only MySQL's trigger spelling actually lives
+   in its backend module.
+
+   That is the third time in this project a conclusion was already written down in a
+   comment near the code before anyone measured it. Grep the tree's own confessions
+   before trusting a census.
+
    #### CORRECTION: Class B was 12 by a REACHABILITY assumption, and it is 9
 
    The class table above was built by reading each site's `match self.dialect` and
@@ -673,6 +717,40 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
       breaking every `zero_migrate::render::…` path that names them, or leaves a
       SQLite-shaped type in core's public API permanently.
 
+      **RESOLVED, and TWO of this paragraph's claims were FALSE.**
+
+      "The ONLY vendor-named public items under `render/`" is wrong by a wide
+      margin: there are **29**, of which this names 5. The rest are 15 variants
+      across three `pub` error enums and 9 `pub` vendor-named functions, two of them
+      (`sqlite_canonical_type`, `dsl_to_pg_data_type`) re-exported at the CRATE ROOT.
+      And `render/` is not even the worst site — `apply/` carries 11 vendor-named
+      public types against `render/`'s 3. `plan/` is genuinely clean.
+
+      "Breaking every `zero_migrate::render::…` path" was also the wrong worry.
+      0.1.0 was never published; the entire external cost is the in-repo
+      `zero-migrate-node` crate, which uses 6 `zero_migrate::render::` paths total
+      and names none of these types.
+
+      So the renames landed in one sweep at `9496fd2b`: `ExpandContract`,
+      `TableRebuild`, `TableRebuildSpec`. **`SqliteSequencePolicy` KEEPS its vendor
+      name** — measured, `TableRebuildSpec` is 9 fields of which 8 are ordinary
+      rebuild vocabulary and exactly one, `sequence_policy`, genuinely models
+      `sqlite_sequence` and the `AUTOINCREMENT` high-water mark. Renaming that one
+      would be dishonest in the opposite direction.
+
+      Two items deliberately survive and should not be "finished" by a later pass:
+      `ops::status::PlanStatusStepKind::SqliteRebuild` and its operator-facing wire
+      string `"sqliteRebuild"`. That is a third, distinct type — a journal-visible
+      status kind — and bundling a wire-format change into a Rust rename would hide
+      it. The string has zero consumers in `packages/`, so renaming it later stays
+      free.
+
+      **The general lesson this entry paid for:** the difficulty here rested entirely
+      on a semver cost nobody was paying. A whole measurement pass proved the break
+      was real, and every technical claim in it held up under an external-crate
+      compile check — it was simply irrelevant. A cost that EXISTS and a cost that is
+      PAID are different questions, and the second is cheaper to ask first.
+
    Both are cheap to move and expensive to move twice, so decide before moving.
 2. ~~Stop `render_sqlite_trigger_op` resolving to the PostgreSQL renderer (6 sites,
    1 function).~~ **DONE.** Those six now say
@@ -688,6 +766,20 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
    5,555 calls in one SQLite run, reached from the apply backends, every
    live-database binary and the real CLI — and it is a fully public path, so
    deleting it is a semver break.
+
+   **CORRECTION at `06b5aea8`: the QUESTION IS ANSWERED and the SEMVER DIFFICULTY IS
+   MOOT.** The fold was considered and explicitly REJECTED, with the reason recorded
+   in `schema/backends/mod.rs:56-64`: `current_timestamp_expr` and `synth_now` cannot
+   merge because SQLite and MySQL agree while PostgreSQL does not (`NOW()` vs
+   `now()`). Lines 9-15 of that same file already map each module to its future
+   crate. So "fold or separate" resolved to SEPARATE, and the vendors are extracted
+   under the one-dialect rule with a test enforcing it.
+
+   And the semver clause no longer bites: 0.1.0 was never published, and
+   `SchemaRenderer` has **zero consumers outside `src/schema/`** — not even
+   `zero-migrate-node`. What actually remains is physical, not decisional: the trait
+   still lives at `schema/query.rs:117` inside a 5,972-line core file, and
+   `zero-migrate-backend` does not exist as a crate yet.
 4. **SPLIT — this is two steps, not one, and step 3 above is a prerequisite for
    half of it.** The 42 core lookups are 33 `DmlRenderer` and 9 `SchemaRenderer`,
    and only the first half is invertible today. (4a) Push `&dyn DmlRenderer` into
@@ -703,11 +795,80 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
    dispatch in `schema::backends` re-exported as `schema::query::renderer` so no call
    site moved. The ninth lookup was not inverted but DELETED: `existence_probe`'s only
    use of the registry was `canonical_type`, a drift comparator that belonged in core
-   all along, so that file now resolves no renderer at all. What remains for this half
-   is the inversion proper — pushing `&dyn SchemaRenderer` into the eight hosts that
-   already hold a dialect — which is now a same-shaped edit to (4a) rather than a
-   different problem.
+   all along, so that file now resolves no renderer at all.
+
+   **BOTH HALVES ARE NOW DONE. Measured at `06b5aea8`.**
+
+   **(4b) complete** at `664474db`, tripwired at `1b39c493`. The "inversion proper"
+   this paragraph used to list as remaining went 8 point-of-use lookups to **0**: six
+   private emitters now take `backend: &'static dyn SchemaRenderer` in PLACE OF
+   `dialect: SqlDialect`, and the two `pub` functions keep their `dialect` parameter
+   and become the BOUNDARY where a dialect resolves into a backend. No context struct
+   was needed — `SchemaRenderer` already answers `fn dialect()`, so the trait object
+   IS the carrier. Zero caller churn outside the file.
+
+   **(4a) complete** at `f1354ea7`: 33 lookups to **8**. Eleven private helpers in
+   `dml.rs` had `dialect: SqlDialect` REPLACED by `&dyn DmlRenderer` rather than
+   added alongside, so no function grew a parameter.
+
+   **But the 8 are not all boundaries, and one of them is an EXTRACTION BLOCKER.**
+   Measured: six are genuine `pub`/`pub(crate)` doors with real callers outside
+   `render/`; `lower::render_table_ref` and `value_format::default_matches_uuid` are
+   private leaves in their own files; `dml::placeholder` is `pub` with **ZERO callers
+   anywhere**, i.e. dead public surface counted as a door. And
+   `dml::render_in_list_elem_portable` is not a boundary at all but a **vendor to core
+   to vendor CYCLE**: `backends/sqlite.rs:72` and `backends/mysql.rs:154` each pass
+   their own `DIALECT` into a core helper that then resolves a renderer back into
+   them. PostgreSQL is exempt — `backends/postgres.rs:94` uses a lookup-free
+   `render_in_list_elem_pg`. After extraction that cycle makes `zero-migrate-sqlite`
+   and `zero-migrate-mysql` depend on core resolving them.
+
+   **Why it survived: (4a) has no tripwire and (4b) does.** The schema side's
+   `schema_emitters_do_not_relookup_a_backend.rs` forbids exactly this shape and
+   caught the analogous problem; the DML side had no equivalent guard, so the cycle
+   went unnoticed through the very change that was counting these sites. A guard on
+   one side of a symmetric pair is a guard on neither.
 5. De-vendor the plan vocabulary and the `MigrationBackend` signatures.
+
+   **PLAN VOCABULARY DONE** at `9496fd2b` — see the Class E note above.
+
+   **THE SIGNATURES ARE ALREADY CLEAN, AND THAT IS THE FINDING.** Audited at
+   `06b5aea8`: all 42 `MigrationBackend` methods, plus the associated type and
+   supertraits — **zero vendor names** in any method name, parameter type or return
+   type. The literal task in this line was done before anyone looked.
+
+   **The leak is one level down, and it is the largest single item in this
+   prerequisite.** `ExecutorConfig::pg: PgConfinement` (`conn.rs:185`, type at
+   `conn.rs:37`) is reached by **27 of the 42 methods**, and the non-PostgreSQL
+   backends read it constantly: `cfg.pg.` occurs 44 times under
+   `apply/backend/mysql/` and 3 times under `apply/backend/sqlite/`. `meta_schema`,
+   the journal namespace, is used by all three engines — a shared concept wearing a
+   PostgreSQL hat, not the reverse.
+
+   The field's own doc already admits it ("SQLite ignores the role, schema, and
+   statement settings, but reuses `lock_timeout`"), and `conn.rs:423-433` wraps two
+   of its fields in neutrally-named accessors — someone felt the name was wrong and
+   papered over it rather than fixing it. **The test per field is whether a
+   non-PostgreSQL backend reads it**; genuinely PG-only settings should keep a
+   PostgreSQL name, because renaming those to sound neutral is the same error in the
+   other direction.
+
+   **The inverse defect, which is larger than the naming one and is a DECISION.**
+   The trait's names are clean but its semantics are not: six methods are
+   single-engine features on a three-engine trait, with two of three impls as
+   refusal stubs — `rebuild_one` ("Rebuilds exist ONLY on the SQLite dialect"),
+   `alter_column_type` ("Only MySQL needs this seam"), `baseline_one` (whose own doc
+   warns "a trait impl existing is not the feature working"), plus `record_squash`,
+   `synchronize_identity` and `alter_primary_key`. Whether a single-engine method
+   belongs on a shared trait or behind a capability is **the same open question as
+   the FK sites' `unreachable!()` decision above, one layer up.** Settle them
+   together or they will be answered inconsistently.
+
+   Two error variants are neutral concepts wearing vendor names and are worth their
+   own small change rather than being bundled here:
+   `BackfillError::SqliteBatchFailed` and `::SqlitePoisoned` (`capability.rs:103,
+   :111`). Note the irony: `online()` returns `None` for SQLite, so these
+   SQLite-named variants sit on the error type of a capability SQLite does not have.
 6. **RECLASSIFIED, and it will never be "resolved".** `quote_ident_if_needed`'s
    bare-vs-quoted decision is gated on the PostgreSQL reserved-keyword list and is
    consumed by the SQLite drift comparator. That is a **deliberate canonical
@@ -721,10 +882,62 @@ Ordered prerequisites before step 4 is a `git mv` plus a `Cargo.toml`:
    crates can reach. Deciding where that lives is step 4 work; changing the
    normal form is not.
 
+   **ANSWERED at `06b5aea8`, by dependency fact rather than by argument.** The
+   name-grep understates the readership, because the real consumer is one level in:
+   `pg_canonical_ident` itself has exactly ONE production call, but
+   `quote_ident_if_needed` has 13 across 5 modules, and `constraintdef_cols`
+   (`declarative.rs:341-346`) calls it on every column.
+
+   Following those to their post-extraction crates:
+
+   ```
+     apply/backend/sqlite/drift_sql.rs   -> zero-migrate-sqlite   DIRECT + transitive
+     apply/backend/mysql/drift_sql.rs    -> zero-migrate-mysql    transitive
+     render/{declarative,fold}.rs, apply/drift.rs, schema/query.rs -> core
+   ```
+
+   **Both non-PostgreSQL vendor crates read the PostgreSQL-shaped normal form.** So
+   it must live where all three vendor crates can reach it — core, or the contract
+   crate. Placing it in `zero-migrate-postgres` would make `-sqlite` and `-mysql`
+   depend on `-postgres` at runtime, which is the exact failure the trigger-path
+   spike already measured. No design work remains here, only placement.
+
 **One guard extraction silently kills:** `backend_modules_name_one_dialect.rs`
 reads the backend modules via `include_str!` at paths extraction deletes. It must
 be repointed across the crate boundary, never removed — deleting it retires the
 one-dialect rule at the exact moment the crate split makes it matter most.
+
+**CORRECTION, measured at `06b5aea8`: this names the WRONG guard. The one above
+fails LOUDLY; a different one fails silently.**
+
+`backend_modules_name_one_dialect.rs` resolves its six `include_str!` paths at
+COMPILE time. When `render/backends/postgres.rs` becomes
+`zero-migrate-postgres/src/render.rs`, the path dangles and the test binary fails to
+compile: `couldn't read ...: No such file or directory`. That is a hard error. The
+danger is real but one step further on — the cheap way to get the build green is to
+delete the test. A shim left at the old path does not produce a false green either,
+because the assertion is `carriers.len() == 1` and a re-export stub has zero
+carriers.
+
+**The genuinely silent kill is `sqlite_trigger_quoting_reaches_postgres.rs`.** It
+walks `PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")` at RUN time. After
+extraction, `zero-migrate/src` simply contains fewer files — the vendor render and
+schema modules and `apply/backend/{postgres,sqlite,mysql}/` have left. The walk
+still succeeds, finds zero pinned calls in a smaller tree, and PASSES. Its
+"and nowhere else in the crate acquired one" clause silently narrows from the whole
+system to core, with no red anywhere. **Any test that scans a directory rather than
+a named set has this property: extraction shrinks its universe and it reports
+success.** The extraction brief must repoint that walk to iterate the workspace's
+crates, not one manifest dir.
+
+**The repoint has a real tension, so decide it deliberately.** `include_str!` across
+a sibling directory preserves the compile-time rebuild dependency the guard's own
+header calls load-bearing ("editing any of the six rebuilds this binary") but
+hard-codes the layout. A runtime read keeps the layout flexible and LOSES that
+rebuild dependency, after which the count can drift out from under the pin.
+INFERRED, not measured: the durable form is one `tests/one_dialect.rs` per vendor
+crate reading `../src/...` with `include_str!`, plus a workspace-level test
+asserting all three exist — so neither property is traded away.
 
 Step 3 shares a dependency with `single-fold-and-effects.md`. Both need dialect
 knowledge to stop being smeared. Sequence them together or the same code is
